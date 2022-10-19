@@ -62,7 +62,7 @@
   ],
   "dependencies": {
     "@fabric/core": "FabricLabs/fabric#feature/encryption",
-    "@fabric/http": "file:.yalc/@fabric/http",
+    "@fabric/http": "FabricLabs/fabric-http#feature/compiler",
     "@fabric/react": "FabricLabs/fabric-react#feature/node-16",
     "@reduxjs/toolkit": "^1.8.2",
     "@types/chrome": "0.0.190",
