@@ -1,5 +1,5 @@
 export interface PasswordType {
-    oldPass: string,
-    password: string,
-    confPass: string
+  oldPass: string,
+  password: string,
+  confPass: string
 }

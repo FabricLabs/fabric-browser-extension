@@ -1,54 +1,22 @@
 {
   "compilerOptions": {
-    "target": "ES5",
-    "module": "ES6",
-    "lib": [
-      "DOM",
-      "es6"
-    ],
-    "baseUrl": "./",
-    "paths": {
-      "@/*": ["src/*"],
-      "@utils/*": ["utils/*"]
-    },
-    // "allowJs": true,
-    // "checkJs": true,
-    "jsx": "react",
-    // "declaration": true,
-    "sourceMap": true,
-    "outDir": "./assets",
-    // "rootDir": "./src",
-    "removeComments": true,
-    "noEmit": true,
-    "isolatedModules": true,
-    "strict": true,
-    // "noImplicitAny": true,
-    // "strictNullChecks": true,
-    // "strictFunctionTypes": true,
-    // "strictBindCallApply": true,
-    // "strictPropertyInitialization": true,
-    "noImplicitThis": true,
-    "alwaysStrict": false,
-    // "noUnusedLocals": true,
-    // "noUnusedParameters": true,
-    // "noImplicitReturns": true,
-    // "noFallthroughCasesInSwitch": true,
-    // "noUncheckedIndexedAccess": true,
-    "allowSyntheticDefaultImports": true,
+    "target": "es5",
+    "lib": ["dom", "dom.iterable", "esnext"],
+    "allowJs": true,
+    "skipLibCheck": true,
     "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "strict": true,
+    "forceConsistentCasingInFileNames": true,
+    "noFallthroughCasesInSwitch": true,
+    "module": "commonjs",
     "moduleResolution": "node",
     "resolveJsonModule": true,
-    // "allowUmdGlobalAccess": true,
-    "skipLibCheck": true,
-    "forceConsistentCasingInFileNames": true
+    "isolatedModules": true,
+    "noEmit": true,
+    "jsx": "react-jsx",
+    "downlevelIteration": true,
+    "types": ["mocha", "node"]
   },
-  "include": [
-    "src",
-    "utils"
-  ],
-  "exclude": [
-    "node_modules",
-    "assets",
-    "build"
-  ]
+  "include": ["src", "tests"]
 }

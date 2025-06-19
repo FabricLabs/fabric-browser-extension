@@ -1,6 +1,6 @@
 
 export interface IChainState {
-    identity: number,
-    chain: number,
-    state: boolean
+  identity: number,
+  chain: number,
+  state: boolean
 };

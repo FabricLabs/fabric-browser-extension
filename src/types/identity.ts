@@ -1,3 +1,5 @@
+'use strict';
+
 export type IHistory = string;
 
 export type IAddress = string | undefined;

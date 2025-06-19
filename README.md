@@ -8,7 +8,6 @@ Additional extension features and configurations can be accessed in the settings
 - Enable/Disable Chains for each identity
 - Create additional identites
 
-
 ## Quick Start
 0. `rm -rf node_modules package-lock.json` and `npm i`
 1a. `npm run dev` to compile a developer build, or alternatively 
@@ -58,12 +57,6 @@ Data stored in leveldb is encrypted with the subtleCrypto AES-GCM algorithm. Enc
 - Description : Decrypt data from string
 - Params
   - {String} data : Data to be decrypted
-
-## Storage
-Data is stored with leveldb and chrome.storage on the client side. Storage operations can be found in src/serviceworker/database.
-There are two sublevels of data stored: account and setting.
-- The Accounts Sublevel stores passwords, chain addresses, private keys, identities, and private extended keys.
-- The Settings Sublevel stores chains and enabled/disabled states.
 
 ### New Chain Integration
 Chain address derivation is set in src/config/chains.ts and generated in utils/seedPhrase.ts

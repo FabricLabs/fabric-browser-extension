@@ -6,7 +6,6 @@ node_modules
 .yalc
 
 # builds
-assets
 dist
 
 # misc
