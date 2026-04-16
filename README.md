@@ -6,16 +6,26 @@ Additional extension features and configurations can be accessed in the settings
 - Wallet password, also used to encrypt data before being stored
 - Import/Export seed phrases
 - Enable/Disable Chains for each identity
-- Create additional identites
+- Create additional identities
 
 ## Quick Start
-0. `rm -rf node_modules package-lock.json` and `npm i`
-1a. `npm run dev` to compile a developer build, or alternatively 
-1b. `npm run watch` to watch for file changes and automatically compile new developer builds
-1c. For production builds run `npm run build`
-2. Open chrome://extensions/ (or any other chromium-based browser)
-3. Click "Load unpacked" button and load `assets` folder of compiled build generated in step 1
-4. If an icon has been added to your taskbar, the exension has been loaded, extension is now ready.
+1. `npm i`
+2. `npm run build` (one-off compile) or `npm start` (webpack dev server for iteration)
+3. Open `chrome://extensions/` in Chromium
+4. Enable **Developer mode**, click **Load unpacked**, and select this repo’s **`assets/`** directory (webpack output)
+5. The extension should appear in the toolbar; pin it if you want quick access.
+
+## Local Extension Test Harness
+Use a minimal local server (backed by `@fabric/http`) that serves the **compiled `assets/` tree** (same files you load as unpacked in Chromium):
+
+1. In one terminal, start the harness (runs `npm run build`, then the server):
+   - `npm run serve:test`
+2. In Chromium, load unpacked extension from `assets/` (see Quick Start).
+3. **Popup UI in a normal tab** (no `chrome-extension://` URL): open `http://127.0.0.1:3003/popup.html` (or set `PORT` — e.g. `PORT=3044` matches `playwright.config.ts` / `npm run test:ui`). `IdentityManager` falls back when `chrome.storage` is missing so you can click through the UI; persistence only works inside the real extension popup.
+4. **Content script harness:** open `http://127.0.0.1:3003/test.html` on the same port as step 3.
+5. Validate on `test.html`:
+   - `window.fabricExtension`
+   - `window.fabricExtension.chrome.runtime.sendMessage({ type: 'FABRIC_ACTION' }, console.log)` → response includes `success: true` and `source: 'local-test-server'`.
 
 ## New Wallet Creation User Flow
 1. Upon clicking the extension icon for the first time, a new tab opens with onboarding modals showcasing extension features and options to import or create a new seed.
@@ -59,7 +69,7 @@ Data stored in leveldb is encrypted with the subtleCrypto AES-GCM algorithm. Enc
   - {String} data : Data to be decrypted
 
 ### New Chain Integration
-Chain address derivation is set in src/config/chains.ts and generated in utils/seedPhrase.ts
+Per-chain derivation and address formatting live in `src/UIElements/IdentityManager.tsx` (BIP32 / bech32 paths). Add shared config there or in a new `src/config/chains.ts` when you formalize multiple chains.
 
 ### Storage function descriptions
 

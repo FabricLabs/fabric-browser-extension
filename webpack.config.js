@@ -2,6 +2,7 @@
 
 const path = require('path');
 const webpack = require('webpack');
+const packageJson = require('./package.json');
 const MiniCssExtractPlugin = require('mini-css-extract-plugin');
 const HtmlWebpackPlugin = require('html-webpack-plugin');
 const CopyPlugin = require('copy-webpack-plugin');
@@ -14,11 +15,20 @@ module.exports = (env) => {
   return {
     mode: isProduction ? 'production' : 'development',
     entry: {
-      popup: './src/UIElements/popup/index.tsx'
+      popup: './src/UIElements/popup/index.tsx',
+      content: './src/content.ts',
+      background: './src/background/serviceWorkerMain.ts',
+      offscreen: './src/background/offscreenMain.ts'
     },
     output: {
       path: path.resolve(__dirname, 'assets'),
-      filename: 'js/[name].[contenthash].js',
+      filename: (pathData) => {
+        const n = pathData.chunk.name;
+        if (n === 'content') return 'js/[name].js';
+        if (n === 'background') return 'background/serviceWorker.js';
+        if (n === 'offscreen') return 'background/offscreen.js';
+        return 'js/[name].[contenthash].js';
+      },
       publicPath: '/'
     },
     optimization: {
@@ -38,7 +48,7 @@ module.exports = (env) => {
         })
       ],
       splitChunks: {
-        chunks: 'all',
+        chunks: (chunk) => chunk.name === 'popup',
         cacheGroups: {
           vendor: {
             test: /[\\/]node_modules[\\/]/,
@@ -60,7 +70,9 @@ module.exports = (env) => {
         util: require.resolve('util/')
       },
       alias: {
-        vm: 'vm-browserify'
+        vm: 'vm-browserify',
+        // Package exports only expose ./constants for `require`; map explicitly for webpack/browser.
+        '@fabric/core/constants': path.resolve(__dirname, 'node_modules/@fabric/core/constants.js')
       }
     },
     module: {
@@ -128,6 +140,13 @@ module.exports = (env) => {
       ],
     },
     plugins: [
+      new webpack.DefinePlugin({
+        __PASSPORT_EXTENSION_VERSION__: JSON.stringify(packageJson.version),
+        /** Dev/test hook: `FABRIC_ACTION` background fetch target (see tests). */
+        __FABRIC_ACTION_DEBUG_URL__: JSON.stringify(
+          process.env.FABRIC_ACTION_DEBUG_URL || 'http://localhost:3003/api/endpoint'
+        )
+      }),
       new webpack.ProvidePlugin({
         process: 'process/browser',
         Buffer: ['buffer', 'Buffer']
@@ -150,6 +169,18 @@ module.exports = (env) => {
           {
             from: 'assets/icons',
             to: 'icons'
+          },
+          {
+            from: 'src/background/offscreen.html',
+            to: 'background/offscreen.html'
+          },
+          {
+            from: 'src/test.html',
+            to: 'test.html'
+          },
+          {
+            from: 'src/hub-mesh-bridge.html',
+            to: 'hub-mesh-bridge.html'
           }
         ],
       }),

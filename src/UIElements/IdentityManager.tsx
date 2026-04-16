@@ -1,5 +1,24 @@
 'use strict';
 
+/// <reference path="../types/fabric.d.ts" />
+
+/**
+ * Identity and HD material align with hub.fabric.pub patterns: `@fabric/core/types/key` + `Identity`
+ * use the same `tiny-secp256k1` + `bip32` stack.
+ *
+ * **Fabric concepts (do not conflate):**
+ * - **`Actor`** (`@fabric/core/types/actor`) — stateful entity with JSON Patch, `commit()`, and
+ *   content-derived **`id`** from `toGenericMessage()` (sorted `{ type, object }`), not arbitrary strings.
+ * - **`Message`** — extends `Actor`; **AMP** wire envelope with opcodes and **BIP-340 Schnorr** on the
+ *   **Fabric/Message** tagged hash (`signWithKey` / `verifyWithKey`). This is what peers and services exchange.
+ * - **Bitcoin Signed Message** — ECDSA + Bitcoin Core’s message prefix; used here for **RPC** / wallet UX only.
+ *
+ * Passport’s saved Bitcoin node / hub rows use **`passportNodeListId`**: a short stable **UI storage key**,
+ * not `Actor#id` and not a Fabric **`Message`**.
+ *
+ * @see https://github.com/FabricLabs/hub.fabric.pub — components/IdentityManager.js, functions/fabricBrowserIdentityDev.js
+ */
+
 import {
   INVALID_BECH32_TEST_VECTORS,
   INVALID_BIP32_TEST_VECTORS,
@@ -8,23 +27,171 @@ import {
 } from '../crypto/vectors';
 
 // Dependencies
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { wordlists, mnemonicToSeedSync, generateMnemonic } from 'bip39';
-import { ec as EC } from 'elliptic';
 import { bech32m } from 'bech32';
-import { BIP32Factory, TinySecp256k1Interface } from 'bip32';
-import ecc from '@bitcoinerlab/secp256k1';
+import { BIP32Factory, BIP32Interface } from 'bip32';
+import * as ecc from 'tiny-secp256k1';
+import * as bitcoin from 'bitcoinjs-lib';
+import { FABRIC_KEY_DERIVATION_PATH } from '@fabric/core/constants';
+import { FABRIC_STATE_STORAGE_KEY } from '../constants/fabricExtension';
+import { PASSPORT_EXTENSION_VERSION } from '../constants/extensionVersion';
 import crypto from 'crypto';
 
+bitcoin.initEccLib(ecc);
+
 // Semantic UI
-import { Button, Message, Loader, Segment, Form, Input, List, Icon, Modal, Popup, Table } from 'semantic-ui-react';
+import { Button, Message, Loader, Segment, Form, Input, TextArea, List, Icon, Modal, Popup, Table } from 'semantic-ui-react';
+import { FabricBackgroundMeshActions } from './FabricBackgroundMeshActions';
 
 // Services
 import { validateXpub } from '../utils/xpub';
+import { testFabricSignalingReachable, type FabricSignalingTestOk } from '../fabric/fabricWebRTCPeering';
+import { touchFabricActivity, readFabricActivityMs } from '../utils/fabricActivityStorage';
+import {
+  fetchWalletBalance,
+  fetchTransactionHistory,
+  fetchBitcoinStatus,
+  deriveReceiveAddress,
+  formatSats,
+  formatBtc,
+  type WalletBalance,
+  type WalletTransaction,
+  type BitcoinStatus
+} from '../fabric/bitcoinService';
 
-// Create the elliptic curve instance
-const ec = new EC('secp256k1');
-const bip32 = BIP32Factory(ecc as unknown as TinySecp256k1Interface);
+const bip32 = BIP32Factory(ecc);
+
+function hash256 (buf: Buffer): Buffer {
+  return crypto.createHash('sha256').update(crypto.createHash('sha256').update(buf).digest()).digest();
+}
+
+/** Bitcoin Core message prefix + varint length + UTF-8 payload. */
+function encodeBitcoinSignedMessagePayload (message: string): Buffer {
+  const prefix = Buffer.from('\x18Bitcoin Signed Message:\n', 'utf8');
+  const msgBuf = Buffer.from(message, 'utf8');
+  const n = msgBuf.length;
+  let lenEnc: Buffer;
+  if (n < 253) {
+    lenEnc = Buffer.from([n]);
+  } else if (n <= 0xffff) {
+    lenEnc = Buffer.allocUnsafe(3);
+    lenEnc[0] = 0xfd;
+    lenEnc.writeUInt16LE(n, 1);
+  } else if (n <= 0xffffffff) {
+    lenEnc = Buffer.allocUnsafe(5);
+    lenEnc[0] = 0xfe;
+    lenEnc.writeUInt32LE(n, 1);
+  } else {
+    throw new Error('Message too long');
+  }
+  return Buffer.concat([prefix, lenEnc, msgBuf]);
+}
+
+function bitcoinMessageHash (message: string): Buffer {
+  return hash256(encodeBitcoinSignedMessagePayload(message));
+}
+
+function looksLikeCompressedPubHex (s: string): boolean {
+  return /^0[23][0-9a-fA-F]{64}$/.test(String(s).trim());
+}
+
+function signBitcoinMessageLocal (message: string, privateKeyHex: string): { signature: string; publicKeyHex: string } {
+  const d = Uint8Array.from(Buffer.from(privateKeyHex, 'hex'));
+  if (!ecc.isPrivate(d)) {
+    throw new Error('Invalid private key');
+  }
+  const pub = ecc.pointFromScalar(d, true);
+  if (!pub) {
+    throw new Error('Could not derive public key');
+  }
+  const hash = Uint8Array.from(bitcoinMessageHash(message));
+  const rec = ecc.signRecoverable(hash, d);
+  const flag = 27 + rec.recoveryId + 4;
+  const sig = Buffer.concat([Buffer.from([flag]), Buffer.from(rec.signature)]);
+  return {
+    signature: sig.toString('base64'),
+    publicKeyHex: Buffer.from(pub).toString('hex')
+  };
+}
+
+function verifyBitcoinMessageLocal (message: string, signatureBase64: string, compressedPubHex: string): boolean {
+  const sigBuf = Buffer.from(String(signatureBase64).trim(), 'base64');
+  if (sigBuf.length !== 65) return false;
+  let flag = sigBuf[0] - 27;
+  let compressed = false;
+  if (flag >= 4) {
+    compressed = true;
+    flag -= 4;
+  }
+  if (flag < 0 || flag > 3) return false;
+  const recoveryId = flag as 0 | 1 | 2 | 3;
+  const sig64 = Uint8Array.from(sigBuf.subarray(1, 65));
+  const hash = Uint8Array.from(bitcoinMessageHash(message));
+  const recovered = ecc.recover(hash, sig64, recoveryId, compressed);
+  if (!recovered) return false;
+  return Buffer.from(recovered).toString('hex').toLowerCase() === compressedPubHex.replace(/^0x/i, '').toLowerCase();
+}
+
+function bitcoinNetworkFromName (name: string): bitcoin.networks.Network {
+  const n = String(name || 'regtest').toLowerCase();
+  if (n === 'mainnet') return bitcoin.networks.bitcoin;
+  if (n === 'testnet' || n === 'signet') return bitcoin.networks.testnet;
+  return bitcoin.networks.regtest;
+}
+
+/** P2PKH (base58) or native P2WPKH (bech32 v0 keyhash); network must match the address. */
+function verifyBitcoinMessageForAddress (
+  message: string,
+  signatureBase64: string,
+  address: string,
+  networkName: string
+): boolean {
+  const network = bitcoinNetworkFromName(networkName);
+  const sigBuf = Buffer.from(String(signatureBase64).trim(), 'base64');
+  if (sigBuf.length !== 65) return false;
+  let flag = sigBuf[0] - 27;
+  let compressed = false;
+  if (flag >= 4) {
+    compressed = true;
+    flag -= 4;
+  }
+  if (flag < 0 || flag > 3) return false;
+  const recoveryId = flag as 0 | 1 | 2 | 3;
+  const sig64 = Uint8Array.from(sigBuf.subarray(1, 65));
+  const hash = Uint8Array.from(bitcoinMessageHash(message));
+  const recovered = ecc.recover(hash, sig64, recoveryId, compressed);
+  if (!recovered) return false;
+  const pub = Buffer.from(recovered);
+  const pkh = bitcoin.crypto.hash160(pub);
+  const addr = String(address).trim();
+  try {
+    if (addr.toLowerCase().startsWith(`${network.bech32}1`)) {
+      const d = bitcoin.address.fromBech32(addr);
+      if (d.prefix !== network.bech32) return false;
+      if (d.version === 0 && d.data.length === 20) {
+        return Buffer.compare(d.data, pkh) === 0;
+      }
+      return false;
+    }
+    const dec = bitcoin.address.fromBase58Check(addr);
+    return dec.version === network.pubKeyHash && Buffer.compare(dec.hash, pkh) === 0;
+  } catch {
+    return false;
+  }
+}
+
+function verifyBitcoinMessageAddressAcrossNetworks (message: string, signatureBase64: string, address: string): boolean {
+  return ['regtest', 'mainnet', 'testnet'].some(net =>
+    verifyBitcoinMessageForAddress(message, signatureBase64, address, net)
+  );
+}
+
+function mightBeBitcoinP2pkhOrP2wpkhAddress (s: string): boolean {
+  const t = String(s).trim();
+  if (looksLikeCompressedPubHex(t)) return false;
+  return /^(bc1|tb1|bcrt1|[13])[a-zA-HJ-NP-Z0-9]{14,}$/i.test(t);
+}
 
 // Utility function to truncate string in the middle
 const truncateMiddle = (str: string | undefined, frontLen: number = 5, backLen: number = 5): string => {
@@ -153,6 +320,8 @@ interface Identity {
   bech32: string;
   xpub: string;
   publicKeyHex: string;
+  /** Present when the identity was derived from seed in-session; used for offline message signing. */
+  privateKeyHex?: string;
   name?: string;
   isCurrent: boolean;
   loadedAt: string;
@@ -171,6 +340,13 @@ interface BitcoinNode {
   isActive: boolean;
 }
 
+/** Hub base URL for WebSocket signaling (WebRTC); same shape as Bridge `hubAddress`. */
+interface FabricNode {
+  id: string;
+  hubAddress: string;
+  isActive: boolean;
+}
+
 interface BitcoinNodeTestResult {
   chain: string;
   blocks: number;
@@ -181,23 +357,97 @@ interface BitcoinNodeTestResult {
   mediantime: number;
 }
 
+/** Public Hub JSON-RPC passthrough (`verifymessage`, etc.); no wallet RPC without bitcoind behind the Hub. */
+const HUB_FABRIC_BITCOIN_RPC = 'https://hub.fabric.pub/services/bitcoin';
+
+/** Default Fabric playnet-style bitcoind RPC (regtest); only the host changes for LAN presets. */
+function playnetBitcoindUrl (host: string): string {
+  return `http://ahp7iuGhae8mooBahFaYieyaixei6too:naiRe9wo5vieFayohje5aegheenoh4ee@${host}:20444`;
+}
+
+const DEFAULT_BITCOIN_NODES: BitcoinNode[] = [
+  { id: 'hub-fabric-pub', connectionString: HUB_FABRIC_BITCOIN_RPC, isActive: true },
+  { id: 'playnet-regtest', connectionString: playnetBitcoindUrl('127.0.0.1'), isActive: false },
+  { id: 'lan-192-168-50-5', connectionString: playnetBitcoindUrl('192.168.50.5'), isActive: false },
+  { id: 'lan-192-168-50-2', connectionString: playnetBitcoindUrl('192.168.50.2'), isActive: false }
+];
+
+/** Quick-fill for the "Add node" field (same URLs as defaults). */
+const BITCOIN_HOST_PRESETS: ReadonlyArray<{ id: string; label: string; connectionString: string }> = [
+  { id: 'hub', label: 'hub.fabric.pub', connectionString: HUB_FABRIC_BITCOIN_RPC },
+  { id: 'playnet', label: '127.0.0.1 (playnet)', connectionString: playnetBitcoindUrl('127.0.0.1') },
+  { id: 'lan50-5', label: '192.168.50.5', connectionString: playnetBitcoindUrl('192.168.50.5') },
+  { id: 'lan50-2', label: '192.168.50.2', connectionString: playnetBitcoindUrl('192.168.50.2') }
+];
+
+const HUB_FABRIC_HUB_BASE = 'https://hub.fabric.pub';
+
+function fabricHubAt (host: string, port: number): string {
+  const p = host.includes(':') ? `[${host}]` : host;
+  return `http://${p}:${port}`;
+}
+
+const DEFAULT_FABRIC_NODES: FabricNode[] = [
+  { id: 'hub-fabric-pub', hubAddress: HUB_FABRIC_HUB_BASE, isActive: true },
+  /** Local `@fabric/hub`: `node scripts/hub.js` (HTTP API + SPA). */
+  { id: 'local-hub-http', hubAddress: fabricHubAt('127.0.0.1', 8080), isActive: false },
+  /** Local Hub webpack dev server (proxies `/services`, `/settings` → :8080). */
+  { id: 'local-hub-webpack', hubAddress: fabricHubAt('127.0.0.1', 3000), isActive: false },
+  { id: 'local-passport-serve', hubAddress: fabricHubAt('127.0.0.1', 3003), isActive: false },
+  { id: 'lan-192-168-50-5', hubAddress: fabricHubAt('192.168.50.5', 3003), isActive: false },
+  { id: 'lan-192-168-50-2', hubAddress: fabricHubAt('192.168.50.2', 3003), isActive: false }
+];
+
+const FABRIC_HUB_PRESETS: ReadonlyArray<{ id: string; label: string; hubAddress: string }> = [
+  { id: 'hub', label: 'hub.fabric.pub', hubAddress: HUB_FABRIC_HUB_BASE },
+  { id: 'local-8080', label: '127.0.0.1:8080 (local Hub)', hubAddress: fabricHubAt('127.0.0.1', 8080) },
+  { id: 'local-3000', label: '127.0.0.1:3000 (webpack dev)', hubAddress: fabricHubAt('127.0.0.1', 3000) },
+  { id: 'local', label: '127.0.0.1:3003', hubAddress: fabricHubAt('127.0.0.1', 3003) },
+  { id: 'lan50-5', label: '192.168.50.5:3003', hubAddress: fabricHubAt('192.168.50.5', 3003) },
+  { id: 'lan50-2', label: '192.168.50.2:3003', hubAddress: fabricHubAt('192.168.50.2', 3003) }
+];
+
 // Move DEFAULT_SETTINGS before state declarations
 const DEFAULT_SETTINGS = {
   autoLockTimer: 15,
-  derivationPath: "m/7777'/0'/0'",
-  bitcoinNodes: [
-    {
-      id: 'playnet-regtest',
-      connectionString: 'http://ahp7iuGhae8mooBahFaYieyaixei6too:naiRe9wo5vieFayohje5aegheenoh4ee@127.0.0.1:20444',
-      isActive: true
-    }
-  ] as BitcoinNode[]
+  /** Same default as `@fabric/core/constants` FABRIC_KEY_DERIVATION_PATH (hub / Fabric identity). */
+  derivationPath: FABRIC_KEY_DERIVATION_PATH,
+  bitcoinNodes: DEFAULT_BITCOIN_NODES,
+  fabricNodes: DEFAULT_FABRIC_NODES
 };
 
 interface Settings {
   autoLockTimer: number;
   derivationPath: string;
   bitcoinNodes: BitcoinNode[];
+  fabricNodes: FabricNode[];
+}
+
+function normalizeSettings (raw: Partial<Settings> | undefined): Settings {
+  const rawTimer = raw?.autoLockTimer;
+  const autoLockTimer =
+    typeof rawTimer === 'number' && Number.isFinite(rawTimer)
+      ? Math.max(0, Math.min(720, Math.trunc(rawTimer)))
+      : DEFAULT_SETTINGS.autoLockTimer;
+  return {
+    autoLockTimer,
+    derivationPath:
+      typeof raw?.derivationPath === 'string' && raw.derivationPath.trim()
+        ? raw.derivationPath
+        : DEFAULT_SETTINGS.derivationPath,
+    bitcoinNodes: Array.isArray(raw?.bitcoinNodes) ? raw.bitcoinNodes : DEFAULT_SETTINGS.bitcoinNodes,
+    fabricNodes: Array.isArray(raw?.fabricNodes) ? raw.fabricNodes : DEFAULT_SETTINGS.fabricNodes
+  };
+}
+
+/** Encrypted extended private key (base58) at `path`, unlocked with the same password used for seed-derived login. */
+interface WalletCryptoV1 {
+  v: 1;
+  salt: string;
+  iv: string;
+  tag: string;
+  ciphertext: string;
+  path: string;
 }
 
 interface StorageState {
@@ -205,9 +455,106 @@ interface StorageState {
   identities: Identity[];
   blobs: any[];
   settings: Settings;
+  /** Per-identity encrypted account xprv (identity id → blob). */
+  walletCryptos?: Record<string, WalletCryptoV1>;
+  /** @deprecated Single-blob format; migrated to walletCryptos on load. */
+  walletCrypto?: WalletCryptoV1;
 }
 
-const STORAGE_KEY = 'fabric_state';
+const WALLET_PBKDF2_ITERATIONS = 200_000;
+
+function isWalletCryptoV1 (x: unknown): x is WalletCryptoV1 {
+  if (!x || typeof x !== 'object') return false;
+  const o = x as Record<string, unknown>;
+  return (
+    o.v === 1 &&
+    typeof o.salt === 'string' &&
+    typeof o.iv === 'string' &&
+    typeof o.tag === 'string' &&
+    typeof o.ciphertext === 'string' &&
+    typeof o.path === 'string'
+  );
+}
+
+function encryptAccountXprv (xprvBase58: string, password: string, path: string): WalletCryptoV1 {
+  const salt = crypto.randomBytes(16);
+  const key = crypto.pbkdf2Sync(password, salt, WALLET_PBKDF2_ITERATIONS, 32, 'sha256');
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+  const enc = Buffer.concat([cipher.update(xprvBase58, 'utf8'), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return {
+    v: 1,
+    salt: salt.toString('hex'),
+    iv: iv.toString('hex'),
+    tag: tag.toString('hex'),
+    ciphertext: enc.toString('hex'),
+    path
+  };
+}
+
+function decryptAccountXprv (blob: WalletCryptoV1, password: string): string {
+  const salt = Buffer.from(blob.salt, 'hex');
+  const key = crypto.pbkdf2Sync(password, salt, WALLET_PBKDF2_ITERATIONS, 32, 'sha256');
+  const decipher = crypto.createDecipheriv('aes-256-gcm', key, Buffer.from(blob.iv, 'hex'));
+  decipher.setAuthTag(Buffer.from(blob.tag, 'hex'));
+  return Buffer.concat([
+    decipher.update(Buffer.from(blob.ciphertext, 'hex')),
+    decipher.final()
+  ]).toString('utf8');
+}
+
+function coerceWalletCryptosFromStorage (parsed: StorageState): Record<string, WalletCryptoV1> {
+  const out: Record<string, WalletCryptoV1> = {};
+  if (parsed.walletCryptos && typeof parsed.walletCryptos === 'object') {
+    for (const [id, val] of Object.entries(parsed.walletCryptos)) {
+      if (isWalletCryptoV1(val)) out[id] = val;
+    }
+  }
+  if (Object.keys(out).length === 0 && parsed.walletCrypto && isWalletCryptoV1(parsed.walletCrypto)) {
+    const first = parsed.identities?.find((id: Identity) => id.hasPrivateKey);
+    if (first?.id) out[first.id] = parsed.walletCrypto;
+  }
+  return out;
+}
+
+/** Never persist raw private key hex in identities (session-only `privateKeyHex`). */
+function stripPrivateKeyHexFromIdentities (identities: Identity[]): Identity[] {
+  return identities.map(({ privateKeyHex, ...rest }) => rest);
+}
+
+/** Build identity + encrypted xprv from a BIP32 node at `path` (password encrypts the stored xprv). */
+function identityAndWalletBlobFromNode (
+  derivedKey: BIP32Interface,
+  path: string,
+  encryptPassword: string
+): { identity: Identity; blob: WalletCryptoV1 } {
+  const pubKeyPoint = derivedKey.publicKey;
+  if (!pubKeyPoint || pubKeyPoint.length !== 33) {
+    throw new Error('Invalid public key');
+  }
+  const publicKeyHex = Buffer.from(pubKeyPoint).toString('hex');
+  const xCoord = pubKeyPoint.slice(1, 33);
+  const words = bech32m.toWords(xCoord);
+  const bech32mEncoded = bech32m.encode('id', words);
+  const xprv = derivedKey.toBase58();
+  const identity: Identity = {
+    id: bech32mEncoded,
+    xpub: derivedKey.neutered().toBase58(),
+    publicKeyHex,
+    bech32: bech32mEncoded,
+    isCurrent: true,
+    name: bech32mEncoded,
+    loadedAt: new Date().toISOString(),
+    hasPrivateKey: true,
+    privateKeyHex: derivedKey.privateKey
+      ? Buffer.from(derivedKey.privateKey).toString('hex')
+      : undefined
+  };
+  return { identity, blob: encryptAccountXprv(xprv, encryptPassword, path) };
+}
+
+const STORAGE_KEY = FABRIC_STATE_STORAGE_KEY;
 
 // Create the wordlist options once
 const bip39Wordlist = wordlists.english;
@@ -228,27 +575,46 @@ const timeAgo = (date: string) => {
   return Math.floor(seconds) + ' seconds ago';
 };
 
-// Add createActorId function
-const createActorId = (content: string): string => {
+/**
+ * Deterministic id for Passport’s saved connection list (extension storage).
+ * **Not** `@fabric/core` `Actor#id` (Hash256 chain over `toGenericMessage`) and **not** a `Message` address.
+ */
+const passportNodeListId = (content: string): string => {
   const hash = crypto.createHash('sha256');
   hash.update(content);
   return `node${hash.digest('hex').slice(0, 16)}`;
 };
 
-// Add function to make RPC requests
-const makeRPCRequest = async (method: string, params: any[]): Promise<any> => {
-  const node = DEFAULT_SETTINGS.bitcoinNodes.find((n: BitcoinNode) => n.isActive);
-  if (!node) throw new Error('No active Bitcoin node');
+/** POST target: bitcoind root, or Hub `.../services/bitcoin` JSON-RPC. */
+function getBitcoinRpcPostUrl (connectionString: string): string {
+  const base = new URL(connectionString);
+  const path = (base.pathname || '').replace(/\/+$/, '');
+  if (path && path !== '/') {
+    return `${base.origin}${path}`;
+  }
+  return base.origin;
+}
 
-  const url = new URL(node.connectionString);
-  const auth = `${url.username}:${url.password}`;
-  const headers = {
-    'Authorization': `Basic ${btoa(auth)}`,
-    'Content-Type': 'application/json'
-  };
+function buildBitcoinRpcHeaders (connectionString: string): Record<string, string> {
+  const url = new URL(connectionString);
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (url.username || url.password) {
+    headers.Authorization = `Basic ${btoa(`${url.username}:${url.password}`)}`;
+  }
+  return headers;
+}
+
+function getActiveBitcoinNode (nodes: BitcoinNode[]): BitcoinNode | null {
+  return nodes.find(n => n.isActive) ?? null;
+}
+
+// Add function to make RPC requests
+const makeRPCRequest = async (node: BitcoinNode, method: string, params: any[]): Promise<any> => {
+  const headers = buildBitcoinRpcHeaders(node.connectionString);
+  const postUrl = getBitcoinRpcPostUrl(node.connectionString);
 
   try {
-    const response = await fetch(url.origin, {
+    const response = await fetch(postUrl, {
       method: 'POST',
       headers,
       body: JSON.stringify({
@@ -278,18 +644,18 @@ const makeRPCRequest = async (method: string, params: any[]): Promise<any> => {
 };
 
 // Add wallet management functions
-const ensureWalletLoaded = async (): Promise<string> => {
+const ensureWalletLoaded = async (node: BitcoinNode): Promise<string> => {
   try {
     // Try to load the default wallet first
     try {
-      await makeRPCRequest('loadwallet', ['default']);
+      await makeRPCRequest(node, 'loadwallet', ['default']);
       return 'default';
     } catch (error) {
       // If wallet doesn't exist, create it
       if (error instanceof Error && error.message.includes('not found')) {
         try {
           // Create a new descriptor wallet (default in newer versions)
-          await makeRPCRequest('createwallet', [
+          await makeRPCRequest(node, 'createwallet', [
             'default',     // wallet_name
             false,         // disable_private_keys
             false,         // blank
@@ -302,16 +668,16 @@ const ensureWalletLoaded = async (): Promise<string> => {
         } catch (createError) {
           // If wallet already exists but couldn't be loaded, try unloading first
           if (createError instanceof Error && createError.message.includes('already exists')) {
-            await makeRPCRequest('unloadwallet', ['default']);
-            await makeRPCRequest('loadwallet', ['default']);
+            await makeRPCRequest(node, 'unloadwallet', ['default']);
+            await makeRPCRequest(node, 'loadwallet', ['default']);
             return 'default';
           }
           throw createError;
         }
       }
-      
+
       // If default wallet can't be loaded/created, try listing available wallets
-      const wallets = await makeRPCRequest('listwallets', []);
+      const wallets = await makeRPCRequest(node, 'listwallets', []);
       if (wallets && wallets.length > 0) {
         return wallets[0]; // Use the first available wallet
       }
@@ -319,7 +685,7 @@ const ensureWalletLoaded = async (): Promise<string> => {
       // If no wallets available, create a new one with timestamp
       const timestamp = new Date().getTime();
       const walletName = `wallet_${timestamp}`;
-      await makeRPCRequest('createwallet', [
+      await makeRPCRequest(node, 'createwallet', [
         walletName,    // wallet_name
         false,         // disable_private_keys
         false,         // blank
@@ -366,6 +732,8 @@ const IdentityManager = () => {
   const [newIdentityName, setNewIdentityName] = useState<string>('');
   const [isLoggingOut, setIsLoggingOut] = useState(false);
   const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
+  /** Same destructive action as footer Logout; modal copy differs for Settings "Clear Data". */
+  const [eraseConfirmMode, setEraseConfirmMode] = useState<'logout' | 'erase_all'>('logout');
   const [selectedIdentity, setSelectedIdentity] = useState<Identity | null>(null);
   const [showSensitiveInfo, setShowSensitiveInfo] = useState<boolean>(false);
   const [isValidPhrase, setIsValidPhrase] = useState<boolean>(true);
@@ -383,10 +751,38 @@ const IdentityManager = () => {
   const [testError, setTestError] = useState<string | null>(null);
   const [isTestModalOpen, setIsTestModalOpen] = useState<boolean>(false);
 
+  const [newFabricHubAddress, setNewFabricHubAddress] = useState<string>('');
+  const [testingFabricNode, setTestingFabricNode] = useState<FabricNode | null>(null);
+  const [fabricTestError, setFabricTestError] = useState<string | null>(null);
+  const [fabricTestOk, setFabricTestOk] = useState<FabricSignalingTestOk | null>(null);
+  const [isFabricTestModalOpen, setIsFabricTestModalOpen] = useState<boolean>(false);
+  const [walletCryptos, setWalletCryptos] = useState<Record<string, WalletCryptoV1>>({});
+  const [signUnlockPassword, setSignUnlockPassword] = useState('');
+  const [signUnlockError, setSignUnlockError] = useState<string | null>(null);
+  const [isSigning, setIsSigning] = useState(false);
+  const [isVerifying, setIsVerifying] = useState(false);
+  const [clipboardNotice, setClipboardNotice] = useState<string | null>(null);
+  const [storageHydrated, setStorageHydrated] = useState(false);
+  const [nodeSigninBusy, setNodeSigninBusy] = useState(false);
+  const [nodeSigninResult, setNodeSigninResult] = useState<{ ok: boolean; fabricPeerId?: string; clock?: number; nodeAddress?: string; error?: string } | null>(null);
+
+  const [walletBalance, setWalletBalance] = useState<WalletBalance | null>(null);
+  const [walletBalanceLoading, setWalletBalanceLoading] = useState(false);
+  const [walletTxs, setWalletTxs] = useState<WalletTransaction[]>([]);
+  const [walletTxsLoading, setWalletTxsLoading] = useState(false);
+  const [walletView, setWalletView] = useState<'balance' | 'receive' | 'history' | 'send' | null>(null);
+  const [btcStatus, setBtcStatus] = useState<BitcoinStatus | null>(null);
+  const [receiveAddr, setReceiveAddr] = useState<string | null>(null);
+  const [receiveAddrIdx, setReceiveAddrIdx] = useState(0);
+  const [sendAddr, setSendAddr] = useState('');
+  const [sendAmountSats, setSendAmountSats] = useState('');
+  const [sendError, setSendError] = useState<string | null>(null);
+
   const [settings, setSettings] = useState<Settings>({
     autoLockTimer: DEFAULT_SETTINGS.autoLockTimer,
     derivationPath: DEFAULT_SETTINGS.derivationPath,
-    bitcoinNodes: DEFAULT_SETTINGS.bitcoinNodes
+    bitcoinNodes: DEFAULT_SETTINGS.bitcoinNodes,
+    fabricNodes: DEFAULT_SETTINGS.fabricNodes
   });
 
   // Create a memoized version of the wordlist
@@ -394,6 +790,134 @@ const IdentityManager = () => {
 
   // Add state for whether we should start editing on detail view
   const [startEditingOnDetail, setStartEditingOnDetail] = useState<boolean>(false);
+
+  const lastUserActivityRef = useRef(Date.now());
+  const lastActivityPersistedRef = useRef(0);
+  const [showAutoLockBanner, setShowAutoLockBanner] = useState(false);
+
+  const bumpUserActivity = useCallback(() => {
+    const t = Date.now();
+    lastUserActivityRef.current = t;
+    if (t - lastActivityPersistedRef.current >= 4000) {
+      lastActivityPersistedRef.current = t;
+      void touchFabricActivity(t);
+    }
+  }, []);
+
+  const performAutoLock = useCallback(() => {
+    setIdentities(prev => {
+      const hadPk = prev.some(i => !!i.privateKeyHex);
+      if (hadPk) setShowAutoLockBanner(true);
+      return prev.map(id => {
+        if (!id.privateKeyHex) return id;
+        const { privateKeyHex, ...rest } = id;
+        return rest;
+      });
+    });
+    setSelectedIdentity(prev => {
+      if (!prev?.privateKeyHex) return prev;
+      const { privateKeyHex, ...rest } = prev;
+      return rest;
+    });
+    setSeedPhrase(sp => {
+      if (sp) setShowAutoLockBanner(true);
+      return null;
+    });
+    setGeneratedValues(gv => {
+      if (gv) setShowAutoLockBanner(true);
+      return null;
+    });
+    setPassword('');
+    setSignUnlockPassword('');
+    setSignUnlockError(null);
+    setMessageToSign('');
+    setSignature(null);
+    setShowSignature(false);
+    setPubkeyToVerify('');
+    setVerificationResult(null);
+    setClipboardNotice(null);
+
+    setState(s => {
+      if (s === 'sign_message' || s === 'verify_message' || s === 'identity_detail') return 'logged_in';
+      if (s === 'settings') return 'logged_in';
+      const interrupted: KeyGenerationState[] = [
+        'generating',
+        'complete',
+        'confirmation',
+        'warning',
+        'seed_phrase_entry',
+        'derivation_password_entry',
+        'derivation_password_warning',
+        'seed_phrase_login',
+        'restore_identity',
+        'add_identity',
+        'xpub_login'
+      ];
+      if (interrupted.includes(s)) return 'logged_in';
+      return s;
+    });
+
+    const now = Date.now();
+    lastUserActivityRef.current = now;
+    lastActivityPersistedRef.current = now;
+    void touchFabricActivity(now);
+  }, []);
+
+  useEffect(() => {
+    if (!storageHydrated) return;
+    let alive = true;
+    void (async () => {
+      const stored = await readFabricActivityMs();
+      if (!alive) return;
+      const minutes = settings.autoLockTimer;
+      const shouldLock =
+        minutes > 0 && stored != null && Date.now() - stored >= minutes * 60_000;
+      if (shouldLock) {
+        performAutoLock();
+        lastUserActivityRef.current = Date.now();
+      } else {
+        lastUserActivityRef.current = stored ?? Date.now();
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [storageHydrated, settings.autoLockTimer, performAutoLock]);
+
+  useEffect(() => {
+    if (!storageHydrated || settings.autoLockTimer <= 0) return;
+    const hasSk =
+      identities.some(i => !!i.privateKeyHex) ||
+      !!seedPhrase ||
+      !!generatedValues;
+    if (!hasSk) return;
+    const id = window.setInterval(() => {
+      if (Date.now() - lastUserActivityRef.current >= settings.autoLockTimer * 60_000) {
+        performAutoLock();
+      }
+    }, 8000);
+    return () => window.clearInterval(id);
+  }, [
+    storageHydrated,
+    settings.autoLockTimer,
+    identities,
+    seedPhrase,
+    generatedValues,
+    performAutoLock
+  ]);
+
+  useEffect(() => {
+    if (!storageHydrated || settings.autoLockTimer <= 0) return;
+    const bump = () => bumpUserActivity();
+    window.addEventListener('keydown', bump);
+    window.addEventListener('mousedown', bump);
+    window.addEventListener('touchstart', bump, { passive: true } as AddEventListenerOptions);
+    return () => {
+      window.removeEventListener('keydown', bump);
+      window.removeEventListener('mousedown', bump);
+      window.removeEventListener('touchstart', bump);
+    };
+  }, [storageHydrated, settings.autoLockTimer, bumpUserActivity]);
 
   useEffect(() => {
     testBIP32();
@@ -415,6 +939,10 @@ const IdentityManager = () => {
         if (savedState) {
           try {
             const parsedState = savedState as StorageState;
+            setWalletCryptos(coerceWalletCryptosFromStorage(parsedState));
+            if (parsedState.settings) {
+              setSettings(normalizeSettings(parsedState.settings));
+            }
             if (parsedState.identities && parsedState.identities.length > 0) {
               setIdentities(parsedState.identities);
               // Only set state to logged_in if we have valid identities
@@ -434,6 +962,8 @@ const IdentityManager = () => {
         }
       } catch (error) {
         console.error('Failed to initialize storage:', error);
+      } finally {
+        setStorageHydrated(true);
       }
     };
     initializeStorage();
@@ -441,6 +971,7 @@ const IdentityManager = () => {
 
   useEffect(() => {
     const saveState = async () => {
+      if (!storageHydrated) return;
       try {
         const keyPairs: KeyPairStorage[] = [];
 
@@ -471,9 +1002,10 @@ const IdentityManager = () => {
 
         const state: StorageState = {
           keys: keyPairs,
-          identities,
+          identities: stripPrivateKeyHexFromIdentities(identities),
           blobs: [],
-          settings: settings
+          settings: settings,
+          walletCryptos
         };
 
         if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
@@ -486,7 +1018,7 @@ const IdentityManager = () => {
       }
     };
     saveState();
-  }, [identities, settings]);
+  }, [identities, settings, walletCryptos, storageHydrated]);
 
   useEffect(() => {
     const loadDebugInfo = async () => {
@@ -544,25 +1076,18 @@ const IdentityManager = () => {
       // Generate the seed from the mnemonic
       const seed = mnemonicToSeedSync(mnemonic);
 
-      // Generate the master key
+      // Generate the master key (aligned with the mnemonic seed)
       const masterKey = bip32.fromSeed(seed);
 
-      // Create a key pair using elliptic
-      const keyPair = ec.genKeyPair();
-      const privateKey = keyPair.getPrivate().toString('hex');
-      const publicKey = keyPair.getPublic().encode('hex', true);  // Convert to compressed hex format
-
-      // Get the x-coordinate of the public key point
-      const pubKeyPoint = keyPair.getPublic();
-      if (!pubKeyPoint || !pubKeyPoint.getX) {
-        throw new Error('Invalid public key point');
+      const pub = Buffer.from(masterKey.publicKey);
+      if (pub.length !== 33 || (pub[0] !== 0x02 && pub[0] !== 0x03)) {
+        throw new Error('Expected compressed secp256k1 public key from BIP32');
       }
-
-      // Convert x-coordinate to buffer, ensuring it's 32 bytes
-      const xCoord = pubKeyPoint.getX().toArrayLike(Buffer, 'be', 32);
-      if (xCoord.length !== 32) {
-        throw new Error('Invalid x-coordinate length');
-      }
+      const xCoord = pub.subarray(1, 33);
+      const publicKey = pub.toString('hex');
+      const privateKey = masterKey.privateKey
+        ? Buffer.from(masterKey.privateKey).toString('hex')
+        : '';
 
       // Encode with bech32m
       const words = bech32m.toWords(xCoord);
@@ -606,23 +1131,20 @@ const IdentityManager = () => {
           throw new Error('No generated values found');
         }
 
-        // Create a new identity with the previously generated key
-        const newIdentity: Identity = {
-          id: generatedValues.bech32mEncoded,
-          xpub: generatedValues.publicKey,
-          publicKeyHex: generatedValues.publicKey,  // Add this line
-          bech32: generatedValues.bech32mEncoded,
-          isCurrent: true,
-          name: generatedValues.bech32mEncoded,
-          loadedAt: new Date().toISOString(),
-          hasPrivateKey: true  // We have the private key for newly generated identities
-        };
+        const path = settings.derivationPath;
+        const derivedKey = generatedValues.masterKey.derivePath(path);
+        const { identity: newIdentity, blob } = identityAndWalletBlobFromNode(
+          derivedKey,
+          path,
+          confirmationPassword
+        );
 
         // Add the new identity and make it current
         setIdentities(prev => {
           const updated = prev.map(id => ({ ...id, isCurrent: false }));
           return [newIdentity, ...updated];
         });
+        setWalletCryptos(prev => ({ ...prev, [newIdentity.id]: blob }));
 
         // Clear all sensitive data before advancing
         setSeedPhrase(null);
@@ -694,13 +1216,15 @@ const IdentityManager = () => {
 
       // Clear all identities
       setIdentities([]);
+      setWalletCryptos({});
 
       // Save empty state to storage
       const state: StorageState = {
         keys: [],
         identities: [],
         blobs: [],
-        settings: DEFAULT_SETTINGS
+        settings: DEFAULT_SETTINGS,
+        walletCryptos: {}
       };
 
       // Try chrome.storage.local first, fall back to localStorage
@@ -722,22 +1246,26 @@ const IdentityManager = () => {
       setDerivationPassword('');
       setDerivationPasswordState('input');
       setShowLogoutConfirm(false);
+      setShowAutoLockBanner(false);
     } catch (error) {
       console.error('Failed to logout:', error);
       // Even if storage fails, we should still clear the local state
       setIdentities([]);
       setState('initial');
+      setShowAutoLockBanner(false);
     } finally {
       setIsLoggingOut(false);
     }
   };
 
-  const handleLogoutClick = () => {
+  const openEraseConfirm = (mode: 'logout' | 'erase_all') => {
+    setEraseConfirmMode(mode);
     setShowLogoutConfirm(true);
   };
 
   const handleCancelLogout = () => {
     setShowLogoutConfirm(false);
+    setEraseConfirmMode('logout');
   };
 
   const handleEditIdentity = (identity: Identity) => {
@@ -827,7 +1355,7 @@ const IdentityManager = () => {
   };
 
   const handleMakeCurrent = (identity: Identity) => {
-    setIdentities(prev => 
+    setIdentities(prev =>
       prev.map(id => ({
         ...id,
         isCurrent: id.id === identity.id
@@ -837,51 +1365,108 @@ const IdentityManager = () => {
     setSelectedIdentity(prev => prev ? { ...prev, isCurrent: true } : null);
   };
 
+  const handleUnlockSigning = () => {
+    if (!selectedIdentity?.id) return;
+    const blob = walletCryptos[selectedIdentity.id];
+    if (!blob) {
+      setSignUnlockError('No encrypted signing key on this device for this identity.');
+      return;
+    }
+    try {
+      const xprv = decryptAccountXprv(blob, signUnlockPassword);
+      const node = bip32.fromBase58(xprv);
+      if (!node.privateKey) {
+        throw new Error('Missing private key');
+      }
+      const pk = Buffer.from(node.privateKey).toString('hex');
+      const id = selectedIdentity.id;
+      setIdentities(prev =>
+        prev.map(row => (row.id === id && row.hasPrivateKey ? { ...row, privateKeyHex: pk } : row))
+      );
+      setSelectedIdentity(prev =>
+        prev?.id === id && prev.hasPrivateKey ? { ...prev, privateKeyHex: pk } : prev
+      );
+      setSignUnlockError(null);
+      setSignUnlockPassword('');
+      setShowAutoLockBanner(false);
+      bumpUserActivity();
+    } catch {
+      setSignUnlockError('Wrong password or unreadable wallet data.');
+    }
+  };
+
+  const copyWithNotice = (text: string, label: string) => {
+    void navigator.clipboard.writeText(text).then(
+      () => {
+        setClipboardNotice(`${label} copied`);
+        window.setTimeout(() => setClipboardNotice(null), 2000);
+      },
+      () => setClipboardNotice(null)
+    );
+  };
+
   const handleSignMessage = async () => {
     if (!selectedIdentity || !messageToSign.trim()) return;
+
+    setVerificationResult(null);
+    setSignature(null);
+    setShowSignature(false);
+    setIsSigning(true);
 
     try {
       if (!selectedIdentity.hasPrivateKey) {
         throw new Error('Cannot sign messages with an xpub-based identity. Please use an identity with a private key.');
       }
 
-      let signature: string;
-      let pubkey: string;
+      const pkLocal = selectedIdentity.privateKeyHex;
+      if (pkLocal) {
+        const { signature, publicKeyHex } = signBitcoinMessageLocal(messageToSign, pkLocal);
+        setSignature(signature);
+        setPubkeyToVerify(publicKeyHex);
+        setShowSignature(true);
+        return;
+      }
 
       try {
-        // First try Bitcoin RPC signing
-        const walletName = await ensureWalletLoaded();
+        const rpcNode = getActiveBitcoinNode(settings.bitcoinNodes);
+        if (!rpcNode) {
+          throw new Error('No active Bitcoin node. Open Settings and enable one under Bitcoin Nodes.');
+        }
+        const walletName = await ensureWalletLoaded(rpcNode);
         console.log('Using wallet:', walletName);
 
-        // Get a new address and ensure we have its private key
-        const address = await makeRPCRequest('getnewaddress', ['message-signing', 'legacy']);
+        const address = await makeRPCRequest(rpcNode, 'getnewaddress', ['message-signing', 'legacy']);
 
-        // Import the private key if needed
         try {
-          await makeRPCRequest('dumpprivkey', [address]);
+          await makeRPCRequest(rpcNode, 'dumpprivkey', [address]);
         } catch (error) {
           console.error('Failed to access private key:', error);
           throw new Error('Could not access private key for signing. Please ensure the wallet is unlocked and has private keys enabled.');
         }
 
-        // Sign the message using Bitcoin Core
-        signature = await makeRPCRequest('signmessage', [address, messageToSign]);
-        pubkey = address;
-
+        const signature = await makeRPCRequest(rpcNode, 'signmessage', [address, messageToSign]);
         setSignature(signature);
-        setPubkeyToVerify(pubkey);
+        setPubkeyToVerify(address);
         setShowSignature(true);
-      } catch (error) {
-        console.log('Bitcoin RPC signing failed, falling back to local key:', error);
-        // TODO: Fall back to local key signing
+        return;
+      } catch (rpcErr) {
+        console.warn('Bitcoin RPC signing failed:', rpcErr);
       }
 
-      setVerificationResult(null);
+      if (walletCryptos[selectedIdentity.id]) {
+        throw new Error('Unlock signing with your password below, then try again.');
+      }
+      throw new Error(
+        'No signing key in memory. Unlock with your password, or configure an optional Bitcoin Core / Hub RPC node for wallet signing.'
+      );
     } catch (error: unknown) {
       console.error('Failed to sign message:', error);
       setSignature(null);
       setPubkeyToVerify('');
+      setShowSignature(false);
       setVerificationResult(error instanceof Error ? error.message : 'Failed to sign message');
+    } finally {
+      setIsSigning(false);
     }
   };
 
@@ -889,21 +1474,52 @@ const IdentityManager = () => {
   const handleVerifyMessage = async () => {
     if (!messageToVerify.trim() || !signatureToVerify.trim() || !pubkeyToVerify.trim()) return;
 
+    setIsVerifying(true);
     try {
-      // Ensure a wallet is loaded (some nodes require this even for verification)
-      await ensureWalletLoaded();
+      if (looksLikeCompressedPubHex(pubkeyToVerify)) {
+        const ok = verifyBitcoinMessageLocal(messageToVerify, signatureToVerify, pubkeyToVerify);
+        setVerificationResult(ok ? 'Signature is valid (verified locally).' : 'Signature is invalid.');
+        return;
+      }
 
-      // Verify the message using Bitcoin Core
-      const isValid = await makeRPCRequest('verifymessage', [
-        pubkeyToVerify,
-        signatureToVerify,
-        messageToVerify
-      ]);
+      if (mightBeBitcoinP2pkhOrP2wpkhAddress(pubkeyToVerify)) {
+        const ok = verifyBitcoinMessageAddressAcrossNetworks(
+          messageToVerify,
+          signatureToVerify,
+          pubkeyToVerify
+        );
+        setVerificationResult(
+          ok
+            ? 'Signature is valid (verified locally for address).'
+            : 'Signature is invalid (local address check).'
+        );
+        return;
+      }
 
-      setVerificationResult(isValid ? 'Signature is valid' : 'Signature is invalid');
+      try {
+        const rpcNode = getActiveBitcoinNode(settings.bitcoinNodes);
+        if (!rpcNode) {
+          setVerificationResult(
+            'No active Bitcoin node. Enable one in Settings, or use a legacy/bc1 address or compressed pubkey for local verify.'
+          );
+          return;
+        }
+        await ensureWalletLoaded(rpcNode);
+        const isValid = await makeRPCRequest(rpcNode, 'verifymessage', [
+          pubkeyToVerify,
+          signatureToVerify,
+          messageToVerify
+        ]);
+        setVerificationResult(isValid ? 'Signature is valid (via RPC).' : 'Signature is invalid (via RPC).');
+      } catch (error) {
+        console.error('Failed to verify message via RPC:', error);
+        setVerificationResult('Verification failed: ' + (error instanceof Error ? error.message : 'Unknown error'));
+      }
     } catch (error) {
       console.error('Failed to verify message:', error);
       setVerificationResult('Verification failed: ' + (error instanceof Error ? error.message : 'Unknown error'));
+    } finally {
+      setIsVerifying(false);
     }
   };
 
@@ -921,7 +1537,7 @@ const IdentityManager = () => {
       if (seedPhrase && password) {
         const seed = mnemonicToSeedSync(seedPhrase, password);
         const masterKey = bip32.fromSeed(seed);
-        
+
         // Store master key pair
         if (masterKey.privateKey && masterKey.publicKey) {
           keyPairs.push({
@@ -950,8 +1566,9 @@ const IdentityManager = () => {
         timestamp: new Date().toISOString(),
         state: {
           keys: keyPairs,
-          identities,
-          settings
+          identities: stripPrivateKeyHexFromIdentities(identities),
+          settings,
+          walletCryptos
         }
       };
 
@@ -992,28 +1609,41 @@ const IdentityManager = () => {
 
           // Validate key pairs if present
           if (data.state.keys && Array.isArray(data.state.keys)) {
-            const validKeyPairs = data.state.keys.every((key: any) => 
-              typeof key.public === 'string' && 
+            const validKeyPairs = data.state.keys.every((key: any) =>
+              typeof key.public === 'string' &&
               typeof key.private === 'string' &&
               /^[0-9a-f]+$/i.test(key.public) &&
               /^[0-9a-f]+$/i.test(key.private)
             );
-            
+
             if (!validKeyPairs) {
               throw new Error('Invalid key pair format in backup');
             }
           }
 
+          const importedIdentities = stripPrivateKeyHexFromIdentities(data.state.identities);
+          const restoredParsed: StorageState = {
+            keys: data.state.keys || [],
+            identities: importedIdentities,
+            blobs: [],
+            settings: normalizeSettings(data.state.settings),
+            walletCryptos: (data.state as StorageState).walletCryptos,
+            walletCrypto: (data.state as StorageState).walletCrypto
+          };
+          const importedCryptos = coerceWalletCryptosFromStorage(restoredParsed);
+
           // Set the new state
-          setIdentities(data.state.identities);
-          setSettings(data.state.settings);
+          setIdentities(importedIdentities);
+          setSettings(normalizeSettings(data.state.settings));
+          setWalletCryptos(importedCryptos);
 
           // Save to storage
           const state: StorageState = {
             keys: data.state.keys || [],
-            identities: data.state.identities,
+            identities: importedIdentities,
             blobs: [],
-            settings: data.state.settings
+            settings: data.state.settings,
+            walletCryptos: importedCryptos
           };
 
           if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
@@ -1034,153 +1664,233 @@ const IdentityManager = () => {
     }
   };
 
-  const renderSignMessageState = () => (
-    <Message className="fade-in">
-      <Message.Header>Sign Message</Message.Header>
-      <Message.Content>
-        <Form>
-          <Form.Field>
-            <label>Message to Sign</label>
-            <Input
-              type="text"
-              placeholder="Enter message to sign"
-              value={messageToSign}
-              onChange={(e) => setMessageToSign(e.target.value)}
-            />
-            {!messageToSign.trim() && (
-              <Message size="tiny" color="yellow">
-                Please enter a message to sign
-              </Message>
-            )}
-          </Form.Field>
-          {signature && showSignature && (
-            <>
-              <Form.Field>
-                <label>Public Key (hex)</label>
-                <div style={{ 
-                  display: 'flex', 
-                  alignItems: 'center', 
-                  gap: '0.5em',
-                  fontFamily: 'monospace',
-                  wordBreak: 'break-all'
-                }}>
-                  <span>{pubkeyToVerify}</span>
-                  <Icon
-                    name="copy"
-                    link
-                    onClick={() => {
-                      navigator.clipboard.writeText(pubkeyToVerify);
-                    }}
-                    style={{ cursor: 'pointer' }}
-                  />
-                </div>
-              </Form.Field>
-              <Form.Field>
-                <label>Signature</label>
-                <div style={{ 
-                  display: 'flex', 
-                  alignItems: 'center', 
-                  gap: '0.5em',
-                  fontFamily: 'monospace',
-                  wordBreak: 'break-all'
-                }}>
-                  <span>{signature}</span>
-                  <Icon
-                    name="copy"
-                    link
-                    onClick={() => {
-                      navigator.clipboard.writeText(signature);
-                    }}
-                    style={{ cursor: 'pointer' }}
-                  />
-                </div>
-              </Form.Field>
-            </>
-          )}
-          <Button.Group vertical fluid style={{ marginTop: '1em' }}>
-            <Button
-              content='Sign Message'
-              onClick={handleSignMessage}
-              disabled={!messageToSign.trim()}
-            />
-            <Button
-              content='Go Back'
-              onClick={() => {
-                setMessageToSign('');
-                setSignature(null);
-                setPubkeyToVerify('');
-                setState('logged_in');
-              }}
-            />
-          </Button.Group>
-        </Form>
-      </Message.Content>
-    </Message>
-  );
+  const renderSignMessageState = () => {
+    const signNeedsUnlock =
+      !!selectedIdentity?.hasPrivateKey &&
+      !selectedIdentity?.privateKeyHex &&
+      !!selectedIdentity?.id &&
+      !!walletCryptos[selectedIdentity.id];
 
-  const renderVerifyMessageState = () => (
-    <Message className="fade-in">
-      <Message.Header>Verify Message Signature</Message.Header>
-      <Message.Content>
-        <Form>
-          <Form.Field>
-            <label>Message</label>
-            <Input
-              type="text"
-              placeholder="Enter the message to verify"
-              value={messageToVerify}
-              onChange={(e) => setMessageToVerify(e.target.value)}
-            />
-          </Form.Field>
-          <Form.Field>
-            <label>Public Key (hex)</label>
-            <Input
-              type="text"
-              placeholder="Enter the public key"
-              value={pubkeyToVerify}
-              onChange={(e) => setPubkeyToVerify(e.target.value)}
-            />
-          </Form.Field>
-          <Form.Field>
-            <label>Signature</label>
-            <Input
-              type="text"
-              placeholder="Enter the signature"
-              value={signatureToVerify}
-              onChange={(e) => setSignatureToVerify(e.target.value)}
-            />
-          </Form.Field>
-          {verificationResult && (
-            <Message
-              positive={verificationResult.includes('valid')}
-              negative={!verificationResult.includes('valid')}
-            >
-              <Message.Header>Verification Result</Message.Header>
-              <p>{verificationResult}</p>
+    return (
+      <Message className="fade-in">
+        <Message.Header>Sign Message</Message.Header>
+        <Message.Content>
+          <p style={{ marginBottom: '1em', color: 'rgba(255,255,255,0.85)' }}>
+            Signs locally when your key is unlocked (no Bitcoin node required). Optionally uses RPC if there is no local key — point the node URL at Bitcoin Core or at the Hub path <code style={{ fontSize: '0.85em' }}>/services/bitcoin</code> for JSON-RPC passthrough.
+          </p>
+          {clipboardNotice && (
+            <Message size="tiny" positive onDismiss={() => setClipboardNotice(null)}>
+              {clipboardNotice}
             </Message>
           )}
-          <Button.Group vertical fluid style={{ marginTop: '1em' }}>
-            <Button
-              primary
-              content='Verify Signature'
-              onClick={handleVerifyMessage}
-              disabled={!messageToVerify.trim() || !signatureToVerify.trim() || !pubkeyToVerify.trim()}
-            />
-            <Button
-              content='Go Back'
-              onClick={() => {
-                setMessageToVerify('');
-                setSignatureToVerify('');
-                setPubkeyToVerify('');
-                setVerificationResult(null);
-                setState('logged_in');
-              }}
-            />
-          </Button.Group>
-        </Form>
-      </Message.Content>
-    </Message>
-  );
+          {signNeedsUnlock && (
+            <Segment>
+              <Form.Field>
+                <label>Password (unlock encrypted key on this device)</label>
+                <Input
+                  type="password"
+                  placeholder="Password from wallet creation or seed login"
+                  value={signUnlockPassword}
+                  onChange={(e) => {
+                    setSignUnlockPassword(e.target.value);
+                    setSignUnlockError(null);
+                  }}
+                  autoComplete="off"
+                />
+              </Form.Field>
+              {signUnlockError && (
+                <Message negative size="small">
+                  <p>{signUnlockError}</p>
+                </Message>
+              )}
+              <Button type="button" color="blue" content="Unlock signing" onClick={handleUnlockSigning} />
+            </Segment>
+          )}
+          <Form>
+            <Form.Field>
+              <label>Message to sign</label>
+              <TextArea
+                placeholder="Enter the exact message to sign"
+                value={messageToSign}
+                onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setMessageToSign(e.target.value)}
+                rows={4}
+                style={{ fontFamily: 'monospace', fontSize: '0.9em' }}
+              />
+              {!messageToSign.trim() && (
+                <Message size="tiny" color="yellow">
+                  Enter a message, then sign.
+                </Message>
+              )}
+            </Form.Field>
+            {verificationResult && !signature && (
+              <Message negative size="small">
+                <Message.Header>Could not sign</Message.Header>
+                <p>{verificationResult}</p>
+              </Message>
+            )}
+            {signature && showSignature && (
+              <>
+                <Message positive size="small">
+                  <Message.Header>Message signed</Message.Header>
+                  <p>Copy the public key and signature for verification (local verify uses the compressed public key).</p>
+                </Message>
+                <Form.Field>
+                  <label>Compressed public key (hex)</label>
+                  <div style={{
+                    display: 'flex',
+                    alignItems: 'flex-start',
+                    gap: '0.5em',
+                    fontFamily: 'monospace',
+                    wordBreak: 'break-all',
+                    fontSize: '0.85em'
+                  }}>
+                    <span style={{ flex: 1 }}>{pubkeyToVerify}</span>
+                    <Icon
+                      name="copy"
+                      link
+                      aria-label="Copy public key"
+                      onClick={() => copyWithNotice(pubkeyToVerify, 'Public key')}
+                      style={{ cursor: 'pointer', flexShrink: 0 }}
+                    />
+                  </div>
+                </Form.Field>
+                <Form.Field>
+                  <label>Signature (base64)</label>
+                  <div style={{
+                    display: 'flex',
+                    alignItems: 'flex-start',
+                    gap: '0.5em',
+                    fontFamily: 'monospace',
+                    wordBreak: 'break-all',
+                    fontSize: '0.85em'
+                  }}>
+                    <span style={{ flex: 1 }}>{signature}</span>
+                    <Icon
+                      name="copy"
+                      link
+                      aria-label="Copy signature"
+                      onClick={() => copyWithNotice(signature || '', 'Signature')}
+                      style={{ cursor: 'pointer', flexShrink: 0 }}
+                    />
+                  </div>
+                </Form.Field>
+                <Button
+                  type="button"
+                  basic
+                  content="Copy message + key + signature"
+                  icon="copy outline"
+                  onClick={() => {
+                    const block = `Message:\n${messageToSign}\n\nPublic key (hex):\n${pubkeyToVerify}\n\nSignature (base64):\n${signature || ''}`;
+                    copyWithNotice(block, 'Sign bundle');
+                  }}
+                />
+              </>
+            )}
+            <Button.Group vertical fluid style={{ marginTop: '1em' }}>
+              <Button
+                primary
+                content="Sign message"
+                onClick={handleSignMessage}
+                disabled={!messageToSign.trim() || isSigning}
+                loading={isSigning}
+              />
+              <Button
+                content="Go back"
+                onClick={() => {
+                  setMessageToSign('');
+                  setSignature(null);
+                  setPubkeyToVerify('');
+                  setVerificationResult(null);
+                  setShowSignature(false);
+                  setSignUnlockPassword('');
+                  setSignUnlockError(null);
+                  setClipboardNotice(null);
+                  setState('logged_in');
+                }}
+              />
+            </Button.Group>
+          </Form>
+        </Message.Content>
+      </Message>
+    );
+  };
+
+  const renderVerifyMessageState = () => {
+    const vr = verificationResult || '';
+    const verifyPositive = /\bvalid\b/i.test(vr) && !/\binvalid\b/i.test(vr) && !/^Verification failed/i.test(vr);
+    const verifyNegative = vr.length > 0 && !verifyPositive;
+
+    return (
+      <Message className="fade-in">
+        <Message.Header>Verify message signature</Message.Header>
+        <Message.Content>
+          <p style={{ marginBottom: '1em', color: 'rgba(255,255,255,0.85)' }}>
+            Paste the exact message, legacy or bc1 address, or compressed public key (02…/03…), and base64 signature. Address and pubkey checks run locally; RPC is only used for unusual verifier inputs.
+          </p>
+          <Form>
+            <Form.Field>
+              <label>Message</label>
+              <TextArea
+                placeholder="Exact signed message"
+                value={messageToVerify}
+                onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setMessageToVerify(e.target.value)}
+                rows={4}
+                style={{ fontFamily: 'monospace', fontSize: '0.9em' }}
+              />
+            </Form.Field>
+            <Form.Field>
+              <label>Bitcoin address (Core) or compressed public key (hex)</label>
+              <Input
+                type="text"
+                placeholder="Legacy address for verifymessage, or 02/03… for local verify"
+                value={pubkeyToVerify}
+                onChange={(e) => setPubkeyToVerify(e.target.value)}
+              />
+            </Form.Field>
+            <Form.Field>
+              <label>Signature (base64)</label>
+              <Input
+                type="text"
+                placeholder="Base64 signature from signer"
+                value={signatureToVerify}
+                onChange={(e) => setSignatureToVerify(e.target.value)}
+              />
+            </Form.Field>
+            {verificationResult && (
+              <Message positive={verifyPositive} negative={verifyNegative}>
+                <Message.Header>{verifyPositive ? 'Verified' : 'Not verified'}</Message.Header>
+                <p>{verificationResult}</p>
+              </Message>
+            )}
+            <Button.Group vertical fluid style={{ marginTop: '1em' }}>
+              <Button
+                primary
+                content="Verify signature"
+                onClick={handleVerifyMessage}
+                disabled={
+                  !messageToVerify.trim() ||
+                  !signatureToVerify.trim() ||
+                  !pubkeyToVerify.trim() ||
+                  isVerifying
+                }
+                loading={isVerifying}
+              />
+              <Button
+                content="Go back"
+                onClick={() => {
+                  setMessageToVerify('');
+                  setSignatureToVerify('');
+                  setPubkeyToVerify('');
+                  setVerificationResult(null);
+                  setState('logged_in');
+                }}
+              />
+            </Button.Group>
+          </Form>
+        </Message.Content>
+      </Message>
+    );
+  };
 
   // Reusable form components
   const renderDerivationPasswordForm = (
@@ -1295,8 +2005,8 @@ const IdentityManager = () => {
           {seedPhrase}
         </Segment>
         <p>Your derivation password is:</p>
-        <Segment style={{ 
-          wordBreak: 'break-word', 
+        <Segment style={{
+          wordBreak: 'break-word',
           fontFamily: 'monospace',
           display: 'flex',
           alignItems: 'center',
@@ -1525,41 +2235,16 @@ const IdentityManager = () => {
                   // Derive the master key using BIP32
                   const masterKey = bip32.fromSeed(seed);
 
-                  // Derive the xpub at the default path (m/44'/0'/0')
-                  const derivedKey = masterKey.derivePath("m/44'/0'/0'");
-                  const xpub = `${derivedKey.neutered().toBase58()}`;
-
-                  // Get the x-coordinate of the public key point
-                  const pubKeyPoint = derivedKey.publicKey;
-                  if (!pubKeyPoint || pubKeyPoint.length !== 33) {
-                    throw new Error('Invalid public key');
-                  }
-                  const publicKeyHex = Buffer.from(pubKeyPoint).toString('hex');  // Convert to hex string
-
-                  // Use the x-coordinate (remove the prefix byte)
-                  const xCoord = pubKeyPoint.slice(1, 33);
-
-                  // Encode with bech32m
-                  const words = bech32m.toWords(xCoord);
-                  const bech32mEncoded = bech32m.encode('id', words);
-
-                  // Create a new identity
-                  const newIdentity: Identity = {
-                    id: bech32mEncoded,
-                    xpub,
-                    publicKeyHex,
-                    bech32: bech32mEncoded,
-                    isCurrent: true,
-                    name: bech32mEncoded,
-                    loadedAt: new Date().toISOString(),
-                    hasPrivateKey: true
-                  };
+                  const path = settings.derivationPath;
+                  const derivedKey = masterKey.derivePath(path);
+                  const { identity: newIdentity, blob } = identityAndWalletBlobFromNode(derivedKey, path, password);
 
                   // Add the new identity and make it current
                   setIdentities(prev => {
                     const updated = prev.map(id => ({ ...id, isCurrent: false }));
                     return [newIdentity, ...updated];
                   });
+                  setWalletCryptos(prev => ({ ...prev, [newIdentity.id]: blob }));
 
                   setState('logged_in');
 
@@ -1702,9 +2387,9 @@ const IdentityManager = () => {
 
               <div>
                 <h5 style={{ marginBottom: '0.5em' }}>xpub</h5>
-                <div style={{ 
-                  display: 'flex', 
-                  alignItems: 'center', 
+                <div style={{
+                  display: 'flex',
+                  alignItems: 'center',
                   gap: '0.5em',
                   fontFamily: 'monospace',
                   wordBreak: 'break-all'
@@ -1746,7 +2431,7 @@ const IdentityManager = () => {
     <div className="fade-in" style={{ width: '100%' }}>
       {identities.find(id => id.isCurrent) && (
         <Segment
-          style={{ 
+          style={{
             cursor: 'pointer',
             position: 'relative'
           }}
@@ -1755,14 +2440,14 @@ const IdentityManager = () => {
             handleIdentityClick(identities.find(id => id.isCurrent)!);
           }}
         >
-          <div style={{ 
-            display: 'flex', 
-            alignItems: 'center', 
+          <div style={{
+            display: 'flex',
+            alignItems: 'center',
             justifyContent: 'space-between'
           }}>
             <div style={{ flex: 1 }}>
-              <h4 style={{ 
-                fontSize: '1.1em', 
+              <h4 style={{
+                fontSize: '1.1em',
                 marginBottom: '0.5em',
                 display: 'flex',
                 alignItems: 'center',
@@ -1771,7 +2456,7 @@ const IdentityManager = () => {
                 {truncateMiddle(identities.find(id => id.isCurrent)?.name || 'Unnamed Identity')}
                 <Icon
                   name='pencil'
-                  style={{ 
+                  style={{
                     opacity: 0,
                     transition: 'opacity 0.2s',
                     cursor: 'pointer'
@@ -1804,6 +2489,35 @@ const IdentityManager = () => {
           </p>
         </Segment>
       )}
+      {(() => {
+        const cur = identities.find(id => id.isCurrent);
+        if (!cur?.hasPrivateKey || cur.privateKeyHex || !cur.id || !walletCryptos[cur.id]) return null;
+        return (
+          <>
+            {showAutoLockBanner && (
+              <Message
+                warning
+                size="small"
+                style={{ marginTop: '0.75em' }}
+                onDismiss={() => setShowAutoLockBanner(false)}
+              >
+                <p style={{ margin: 0 }}>
+                  Session timed out
+                  {settings.autoLockTimer > 0
+                    ? ` after ${settings.autoLockTimer} minute${settings.autoLockTimer === 1 ? '' : 's'} without activity`
+                    : ''}
+                  . In-memory signing keys were cleared.
+                </p>
+              </Message>
+            )}
+            <Message info size="small" style={{ marginTop: showAutoLockBanner ? '0.5em' : '0.75em' }}>
+              <p style={{ margin: 0 }}>
+                Offline signing is locked. Open <strong>Sign Message</strong> and enter the password you used when creating or restoring this identity to use the encrypted key stored on this device.
+              </p>
+            </Message>
+          </>
+        );
+      })()}
 
       <style>{`
         .ui.segment:hover .edit-icon {
@@ -1814,12 +2528,186 @@ const IdentityManager = () => {
         }
       `}</style>
 
+      {/* ─── Wallet panel ─── */}
+      <Segment style={{ marginTop: '1em', background: 'rgba(255,255,255,0.06)' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5em' }}>
+          <h4 style={{ margin: 0, color: 'white', fontSize: '0.95em' }}>
+            <Icon name="bitcoin" style={{ color: '#f7931a', marginRight: '0.3em' }} />
+            Wallet
+          </h4>
+          <Button
+            size="mini"
+            basic
+            inverted
+            icon="refresh"
+            loading={walletBalanceLoading}
+            onClick={() => { void refreshWalletBalance(); void refreshWalletTxs(); }}
+            title="Refresh balance and transactions"
+          />
+        </div>
+        {btcStatus && !btcStatus.available ? (
+          <p style={{ color: 'rgba(255,255,255,0.55)', fontSize: '0.88em', margin: '0.25em 0' }}>
+            Bitcoin service not available on the active Fabric node.
+          </p>
+        ) : walletBalance ? (
+          <div style={{ marginBottom: '0.5em' }}>
+            <div style={{ fontSize: '1.4em', fontFamily: 'monospace', fontWeight: 'bold', color: 'white' }}>
+              {formatSats(walletBalance.balanceSats)}
+            </div>
+            <div style={{ fontSize: '0.82em', color: 'rgba(255,255,255,0.55)', marginTop: '0.15em' }}>
+              {walletBalance.confirmedSats !== walletBalance.balanceSats ? (
+                <span>confirmed {formatSats(walletBalance.confirmedSats)} · unconfirmed {formatSats(walletBalance.unconfirmedSats)}</span>
+              ) : null}
+              {walletBalance.network ? <span>{walletBalance.confirmedSats !== walletBalance.balanceSats ? ' · ' : ''}{walletBalance.network}</span> : null}
+              {walletBalance.height != null ? <span> · block {walletBalance.height}</span> : null}
+            </div>
+          </div>
+        ) : (
+          <p style={{ color: 'rgba(255,255,255,0.45)', fontSize: '0.88em', margin: '0.25em 0' }}>
+            Connect to a Fabric node to see your balance.
+          </p>
+        )}
+        <Button.Group size="small" fluid style={{ marginTop: '0.5em' }}>
+          <Button
+            basic
+            inverted
+            active={walletView === 'receive'}
+            onClick={() => { setWalletView(walletView === 'receive' ? null : 'receive'); deriveCurrentReceiveAddr(); }}
+          >
+            <Icon name="qrcode" /> Receive
+          </Button>
+          <Button
+            basic
+            inverted
+            active={walletView === 'history'}
+            onClick={() => { setWalletView(walletView === 'history' ? null : 'history'); if (walletTxs.length === 0) void refreshWalletTxs(); }}
+          >
+            <Icon name="list" /> History
+          </Button>
+          <Button
+            basic
+            inverted
+            active={walletView === 'send'}
+            onClick={() => { setWalletView(walletView === 'send' ? null : 'send'); setSendError(null); }}
+          >
+            <Icon name="send" /> Send
+          </Button>
+        </Button.Group>
+
+        {walletView === 'receive' && (
+          <div style={{ marginTop: '0.75em' }}>
+            {receiveAddr ? (
+              <>
+                <p style={{ color: 'rgba(255,255,255,0.7)', fontSize: '0.85em', marginBottom: '0.35em' }}>
+                  Receive address (BIP84, index {receiveAddrIdx}):
+                </p>
+                <Segment style={{ wordBreak: 'break-all', fontFamily: 'monospace', fontSize: '0.88em', padding: '0.75em' }}>
+                  {receiveAddr}
+                </Segment>
+                <Button.Group size="mini" fluid>
+                  <Button
+                    basic
+                    inverted
+                    onClick={() => {
+                      try { navigator.clipboard.writeText(receiveAddr); } catch {}
+                    }}
+                  >
+                    <Icon name="copy" /> Copy
+                  </Button>
+                  <Button
+                    basic
+                    inverted
+                    onClick={() => { setReceiveAddrIdx(i => i + 1); }}
+                  >
+                    <Icon name="arrow right" /> Next address
+                  </Button>
+                </Button.Group>
+              </>
+            ) : (
+              <p style={{ color: 'rgba(255,255,255,0.45)', fontSize: '0.85em' }}>
+                Could not derive an address. Make sure your identity has an xpub and the network is known.
+              </p>
+            )}
+          </div>
+        )}
+
+        {walletView === 'history' && (
+          <div style={{ marginTop: '0.75em' }}>
+            {walletTxsLoading ? (
+              <div style={{ textAlign: 'center', padding: '1em' }}>
+                <Loader active inline="centered" size="small" />
+              </div>
+            ) : walletTxs.length === 0 ? (
+              <p style={{ color: 'rgba(255,255,255,0.45)', fontSize: '0.85em' }}>No transactions yet.</p>
+            ) : (
+              <List divided inverted size="small" style={{ maxHeight: '14em', overflowY: 'auto' }}>
+                {walletTxs.map(tx => (
+                  <List.Item key={tx.txid + tx.category}>
+                    <List.Content>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <span style={{ color: tx.amount >= 0 ? '#21ba45' : '#db2828', fontFamily: 'monospace', fontWeight: 'bold' }}>
+                          {tx.amount >= 0 ? '+' : ''}{formatSats(Math.round(tx.amount * 1e8))}
+                        </span>
+                        <span style={{ fontSize: '0.78em', color: 'rgba(255,255,255,0.45)' }}>
+                          {tx.confirmations > 0 ? `${tx.confirmations} conf` : 'unconfirmed'}
+                        </span>
+                      </div>
+                      <div style={{ fontSize: '0.75em', color: 'rgba(255,255,255,0.4)', marginTop: '0.15em' }}>
+                        <code>{tx.txid.slice(0, 12)}…{tx.txid.slice(-8)}</code>
+                        {tx.time ? <span> · {new Date(tx.time * 1000).toLocaleString()}</span> : null}
+                      </div>
+                    </List.Content>
+                  </List.Item>
+                ))}
+              </List>
+            )}
+          </div>
+        )}
+
+        {walletView === 'send' && (
+          <div style={{ marginTop: '0.75em' }}>
+            <Form>
+              <Form.Field>
+                <label style={{ color: 'rgba(255,255,255,0.7)', fontSize: '0.85em' }}>Recipient address</label>
+                <Input
+                  placeholder="bc1q… or bcrt1…"
+                  value={sendAddr}
+                  onChange={e => setSendAddr(e.target.value)}
+                  fluid
+                  size="small"
+                />
+              </Form.Field>
+              <Form.Field>
+                <label style={{ color: 'rgba(255,255,255,0.7)', fontSize: '0.85em' }}>Amount (sats)</label>
+                <Input
+                  type="number"
+                  min={1}
+                  placeholder="1000"
+                  value={sendAmountSats}
+                  onChange={e => setSendAmountSats(e.target.value)}
+                  fluid
+                  size="small"
+                />
+              </Form.Field>
+              {sendError ? (
+                <Message negative size="small" onDismiss={() => setSendError(null)}>
+                  <p style={{ margin: 0 }}>{sendError}</p>
+                </Message>
+              ) : null}
+              <p style={{ fontSize: '0.78em', color: 'rgba(255,255,255,0.45)', margin: '0.5em 0' }}>
+                Sends via the active Fabric node's Bitcoin service (Hub wallet). Transaction signing with local keys (PSBT) is planned.
+              </p>
+            </Form>
+          </div>
+        )}
+      </Segment>
+
       <Message style={{ marginTop: '1em' }}>
         <Message.Header>Loaded Identities</Message.Header>
         <Message.Content style={{ marginTop: '1em' }}>
           <List divided relaxed size='small'>
             {identities.map((identity, index) => (
-              <List.Item 
+              <List.Item
                 key={index}
                 style={{ cursor: 'pointer' }}
                 onClick={() => handleIdentityClick(identity)}
@@ -1832,7 +2720,7 @@ const IdentityManager = () => {
                     </List.Header>
                     <Icon
                       name='pencil'
-                      link 
+                      link
                       style={{ opacity: 0.5, transition: 'opacity 0.2s' }}
                       onClick={(e: React.MouseEvent) => {
                         e.stopPropagation();
@@ -1871,6 +2759,43 @@ const IdentityManager = () => {
         </Message.Content>
       </Message>
 
+      <Segment style={{ marginTop: '1em', background: 'rgba(255,255,255,0.06)' }}>
+        <h4 style={{ margin: '0 0 0.5em', color: 'white', fontSize: '0.95em' }}>
+          <Icon name="plug" style={{ marginRight: '0.35em' }} />
+          Fabric node
+        </h4>
+        {nodeSigninResult && nodeSigninResult.ok ? (
+          <Message positive size="small" style={{ marginBottom: '0.65em' }} onDismiss={() => setNodeSigninResult(null)}>
+            <p style={{ margin: 0 }}>
+              Connected.
+              {nodeSigninResult.fabricPeerId ? (
+                <span> Peer: <code style={{ fontSize: '0.85em' }}>{nodeSigninResult.fabricPeerId.slice(0, 14)}…</code></span>
+              ) : null}
+              {nodeSigninResult.clock != null ? ` · clock ${nodeSigninResult.clock}` : ''}
+            </p>
+          </Message>
+        ) : null}
+        {nodeSigninResult && !nodeSigninResult.ok ? (
+          <Message negative size="small" style={{ marginBottom: '0.65em' }} onDismiss={() => setNodeSigninResult(null)}>
+            <p style={{ margin: 0 }}>{nodeSigninResult.error || 'Connection failed'}</p>
+          </Message>
+        ) : null}
+        <Button
+          fluid
+          primary
+          size="small"
+          loading={nodeSigninBusy}
+          disabled={nodeSigninBusy}
+          onClick={() => void handleNodeSignin()}
+        >
+          <Icon name="sign-in" />
+          Connect &amp; register
+        </Button>
+        <p style={{ fontSize: '0.8em', color: 'rgba(255,255,255,0.55)', marginTop: '0.5em', marginBottom: 0 }}>
+          Connects to your active Fabric node, verifies its identity, and registers this wallet for notifications (invitations, chat, delegation signatures).
+        </p>
+      </Segment>
+
       <Button.Group vertical fluid style={{ marginTop: '1em' }}>
         <Button
           color='green'
@@ -1884,6 +2809,13 @@ const IdentityManager = () => {
             const currentIdentity = identities.find(id => id.isCurrent);
             if (currentIdentity) {
               setSelectedIdentity(currentIdentity);
+              setVerificationResult(null);
+              setMessageToSign('');
+              setSignature(null);
+              setShowSignature(false);
+              setSignUnlockPassword('');
+              setSignUnlockError(null);
+              setClipboardNotice(null);
               setState('sign_message');
             }
           }}
@@ -1891,7 +2823,13 @@ const IdentityManager = () => {
         <Button
           primary
           content='Verify Message'
-          onClick={() => setState('verify_message')}
+          onClick={() => {
+            setVerificationResult(null);
+            setMessageToVerify('');
+            setSignatureToVerify('');
+            setPubkeyToVerify('');
+            setState('verify_message');
+          }}
         />
       </Button.Group>
     </div>
@@ -1917,7 +2855,11 @@ const IdentityManager = () => {
             <Button
               primary
               content='Use Existing xpub'
-              onClick={() => setState('xpub_login')}
+              onClick={() => {
+                setXpubState('input');
+                setXpub('');
+                setState('xpub_login');
+              }}
             />
             <Button
               color='black'
@@ -1960,9 +2902,9 @@ const IdentityManager = () => {
         {showDebug && (
           <Message.Content>
             <p>Browser Storage:</p>
-            <pre style={{ 
-              fontSize: '0.8em', 
-              wordBreak: 'break-all', 
+            <pre style={{
+              fontSize: '0.8em',
+              wordBreak: 'break-all',
               whiteSpace: 'pre-wrap',
               fontFamily: 'monospace',
               color: '#666'
@@ -2040,7 +2982,7 @@ const IdentityManager = () => {
     <Message className="fade-in">
       <Message.Header>Choose Login Method</Message.Header>
       <Message.Content>
-        <p>Select how you would like to login:</p>
+        <p>Select how you would like to log in:</p>
         <Button.Group vertical fluid style={{ marginTop: '1em' }}>
           <Button
             color='green'
@@ -2048,15 +2990,19 @@ const IdentityManager = () => {
             onClick={() => setState('seed_phrase_login')}
           />
           <Button
-            primary
-            content='Use Extended Private Key (xprv)'
-            onClick={() => setState('xprv_login')}
-            disabled={true}
+            basic
+            disabled
+            title='Extended private key import is not available in this build.'
+            content='Use Extended Private Key (xprv) — coming soon'
           />
           <Button
             primary
             content='Use Extended Public Key (xpub)'
-            onClick={() => setState('xpub_login')}
+            onClick={() => {
+              setXpubState('input');
+              setXpub('');
+              setState('xpub_login');
+            }}
           />
           <Button
             content='Go Back'
@@ -2071,7 +3017,7 @@ const IdentityManager = () => {
     <Message className="fade-in">
       <Message.Header>Login with Seed Phrase</Message.Header>
       <Message.Content>
-        <p>Enter your seed phrase and derivation password to login.</p>
+        <p>Enter your seed phrase and derivation password to log in.</p>
         <Form>
           <Form.Field>
             <label>Seed Phrase</label>
@@ -2125,51 +3071,26 @@ const IdentityManager = () => {
                     setIsValidPhrase(false);
                     return;
                   }
-                  
+
                   // Generate the seed from the mnemonic
                   const seed = mnemonicToSeedSync(seedPhrase, password);
 
                   // Derive the master key using BIP32
                   const masterKey = bip32.fromSeed(seed);
-                  
-                  // Derive the xpub at the default path (m/44'/0'/0')
-                  const derivedKey = masterKey.derivePath("m/44'/0'/0'");
-                  const xpub = `${derivedKey.neutered().toBase58()}`;
 
-                  // Get the x-coordinate of the public key point
-                  const pubKeyPoint = derivedKey.publicKey;
-                  if (!pubKeyPoint || pubKeyPoint.length !== 33) {
-                    throw new Error('Invalid public key');
-                  }
-                  const publicKeyHex = Buffer.from(pubKeyPoint).toString('hex');  // Convert to hex string
-
-                  // Use the x-coordinate (remove the prefix byte)
-                  const xCoord = pubKeyPoint.slice(1, 33);
-
-                  // Encode with bech32m
-                  const words = bech32m.toWords(xCoord);
-                  const bech32mEncoded = bech32m.encode('id', words);
-
-                  // Create a new identity
-                  const newIdentity: Identity = {
-                    id: bech32mEncoded,
-                    xpub,
-                    publicKeyHex,
-                    bech32: bech32mEncoded,
-                    isCurrent: true,
-                    name: bech32mEncoded,
-                    loadedAt: new Date().toISOString(),
-                    hasPrivateKey: true
-                  };
+                  const path = settings.derivationPath;
+                  const derivedKey = masterKey.derivePath(path);
+                  const { identity: newIdentity, blob } = identityAndWalletBlobFromNode(derivedKey, path, password);
 
                   // Add the new identity and make it current
                   setIdentities(prev => {
                     const updated = prev.map(id => ({ ...id, isCurrent: false }));
                     return [newIdentity, ...updated];
                   });
+                  setWalletCryptos(prev => ({ ...prev, [newIdentity.id]: blob }));
 
                   setState('logged_in');
-                  
+
                   // Clear sensitive data
                   setPassword('');
                   setSeedPhrase(null);
@@ -2257,41 +3178,16 @@ const IdentityManager = () => {
                   // Derive the master key using BIP32
                   const masterKey = bip32.fromSeed(seed);
 
-                  // Derive the xpub at the default path (m/44'/0'/0')
-                  const derivedKey = masterKey.derivePath("m/44'/0'/0'");
-                  const xpub = `${derivedKey.neutered().toBase58()}`;
-
-                  // Get the x-coordinate of the public key point
-                  const pubKeyPoint = derivedKey.publicKey;
-                  if (!pubKeyPoint || pubKeyPoint.length !== 33) {
-                    throw new Error('Invalid public key');
-                  }
-                  const publicKeyHex = Buffer.from(pubKeyPoint).toString('hex');  // Convert to hex string
-
-                  // Use the x-coordinate (remove the prefix byte)
-                  const xCoord = pubKeyPoint.slice(1, 33);
-
-                  // Encode with bech32m
-                  const words = bech32m.toWords(xCoord);
-                  const bech32mEncoded = bech32m.encode('id', words);
-
-                  // Create a new identity
-                  const newIdentity: Identity = {
-                    id: bech32mEncoded,
-                    xpub,
-                    publicKeyHex,
-                    bech32: bech32mEncoded,
-                    isCurrent: true,
-                    name: bech32mEncoded,
-                    loadedAt: new Date().toISOString(),
-                    hasPrivateKey: true
-                  };
+                  const path = settings.derivationPath;
+                  const derivedKey = masterKey.derivePath(path);
+                  const { identity: newIdentity, blob } = identityAndWalletBlobFromNode(derivedKey, path, password);
 
                   // Add the new identity and make it current
                   setIdentities(prev => {
                     const updated = prev.map(id => ({ ...id, isCurrent: false }));
                     return [newIdentity, ...updated];
                   });
+                  setWalletCryptos(prev => ({ ...prev, [newIdentity.id]: blob }));
 
                   setState('logged_in');
 
@@ -2326,8 +3222,8 @@ const IdentityManager = () => {
                 <List.Header style={{ fontFamily: 'monospace', fontSize: '0.8em' }}>
                   {node.id}
                 </List.Header>
-                <List.Description style={{ 
-                  fontFamily: 'monospace', 
+                <List.Description style={{
+                  fontFamily: 'monospace',
                   fontSize: '0.8em'
                 }}>
                   <Popup
@@ -2350,11 +3246,13 @@ const IdentityManager = () => {
                     icon={node.isActive ? 'pause' : 'play'}
                     color={node.isActive ? 'orange' : 'green'}
                     onClick={() => handleToggleNode(node.id)}
+                    title={node.isActive ? 'Deactivate (RPC signing uses the active node)' : 'Set active for RPC'}
                   />
                   <Button
                     icon='trash'
                     color='red'
                     onClick={() => handleRemoveNode(node.id)}
+                    title='Remove node'
                   />
                 </Button.Group>
               </div>
@@ -2366,12 +3264,22 @@ const IdentityManager = () => {
         <List.Content>
           <Form>
             <Form.Field>
-              <label>Connection String</label>
+              <label>Bitcoin Host</label>
               <Input
-                placeholder="http://username:password@host:port"
+                placeholder="https://hub.fabric.pub/services/bitcoin or http://user:pass@host:port"
                 value={newNodeConnection}
                 onChange={(e) => setNewNodeConnection(e.target.value)}
               />
+              <Button.Group size='mini' style={{ marginTop: '0.5em', flexWrap: 'wrap' }}>
+                {BITCOIN_HOST_PRESETS.map(p => (
+                  <Button
+                    key={p.id}
+                    type='button'
+                    content={p.label}
+                    onClick={() => setNewNodeConnection(p.connectionString)}
+                  />
+                ))}
+              </Button.Group>
             </Form.Field>
             <Button
               primary
@@ -2383,6 +3291,136 @@ const IdentityManager = () => {
         </List.Content>
       </List.Item>
     </List>
+  );
+
+  const renderFabricNodeList = () => (
+    <List divided relaxed>
+      {settings.fabricNodes.map(node => (
+        <List.Item key={node.id}>
+          <List.Content>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '1em' }}>
+              <div style={{ minWidth: 0, flex: 1 }}>
+                <List.Header style={{ fontFamily: 'monospace', fontSize: '0.8em' }}>
+                  {node.id}
+                </List.Header>
+                <List.Description style={{
+                  fontFamily: 'monospace',
+                  fontSize: '0.8em'
+                }}>
+                  <Popup
+                    content={node.hubAddress}
+                    trigger={<span style={{ cursor: 'pointer' }}>{truncateMiddle(node.hubAddress, 22, 10)}</span>}
+                    position='top left'
+                    style={{ maxWidth: '500px', wordBreak: 'break-all' }}
+                  />
+                </List.Description>
+              </div>
+              <div style={{ flexShrink: 0 }}>
+                <Button.Group size='mini'>
+                  <Button
+                    icon='plug'
+                    color='blue'
+                    onClick={() => handleTestFabricNode(node)}
+                    title='Test WebSocket signaling'
+                  />
+                  <Button
+                    icon={node.isActive ? 'pause' : 'play'}
+                    color={node.isActive ? 'orange' : 'green'}
+                    onClick={() => handleToggleFabricNode(node.id)}
+                    title={node.isActive ? 'Deactivate (background mesh uses the active hub)' : 'Set active for mesh'}
+                  />
+                  <Button
+                    icon='trash'
+                    color='red'
+                    onClick={() => handleRemoveFabricNode(node.id)}
+                    title='Remove Fabric node'
+                  />
+                </Button.Group>
+              </div>
+            </div>
+          </List.Content>
+        </List.Item>
+      ))}
+      <List.Item>
+        <List.Content>
+          <Form>
+            <Form.Field>
+              <label>Fabric Hub (signaling)</label>
+              <Input
+                placeholder="https://hub.fabric.pub or http://127.0.0.1:3003"
+                value={newFabricHubAddress}
+                onChange={(e) => setNewFabricHubAddress(e.target.value)}
+              />
+              <Button.Group size='mini' style={{ marginTop: '0.5em', flexWrap: 'wrap' }}>
+                {FABRIC_HUB_PRESETS.map(p => (
+                  <Button
+                    key={p.id}
+                    type='button'
+                    content={p.label}
+                    onClick={() => setNewFabricHubAddress(p.hubAddress)}
+                  />
+                ))}
+              </Button.Group>
+            </Form.Field>
+            <Button
+              primary
+              content='Add Fabric Node'
+              onClick={handleAddFabricNode}
+              disabled={!newFabricHubAddress.trim()}
+            />
+          </Form>
+        </List.Content>
+      </List.Item>
+    </List>
+  );
+
+  const renderFabricTestModal = () => (
+    <Modal
+      open={isFabricTestModalOpen}
+      onClose={() => setIsFabricTestModalOpen(false)}
+      size='small'
+    >
+      <Modal.Header>
+        Test Fabric signaling (WebSocket)
+        {testingFabricNode && (
+          <div style={{ fontSize: '0.8em', marginTop: '0.5em', fontFamily: 'monospace' }}>
+            {testingFabricNode.id}
+          </div>
+        )}
+      </Modal.Header>
+      <Modal.Content>
+        {testingFabricNode && (
+          <div>
+            {fabricTestError ? (
+              <Message negative>
+                <Message.Header>Connection Failed</Message.Header>
+                <p>{fabricTestError}</p>
+              </Message>
+            ) : !fabricTestOk ? (
+              <div style={{ textAlign: 'center', padding: '2em' }}>
+                <Loader active inline='centered' />
+                <p style={{ marginTop: '1em' }}>Opening WebSocket…</p>
+              </div>
+            ) : (
+              <Message positive>
+                <Message.Header>Signaling endpoint reachable</Message.Header>
+                <p style={{ wordBreak: 'break-all', fontFamily: 'monospace', fontSize: '0.85em' }}>
+                  {fabricTestOk.url}
+                </p>
+                <p style={{ marginTop: '0.5em' }}>
+                  Subprotocol: <code>{fabricTestOk.subprotocol}</code>
+                </p>
+              </Message>
+            )}
+          </div>
+        )}
+      </Modal.Content>
+      <Modal.Actions>
+        <Button onClick={() => setIsFabricTestModalOpen(false)}>
+          Close
+        </Button>
+      </Modal.Actions>
+    </Modal>
   );
 
   const renderTestNodeModal = () => (
@@ -2434,7 +3472,7 @@ const IdentityManager = () => {
                     </Table.Row>
                     <Table.Row>
                       <Table.Cell>Best Block</Table.Cell>
-                      <Table.Cell style={{ 
+                      <Table.Cell style={{
                         fontFamily: 'monospace',
                         fontSize: '0.8em',
                         wordBreak: 'break-all'
@@ -2481,15 +3519,22 @@ const IdentityManager = () => {
                 <List.Header>Auto-Lock Timer</List.Header>
                 <List.Description>
                   <Form.Field>
-                    <label>Lock wallet after inactivity (minutes):</label>
+                    <label>Lock wallet after inactivity (minutes, 0 = off):</label>
                     <Input
                       type="number"
-                      min="1"
-                      max="60"
+                      min={0}
+                      max={720}
                       value={settings.autoLockTimer}
-                      onChange={(e) => handleSettingsChange('autoLockTimer', parseInt(e.target.value) || DEFAULT_SETTINGS.autoLockTimer)}
+                      onChange={(e) => {
+                        const v = parseInt(e.target.value, 10);
+                        const n = Number.isNaN(v) ? DEFAULT_SETTINGS.autoLockTimer : Math.max(0, Math.min(720, v));
+                        handleSettingsChange('autoLockTimer', n);
+                      }}
                       fluid
                     />
+                    <p style={{ marginTop: '0.5em', fontSize: '0.85em', color: 'rgba(255,255,255,0.65)' }}>
+                      After this many minutes without keyboard or pointer activity in the popup, session signing keys and any seed phrase in memory are cleared. The timer uses the same clock when you close and reopen the popup.
+                    </p>
                   </Form.Field>
                 </List.Description>
               </List.Content>
@@ -2498,15 +3543,24 @@ const IdentityManager = () => {
               <List.Content>
                 <List.Header>Default Derivation Path</List.Header>
                 <List.Description>
+                  <p style={{ marginBottom: '0.75em' }}>
+                    Seed-based identities are derived at this path. The matching extended private key (xprv) is encrypted on this device with the password you set at creation or seed login so you can sign after restart.
+                  </p>
                   <Form.Field>
                     <label>BIP32 derivation path:</label>
                     <Input
                       value={settings.derivationPath}
                       onChange={(e) => handleSettingsChange('derivationPath', e.target.value)}
-                      placeholder="m/44'/0'/0'"
+                      placeholder={FABRIC_KEY_DERIVATION_PATH}
                       fluid
                       disabled
+                      title={settings.derivationPath}
                     />
+                    {settings.derivationPath.trim() !== FABRIC_KEY_DERIVATION_PATH && (
+                      <p style={{ marginTop: '0.5em', fontSize: '0.85em', color: 'rgba(255,200,120,0.95)' }}>
+                        Differs from the current Fabric default ({FABRIC_KEY_DERIVATION_PATH}). Keep this only if your identities were created with this path.
+                      </p>
+                    )}
                   </Form.Field>
                 </List.Description>
               </List.Content>
@@ -2516,6 +3570,14 @@ const IdentityManager = () => {
           <h4 style={{ marginTop: '2em' }}>Bitcoin Nodes</h4>
           {renderNodeList()}
           {renderTestNodeModal()}
+
+          <h4 style={{ marginTop: '2em' }}>Fabric Nodes</h4>
+          <p style={{ marginBottom: '0.75em', color: 'rgba(255,255,255,0.85)' }}>
+            WebRTC data channels use the Hub WebSocket for signaling (same as hub.fabric.pub Bridge). Test opens <code style={{ fontSize: '0.85em' }}>wss://…/</code> then closes; full peer mesh wiring comes next.
+          </p>
+          <FabricBackgroundMeshActions fabricNodes={settings.fabricNodes} />
+          {renderFabricNodeList()}
+          {renderFabricTestModal()}
 
           <h4 style={{ marginTop: '2em' }}>Security</h4>
           <List divided relaxed>
@@ -2542,7 +3604,7 @@ const IdentityManager = () => {
                   <Button
                     negative
                     content='Clear Data'
-                    onClick={handleLogoutClick}
+                    onClick={() => openEraseConfirm('erase_all')}
                   />
                 </List.Description>
               </List.Content>
@@ -2554,7 +3616,7 @@ const IdentityManager = () => {
             <List.Item>
               <List.Content>
                 <List.Header>Version</List.Header>
-                <List.Description>0.0.1</List.Description>
+                <List.Description>{PASSPORT_EXTENSION_VERSION}</List.Description>
               </List.Content>
             </List.Item>
           </List>
@@ -2563,7 +3625,7 @@ const IdentityManager = () => {
         <Button.Group vertical fluid style={{ marginTop: '2em' }}>
           <Button
             color='black'
-            content='Back to Dashboard'
+            content='Back'
             onClick={() => setState('logged_in')}
           />
         </Button.Group>
@@ -2614,11 +3676,120 @@ const IdentityManager = () => {
     }
   };
 
+  const getActiveFabricBase = useCallback((): string | null => {
+    const active = settings.fabricNodes.find(n => n.isActive);
+    return active ? active.hubAddress.replace(/\/+$/, '') : null;
+  }, [settings.fabricNodes]);
+
+  const refreshWalletBalance = useCallback(async () => {
+    const base = getActiveFabricBase();
+    const cur = identities.find(id => id.isCurrent);
+    if (!base || !cur) return;
+    setWalletBalanceLoading(true);
+    try {
+      const status = await fetchBitcoinStatus(base);
+      setBtcStatus(status);
+      if (!status.available) {
+        setWalletBalance(null);
+        return;
+      }
+      const bal = await fetchWalletBalance(base, cur.xpub, status.network || 'regtest');
+      setWalletBalance(bal);
+      if (bal.balanceSats != null) {
+        setIdentities(prev => prev.map(id =>
+          id.isCurrent ? { ...id, balance: formatBtc(bal.balanceSats) } : id
+        ));
+      }
+    } catch {
+      // silent
+    } finally {
+      setWalletBalanceLoading(false);
+    }
+  }, [getActiveFabricBase, identities]);
+
+  const refreshWalletTxs = useCallback(async () => {
+    const base = getActiveFabricBase();
+    if (!base) return;
+    setWalletTxsLoading(true);
+    try {
+      const txs = await fetchTransactionHistory(base, 25);
+      setWalletTxs(txs);
+    } catch {
+      setWalletTxs([]);
+    } finally {
+      setWalletTxsLoading(false);
+    }
+  }, [getActiveFabricBase]);
+
+  const deriveCurrentReceiveAddr = useCallback(() => {
+    const cur = identities.find(id => id.isCurrent);
+    if (!cur?.xpub) { setReceiveAddr(null); return; }
+    const net = btcStatus?.network || 'regtest';
+    const addr = deriveReceiveAddress(cur.xpub, net, receiveAddrIdx);
+    setReceiveAddr(addr);
+  }, [identities, btcStatus, receiveAddrIdx]);
+
+  useEffect(() => {
+    if (state === 'logged_in' && identities.some(id => id.isCurrent)) {
+      refreshWalletBalance();
+    }
+  }, [state]);
+
+  useEffect(() => {
+    if (walletView === 'receive') deriveCurrentReceiveAddr();
+  }, [receiveAddrIdx, deriveCurrentReceiveAddr, walletView]);
+
+  const handleNodeSignin = async () => {
+    const activeNode = settings.fabricNodes.find(n => n.isActive);
+    if (!activeNode) {
+      setNodeSigninResult({ ok: false, error: 'No active Fabric node configured. Open Settings → Fabric Nodes and activate one.' });
+      return;
+    }
+    setNodeSigninBusy(true);
+    setNodeSigninResult(null);
+    try {
+      const base = activeNode.hubAddress.replace(/\/+$/, '');
+      const res = await fetch(`${base}/services/rpc`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: Date.now(), method: 'GetNetworkStatus', params: [] })
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const body = await res.json();
+      if (body.error) throw new Error(body.error.message || 'RPC error');
+      const r = body.result;
+      const currentIdentity = identities.find(id => id.isCurrent);
+      setNodeSigninResult({
+        ok: true,
+        fabricPeerId: r?.fabricPeerId || null,
+        clock: r?.clock ?? null,
+        nodeAddress: base,
+        error: undefined
+      });
+      if (currentIdentity && currentIdentity.publicKeyHex) {
+        await fetch(`${base}/services/rpc`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+          body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: Date.now(),
+            method: 'RegisterWebRTCPeer',
+            params: [{ peerId: `passport-${currentIdentity.id.slice(0, 12)}`, metadata: { fabricPeerId: currentIdentity.publicKeyHex, xpub: currentIdentity.xpub, source: 'passport' } }]
+          })
+        }).catch(() => {});
+      }
+    } catch (e) {
+      setNodeSigninResult({ ok: false, error: e instanceof Error ? e.message : String(e) });
+    } finally {
+      setNodeSigninBusy(false);
+    }
+  };
+
   const handleAddNode = () => {
     if (!newNodeConnection.trim()) return;
 
     const newNode: BitcoinNode = {
-      id: createActorId(newNodeConnection.trim()),
+      id: passportNodeListId(newNodeConnection.trim()),
       connectionString: newNodeConnection.trim(),
       isActive: false
     };
@@ -2655,16 +3826,10 @@ const IdentityManager = () => {
     setIsTestModalOpen(true);
 
     try {
-      // Parse connection string to get components
-      const url = new URL(node.connectionString);
-      const auth = `${url.username}:${url.password}`;
-      const headers = {
-        'Authorization': `Basic ${btoa(auth)}`,
-        'Content-Type': 'application/json'
-      };
+      const headers = buildBitcoinRpcHeaders(node.connectionString);
+      const postUrl = getBitcoinRpcPostUrl(node.connectionString);
 
-      // Make RPC request
-      const response = await fetch(url.origin, {
+      const response = await fetch(postUrl, {
         method: 'POST',
         headers,
         body: JSON.stringify({
@@ -2687,6 +3852,51 @@ const IdentityManager = () => {
       setTestResult(data.result);
     } catch (error) {
       setTestError(error instanceof Error ? error.message : 'Unknown error occurred');
+    }
+  };
+
+  const handleAddFabricNode = () => {
+    if (!newFabricHubAddress.trim()) return;
+    const hubAddress = newFabricHubAddress.trim();
+    const newNode: FabricNode = {
+      id: passportNodeListId(`fabric:${hubAddress}`),
+      hubAddress,
+      isActive: false
+    };
+    setSettings(prev => ({
+      ...prev,
+      fabricNodes: [...prev.fabricNodes, newNode]
+    }));
+    setNewFabricHubAddress('');
+  };
+
+  const handleRemoveFabricNode = (id: string) => {
+    setSettings(prev => ({
+      ...prev,
+      fabricNodes: prev.fabricNodes.filter(node => node.id !== id)
+    }));
+  };
+
+  const handleToggleFabricNode = (id: string) => {
+    setSettings(prev => ({
+      ...prev,
+      fabricNodes: prev.fabricNodes.map(node => ({
+        ...node,
+        isActive: node.id === id ? !node.isActive : node.isActive
+      }))
+    }));
+  };
+
+  const handleTestFabricNode = async (node: FabricNode) => {
+    setTestingFabricNode(node);
+    setFabricTestOk(null);
+    setFabricTestError(null);
+    setIsFabricTestModalOpen(true);
+    try {
+      const ok = await testFabricSignalingReachable(node.hubAddress, '/');
+      setFabricTestOk(ok);
+    } catch (error) {
+      setFabricTestError(error instanceof Error ? error.message : 'Unknown error occurred');
     }
   };
 
@@ -2719,7 +3929,7 @@ const IdentityManager = () => {
               <Button
                 color='black'
                 content='Logout'
-                onClick={handleLogoutClick}
+                onClick={() => openEraseConfirm('logout')}
                 loading={isLoggingOut}
                 disabled={isLoggingOut}
               />
@@ -2733,15 +3943,26 @@ const IdentityManager = () => {
         onClose={handleCancelLogout}
         size='small'
       >
-        <Modal.Header>Confirm Logout</Modal.Header>
+        <Modal.Header>
+          {eraseConfirmMode === 'erase_all' ? 'Erase all extension data?' : 'Log out?'}
+        </Modal.Header>
         <Modal.Content>
           <Message warning>
-            <Message.Header>Important Warning</Message.Header>
-            <p>Logging out will remove all identities from this device.</p>
-            <p><strong>You will need your seed phrase and password to restore your identities.</strong></p>
-            <p>If you have not securely backed up your seed phrase and password, you may permanently lose access to your funds.</p>
+            <Message.Header>Important</Message.Header>
+            {eraseConfirmMode === 'erase_all' ? (
+              <>
+                <p>This removes all identities, encrypted signing material, and stored settings (including Bitcoin and Fabric nodes) from this device.</p>
+                <p><strong>Export a wallet backup first</strong> if you need to restore later.</p>
+              </>
+            ) : (
+              <>
+                <p>Logging out removes all identities from this device.</p>
+                <p><strong>You will need your seed phrase and password to restore your identities.</strong></p>
+                <p>If you have not securely backed up your seed phrase and password, you may permanently lose access to your funds.</p>
+              </>
+            )}
           </Message>
-          <p>Are you sure you want to proceed with logout?</p>
+          <p>{eraseConfirmMode === 'erase_all' ? 'Erase everything on this device?' : 'Are you sure you want to log out?'}</p>
         </Modal.Content>
         <Modal.Actions>
           <Button onClick={handleCancelLogout}>
@@ -2753,7 +3974,7 @@ const IdentityManager = () => {
             loading={isLoggingOut}
             disabled={isLoggingOut}
           >
-            Yes, Logout
+            {eraseConfirmMode === 'erase_all' ? 'Erase everything' : 'Log out'}
           </Button>
         </Modal.Actions>
       </Modal>
