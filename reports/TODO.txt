@@ -1,0 +1,4 @@
+./package.json:    "report:todo": "grep --exclude-dir=.git --exclude-dir=_book --exclude-dir=assets --exclude-dir=node_modules --exclude-dir=reports --exclude-dir=coverage --exclude-dir=docs -rEI \"TODO|FIXME\" --exclude-dir=dist . > reports/TODO.txt",
+./src/types/key.ts:    // TODO: Implement proper bech32 encoding
+./src/UIElements/IdentityManager.tsx:      // TODO: implement bech32m encoded id here
+./src/UIElements/IdentityManager.tsx:        // TODO: Fall back to local key signing

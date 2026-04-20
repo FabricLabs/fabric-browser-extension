@@ -1,1 +1,29 @@
+# See https://help.github.com/ignore-files/ for more about ignoring files.
+
+# dependencies
 node_modules
+.yalc
+
+# builds
+dist
+coverage
+assets/js/*.js
+assets/js/*.js.map
+assets/semantic.css
+assets/semantic.min.css
+assets/semantic.js
+assets/semantic.min.js
+
+# backup files
+*.bak
+
+# misc
+.DS_Store
+EXT_DB
+test-results
+playwright-report
+
+# large media files
+assets/Rk0JjG7brARcVivg.mp4
+assets/d923053338d4296650282ac88ad822cf-593455159.jpg
+assets/vector-image-pixellated-eye-ideal-beauty-technology-science-applications-115170863-1729691464.jpg
