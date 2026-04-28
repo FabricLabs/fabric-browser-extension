@@ -27,6 +27,36 @@ Use a minimal local server (backed by `@fabric/http`) that serves the **compiled
    - `window.fabricExtension`
    - `window.fabricExtension.chrome.runtime.sendMessage({ type: 'FABRIC_ACTION' }, console.log)` → response includes `success: true` and `source: 'local-test-server'`.
 
+### Remote Hub (localhost:8080) mesh integration
+With **`@fabric/http` `npm run sample:hub`** (or a full **@fabric/hub** on the same port) running, the extension can be tested against that origin’s `hub-mesh-bridge` page and the same `postMessage` contract as the built-in harness. Port **8080** is the default for `test:ui:mesh-remote` if you do not set `FABRIC_HUB_BASE_URL` yourself.
+
+- Start the stub (from a `fabric-http` clone): `npm run sample:hub`
+- In this repo, after `npm run build` and `npx playwright install chromium`: `npm run test:ui:mesh-remote`
+
+This runs only **`tests/ui/hub-remote-mesh-bridge.spec.ts`**, which calls **Register/Unregister** on `http://127.0.0.1:8080/hub-mesh-bridge.html` and asserts `fabric_mesh_hub_registration` in the extension. Use `127.0.0.1` or `localhost` consistently with how you open the Hub in a browser. Optional: `FABRIC_HUB_MESH_PATH` if the bridge page lives at a different path.
+
+The content script is matched on both **`http://localhost:*`** and **`http://127.0.0.1:*`** (`src/manifest.json`) so loopback dev servers on either host receive the bridge.
+
+The default **`npm run test:ui`** includes a **skipped** placeholder for the remote suite when `FABRIC_HUB_BASE_URL` is not set, so you can see the opt-in in the report.
+
+### Trusted Hub HTTP: `X-Fabric-Identity` + traffic metrics
+After **Connect & register** succeeds (same flow that calls `GetNetworkStatus` and `RegisterWebRTCPeer` with your public key), the extension records that node’s **origin** in `fabric_trusted_http_origins` and the service worker:
+
+- Injects **`X-Fabric-Identity`** on normal document/asset/XHR requests to those origins only (`declarativeNetRequest`, rule ids 100–199). Value is the same **`id1…` bech32m** string as the Passport UI (x-only witness + `id` HRP, see `src/utils/fabricIdentityBech32.ts`); stored `id` is reused when it already decodes as bech32m. **No xprv** — public material in line with `RegisterWebRTCPeer`.
+- Observes **`webRequest`** for **rough** stats (request count + `Content-Length` sums) on the same origins; in-memory until the service worker restarts. **`chrome.runtime.sendMessage({ type: 'GET_FABRIC_TRAFFIC_METRICS' })`** returns `{ origins, byOrigin }` for a future settings UI.
+
+This is **off** for every other site. `@fabric/http` with `cors: true` allows the header in CORS preflight (`x-fabric-identity`).
+
+### Shared identity across two origins (proof in tests)
+**`tests/ui/two-origin-identity.spec.ts`** logs in with the standard test seed, records the **truncated xpub** on identity detail, opens **`/test.html`** on both **`http://localhost:3044`** and **`http://127.0.0.1:3044`** (different origins, same port), then confirms the xpub line is **unchanged**. That is the same wallet profile in one extension — not two separate identities per site.
+
+### Release gate: `@fabric/http` auth
+**Bearer + JSON-RPC** is covered in **`tests/ui/release-gate-fabric-auth.spec.ts`**, using `buildBearerToken` from `@fabric/http/middlewares/auth` and `POST /services/rpc` (method `ReleaseGatePing`) when the test server enables JSON-RPC auth. Run after build + Playwright install:
+
+- `npm run test:ui:release-gate` — sets `FABRIC_JSONRPC_AUTH_TEST=1` for `scripts/local-test-server.js` and runs only this spec. Normal `npm run test:ui` does **not** turn on JSON-RPC `requireAuth` so the rest of the UI suite is unchanged.
+
+See `node_modules/@fabric/http/docs/RELEASE_GATE.md` when `@fabric/http` is linked, or the [fabric-http `docs/RELEASE_GATE.md`](https://github.com/FabricLabs/fabric-http/blob/feature/v0.1.0-RC1/docs/RELEASE_GATE.md) on the RC branch.
+
 ## New Wallet Creation User Flow
 1. Upon clicking the extension icon for the first time, a new tab opens with onboarding modals showcasing extension features and options to import or create a new seed.
 2. Users will be asked to set an encryption password (which could later be changed in the settings)
@@ -40,10 +70,10 @@ Data stored in leveldb is encrypted with the subtleCrypto AES-GCM algorithm. Enc
 
 #### const importKey = ()
 - Description : Import Key for SubtleCrypto Encryption
-  
+
 #### const generateKey = ()
 - Description : Generate Key for SubtleCrypto Encryption
-  
+
 #### const encrypt = (data, key, iv)
 - Description : Encrypt data
 - Params
@@ -57,12 +87,12 @@ Data stored in leveldb is encrypted with the subtleCrypto AES-GCM algorithm. Enc
   - {ArrayBuffer} data : Data to be decrypted
   - {CryptoKey} key : Key to be used for decryption
   - {Uint8Array} iv : Initial Vector for decryption
-  
+
 #### const encryptToString = (data)
 - Description : Encrypt data to string
 - Params
   - {ArrayBuffer} data : Data to be encrypted
-  
+
 #### const decryptFromString = (data)
 - Description : Decrypt data from string
 - Params
@@ -80,10 +110,10 @@ Per-chain derivation and address formatting live in `src/UIElements/IdentityMana
 - Description : Set seed phrase to setting
 - Params
   - {Array<string>} phrase : 12 seed phrases
- 
+
 #### const insertAccount = async (account)
 - Description : Insert a new account
-- Params 
+- Params
   - {object}    account : Account Info
 
 #### const insertIdentity = async (identity, accountId = 0)
@@ -91,7 +121,7 @@ Per-chain derivation and address formatting live in `src/UIElements/IdentityMana
 - Params
   - {IIdentity} identity : array of identities generated from account
   - {number}    accountId : index of account generated from seed.
- 
+
 #### const setDBIdentityCheckState = async (accountId, identity, chain, state)
 - Description :  Enable/disable chain operability for specified idenity
 - Params
@@ -99,7 +129,7 @@ Per-chain derivation and address formatting live in `src/UIElements/IdentityMana
   - {number} identity : identity index
   - {number} chain : chain's id listed in browser extension
   - {boolean} state : boolean to enable or disable chain
-  
+
 #### const setGlobalChainState = async (settings)
 - Description : Enable/disable chain operability for wallet
 - Params
@@ -124,10 +154,10 @@ Per-chain derivation and address formatting live in `src/UIElements/IdentityMana
 
 #### const changePassword = async (accountId = 0, password)
 - Description : Change the password in the store
-- Params 
+- Params
   - {number} accountId : Account Index
   - {string} password : Hashed Password
- 
+
 #### const retrievePrivateKey = async (accountId = 0)
 - Description : Retrieves private key of account in the store
 - Params
@@ -135,7 +165,6 @@ Per-chain derivation and address formatting live in `src/UIElements/IdentityMana
 
 #### const getIdentityCount = async (accountId = 0)
 - Description : Get Count of identities of an account
-- Params 
+- Params
   - {number} accountId : Account Index
 
-  

@@ -17,6 +17,8 @@ interface ExtensionServiceWorkerGlobal {
 }
 import { fabricDsGet, fabricDsSet, fabricDsRemove, setDatastoreMasterKeyFromBytes } from './encryptedDatastore';
 import { findMessageTypeDescriptor, type NotificationPriority } from '../fabric/messageTypes';
+import { initIdentityOutband } from './identityOutband';
+import { attemptPayBolt11ViaActiveFabricNode } from './passportBolt11Pay';
 
 const OFFSCREEN_PATH = 'background/offscreen.html';
 const ALARM_MESH_KEEPALIVE = 'fabric_mesh_keepalive';
@@ -327,6 +329,17 @@ export function registerFabricBackground (): void {
       return false;
     }
 
+    if (m.type === 'FABRIC_PAY_BOLT11_FROM_PASSPORT' && typeof m.bolt11 === 'string') {
+      const bolt11 = m.bolt11.trim();
+      void attemptPayBolt11ViaActiveFabricNode(bolt11).then((r) => {
+        showFabricNotification(r.ok ? 'Passport payment' : 'Passport payment failed', r.message);
+        sendResponse(r);
+      }).catch((e) => {
+        sendResponse({ ok: false, message: String(e instanceof Error ? e.message : e) });
+      });
+      return true;
+    }
+
     return undefined;
   });
 
@@ -366,4 +379,5 @@ export function registerFabricBackground (): void {
   });
 
   void syncMeshFromStorage();
+  initIdentityOutband();
 }

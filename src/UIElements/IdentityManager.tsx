@@ -3766,6 +3766,14 @@ const IdentityManager = () => {
         nodeAddress: base,
         error: undefined
       });
+      try {
+        const trustedOrigin = new URL(`${base}/`).origin;
+        if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
+          void chrome.runtime.sendMessage({ type: 'FABRIC_TRUSTED_NODE_ORIGIN', origin: trustedOrigin });
+        }
+      } catch {
+        /* ignore */
+      }
       if (currentIdentity && currentIdentity.publicKeyHex) {
         await fetch(`${base}/services/rpc`, {
           method: 'POST',

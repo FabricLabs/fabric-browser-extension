@@ -5,6 +5,7 @@ import {
   FABRIC_HUB_REGISTER_MESH,
   FABRIC_HUB_UNREGISTER_MESH
 } from './fabric/hubMeshBridge';
+import { installFabric402FetchInterceptor } from './content/fabric402FetchPatch';
 
 declare global {
   interface Window {
@@ -35,6 +36,7 @@ function markContentScriptOnDom (): void {
   } catch (_) {}
 }
 markContentScriptOnDom();
+installFabric402FetchInterceptor();
 
 /** Hub (or dev) page asks the extension to keep WebRTC signaling alive after the tab closes. */
 window.addEventListener('message', (event: MessageEvent) => {

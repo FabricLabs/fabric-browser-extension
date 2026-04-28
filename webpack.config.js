@@ -100,13 +100,32 @@ module.exports = (env) => {
         },
         {
           test: /\.css$/,
-          use: [
-            MiniCssExtractPlugin.loader,
-            'css-loader'
-          ],
-          include: [
-            path.join(__dirname, 'node_modules/semantic-ui-css'),
-            path.join(__dirname, 'assets')
+          oneOf: [
+            {
+              // Keep @fabric/http semantic bundle untouched; it embeds data: font URLs.
+              include: [
+                path.join(__dirname, 'node_modules/@fabric/http/assets')
+              ],
+              use: [
+                MiniCssExtractPlugin.loader,
+                {
+                  loader: 'css-loader',
+                  options: {
+                    url: false
+                  }
+                }
+              ]
+            },
+            {
+              use: [
+                MiniCssExtractPlugin.loader,
+                'css-loader'
+              ],
+              include: [
+                path.join(__dirname, 'node_modules/semantic-ui-css'),
+                path.join(__dirname, 'assets')
+              ]
+            }
           ]
         },
         {
