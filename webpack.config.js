@@ -16,6 +16,7 @@ module.exports = (env) => {
     mode: isProduction ? 'production' : 'development',
     entry: {
       popup: './src/UIElements/popup/index.tsx',
+      contentMarker: './src/contentMarker.ts',
       content: './src/content.ts',
       background: './src/background/serviceWorkerMain.ts',
       offscreen: './src/background/offscreenMain.ts'
@@ -24,7 +25,7 @@ module.exports = (env) => {
       path: path.resolve(__dirname, 'assets'),
       filename: (pathData) => {
         const n = pathData.chunk.name;
-        if (n === 'content') return 'js/[name].js';
+        if (n === 'content' || n === 'contentMarker') return 'js/[name].js';
         if (n === 'background') return 'background/serviceWorker.js';
         if (n === 'offscreen') return 'background/offscreen.js';
         return 'js/[name].[contenthash].js';

@@ -165,9 +165,7 @@ export function registerFabricBackground (): void {
     }
 
     if (m.type === 'STORE_SETTINGS') {
-      chrome.storage.local.clear(() => {
-        chrome.storage.local.set(m.data as object, () => sendResponse({ success: true }));
-      });
+      chrome.storage.local.set(m.data as object, () => sendResponse({ success: true }));
       return true;
     }
 

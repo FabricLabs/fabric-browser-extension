@@ -22,20 +22,7 @@ window.fabricExtension = {
   chrome: chrome
 };
 
-/**
- * DOM is shared with the page; JS is not. Expose a marker so UI/E2E tests (main world) can detect injection.
- */
-function markContentScriptOnDom (): void {
-  try {
-    const v = chrome.runtime.id;
-    const apply = (): void => {
-      document.documentElement?.setAttribute('data-fabric-passport', v);
-    };
-    if (document.documentElement) apply();
-    else document.addEventListener('DOMContentLoaded', apply, { once: true });
-  } catch (_) {}
-}
-markContentScriptOnDom();
+/** DOM marker is set in `contentMarker.ts` (loads before this bundle). */
 installFabric402FetchInterceptor();
 
 /** Hub (or dev) page asks the extension to keep WebRTC signaling alive after the tab closes. */
