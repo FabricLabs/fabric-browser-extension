@@ -73,7 +73,8 @@ module.exports = (env) => {
       alias: {
         vm: 'vm-browserify',
         // Package exports only expose ./constants for `require`; map explicitly for webpack/browser.
-        '@fabric/core/constants': path.resolve(__dirname, 'node_modules/@fabric/core/constants.js')
+        '@fabric/core/constants': path.resolve(__dirname, 'node_modules/@fabric/core/constants.js'),
+        '@fabric/http/assets': path.resolve(__dirname, 'node_modules/@fabric/http/assets')
       }
     },
     module: {

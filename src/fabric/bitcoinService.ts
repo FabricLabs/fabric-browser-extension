@@ -97,8 +97,13 @@ export function deriveReceiveAddress (xpub: string, networkName: string, index =
   }
 }
 
-async function rpc (baseUrl: string, method: string, params: unknown[] = []): Promise<unknown> {
-  const url = `${baseUrl.replace(/\/+$/, '')}/services/rpc`;
+async function fabricJsonRpcPost (
+  baseUrl: string,
+  pathSuffix: string,
+  method: string,
+  params: unknown[] = []
+): Promise<unknown> {
+  const url = `${baseUrl.replace(/\/+$/, '')}${pathSuffix}`;
   const res = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
@@ -110,17 +115,12 @@ async function rpc (baseUrl: string, method: string, params: unknown[] = []): Pr
   return body.result;
 }
 
+async function rpc (baseUrl: string, method: string, params: unknown[] = []): Promise<unknown> {
+  return fabricJsonRpcPost(baseUrl, '/services/rpc', method, params);
+}
+
 async function bitcoinRpc (baseUrl: string, method: string, params: unknown[] = []): Promise<unknown> {
-  const url = `${baseUrl.replace(/\/+$/, '')}/services/bitcoin`;
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-    body: JSON.stringify({ jsonrpc: '2.0', id: Date.now(), method, params })
-  });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const body = await res.json();
-  if (body.error) throw new Error(body.error.message || 'RPC error');
-  return body.result;
+  return fabricJsonRpcPost(baseUrl, '/services/bitcoin', method, params);
 }
 
 export async function fetchBitcoinStatus (baseUrl: string): Promise<BitcoinStatus> {

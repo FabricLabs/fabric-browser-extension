@@ -17,7 +17,8 @@ async function httpHeadOk (url: string): Promise<boolean> {
   return await new Promise((resolve) => {
     const req = http.get(url, (res) => {
       res.resume();
-      resolve(res.statusCode != null && res.statusCode < 500);
+      const c = res.statusCode;
+      resolve(c != null && c >= 200 && c < 300);
     });
     req.on('error', () => resolve(false));
     req.setTimeout(2000, () => {
@@ -37,6 +38,26 @@ export async function waitForHttpOk (url: string, maxMs = 45000): Promise<void> 
     await sleep(250);
   }
   throw new Error(`Timeout waiting for HTTP OK: ${url}`);
+}
+
+async function waitForApiHarnessReady (nodeBaseUrl: string, maxMs = 45000): Promise<void> {
+  const start = Date.now();
+  while (Date.now() - start < maxMs) {
+    if (await apiHarnessOk(nodeBaseUrl)) return;
+    await sleep(250);
+  }
+  throw new Error(`Timeout waiting for API harness: ${nodeBaseUrl}`);
+}
+
+/** Resolves `true` if the child exited, `false` if `maxMs` elapsed first. */
+function waitForChildExit (proc: ChildProcess, maxMs: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const t = setTimeout(() => resolve(false), maxMs);
+    proc.once('exit', () => {
+      clearTimeout(t);
+      resolve(true);
+    });
+  });
 }
 
 let spawned: ChildProcess | null = null;
@@ -116,6 +137,7 @@ export async function ensureLocalTestServer (port = 3044): Promise<LocalTestServ
 
   try {
     await waitForHttpOk(testPage, 45000);
+    await waitForApiHarnessReady(nodeBaseUrl, 45000);
   } catch (e) {
     try {
       spawned.kill('SIGTERM');
@@ -131,9 +153,11 @@ export async function ensureLocalTestServer (port = 3044): Promise<LocalTestServ
       if (!spawned) return;
       const p = spawned;
       spawned = null;
-      p.kill('SIGTERM');
-      await sleep(400);
-      if (!p.killed) {
+      try {
+        p.kill('SIGTERM');
+      } catch (_) {}
+      const exited = await waitForChildExit(p, 3000);
+      if (!exited) {
         try {
           p.kill('SIGKILL');
         } catch (_) {}

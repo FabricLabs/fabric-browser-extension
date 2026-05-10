@@ -139,7 +139,7 @@ export function getFabricTrafficSnapshot (): { origins: string[]; byOrigin: Reco
   return { origins: Array.from(trafficOrigins), byOrigin };
 }
 
-async function mergeTrustedNodeOrigin (origin: string): Promise<void> {
+export async function mergeTrustedNodeOrigin (origin: string): Promise<void> {
   let u: URL;
   try {
     u = new URL(origin);
@@ -203,22 +203,4 @@ export function initIdentityOutband (): void {
     filter,
     ['responseHeaders']
   );
-
-  chrome.runtime.onMessage.addListener((message, _s, sendResponse) => {
-    if (!message || typeof message !== 'object') return undefined;
-    const m = message as Record<string, unknown>;
-    if (m.type === 'FABRIC_TRUSTED_NODE_ORIGIN' && typeof m.origin === 'string') {
-      void mergeTrustedNodeOrigin(m.origin).then(() => reapplyIdentityOutbandRules().then(() => {
-        sendResponse({ ok: true });
-      })).catch((e) => {
-        sendResponse({ ok: false, error: String(e) });
-      });
-      return true;
-    }
-    if (m.type === 'GET_FABRIC_TRAFFIC_METRICS') {
-      sendResponse({ ok: true, ...getFabricTrafficSnapshot() });
-      return false;
-    }
-    return undefined;
-  });
 }

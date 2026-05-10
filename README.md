@@ -123,7 +123,7 @@ Per-chain derivation and address formatting live in `src/UIElements/IdentityMana
   - {number}    accountId : index of account generated from seed.
 
 #### const setDBIdentityCheckState = async (accountId, identity, chain, state)
-- Description :  Enable/disable chain operability for specified idenity
+- Description :  Enable/disable chain operability for specified identity
 - Params
   - {number} accountId : Account index
   - {number} identity : identity index

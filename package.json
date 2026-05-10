@@ -18,7 +18,7 @@
     "make:coverage": "npm run coverage && c8 report --reporter html",
     "test:coverage-suite": "npm run test:unit && npm run test:extension",
     "test:ui": "FABRIC_ACTION_DEBUG_URL=http://127.0.0.1:3044/api/endpoint npm run build && playwright test",
-    "test:ui:mesh-remote": "FABRIC_ACTION_DEBUG_URL=http://127.0.0.1:3044/api/endpoint npm run build && env FABRIC_HUB_BASE_URL=${FABRIC_HUB_BASE_URL:-http://127.0.0.1:8080} npx playwright test tests/ui/hub-remote-mesh-bridge.spec.ts",
+    "test:ui:mesh-remote": "npm run build && node scripts/run-playwright-mesh-remote.mjs",
     "test:ui:release-gate": "npm run build && node scripts/run-ui-release-gate.cjs",
     "test:all": "npm run test && npm run test:ui",
     "ci": "npm run test:all",
