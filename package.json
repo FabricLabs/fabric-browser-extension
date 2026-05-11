@@ -16,6 +16,7 @@
     "coverage": "c8 npm run test:coverage-suite",
     "coverage:baseline": "npm run coverage && node scripts/coverage-baseline.js",
     "make:coverage": "npm run coverage && c8 report --reporter html",
+    "report:coverage": "node -e \"require('fs').mkdirSync('reports',{recursive:true})\" && c8 npm run test:coverage-suite && c8 report --reporter=text-lcov > reports/coverage.lcov",
     "test:coverage-suite": "npm run test:unit && npm run test:extension",
     "test:ui": "FABRIC_ACTION_DEBUG_URL=http://127.0.0.1:3044/api/endpoint npm run build && playwright test",
     "test:ui:mesh-remote": "npm run build && node scripts/run-playwright-mesh-remote.mjs",

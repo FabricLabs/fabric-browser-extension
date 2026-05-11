@@ -1,5 +1,10 @@
 # Passport Browser Extension
+
+[![codecov](https://codecov.io/gh/FabricLabs/fabric-browser-extension/graph/badge.svg)](https://codecov.io/gh/FabricLabs/fabric-browser-extension)
+
 Browser Extension for managing identities and logging in to Fabric applications.
+
+Push/PR workflows run **`npm run report:coverage`** (see `.github/workflows/test.yaml`) and upload **`reports/coverage.lcov`** to [Codecov](https://codecov.io/gh/FabricLabs/fabric-browser-extension), matching **FabricLabs/fabric** / **fabric-http**.
 
 ## Features
 Additional extension features and configurations can be accessed in the settings page on the top-right corner of the first home-page
