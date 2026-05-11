@@ -66,9 +66,9 @@ See `node_modules/@fabric/http/docs/RELEASE_GATE.md` when `@fabric/http` is link
 1. Upon clicking the extension icon for the first time, a new tab opens with onboarding modals showcasing extension features and options to import or create a new seed.
 2. Users will be asked to set an encryption password (which could later be changed in the settings)
 3. When choosing to create a new seed, a 12 word seed phrase will be given and seed verification page will display afterwards.
-4. After completing these steps, user would be navigated to localhost:3000 a demo fabric application (portal-web) to be hosted with a separate terminal window.
-5. When wallet has been imported / initiated, users could toggle and view addresses of different chains.
-6. While on fabric applications, users could test the signing feature by clicking the login button when on portal-web or by entering `window.portal.request()` in the console
+4. After onboarding, open a **Fabric** web app to exercise the extension against a real origin — for example **[hub.fabric.pub](https://hub.fabric.pub)** (or a local Hub from **`hub.fabric.pub`** / **`fabric-http`**), or the local harness at **`http://127.0.0.1:3044/test.html`** after `npm run serve:test` (see **Local Extension Test Harness** above).
+5. When the wallet has been imported or created, you can toggle and view addresses for the chains you enabled.
+6. On Fabric sites, use the app’s own Fabric login / identity flow (and the extension’s **Connect & register** where offered); the Passport popup and content scripts follow the Fabric message and storage contracts used across FabricLabs repos.
 
 ## Encryption
 Data stored in leveldb is encrypted with the subtleCrypto AES-GCM algorithm. Encryption methods are found in fabric/core/types/subtleCrypto

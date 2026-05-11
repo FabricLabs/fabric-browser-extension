@@ -139,7 +139,16 @@ export function getFabricTrafficSnapshot (): { origins: string[]; byOrigin: Reco
   return { origins: Array.from(trafficOrigins), byOrigin };
 }
 
+/** Serialize read-modify-write on trusted origins to avoid concurrent drops. */
+let mergeTrustedChain: Promise<void> = Promise.resolve();
+
 export async function mergeTrustedNodeOrigin (origin: string): Promise<void> {
+  const job = mergeTrustedChain.then(() => mergeTrustedNodeOriginImpl(origin));
+  mergeTrustedChain = job.catch(() => {});
+  await job;
+}
+
+async function mergeTrustedNodeOriginImpl (origin: string): Promise<void> {
   let u: URL;
   try {
     u = new URL(origin);

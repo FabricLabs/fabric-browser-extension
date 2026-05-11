@@ -97,6 +97,10 @@ export function handleFabricRuntimeMessage (
   if (m.type === 'FABRIC_DS_SET_MASTER_KEY' && m.rawKeyB64 && typeof m.rawKeyB64 === 'string') {
     try {
       const bin = atob(m.rawKeyB64);
+      if (bin.length < 32) {
+        sendResponse({ error: 'Master key must be at least 32 bytes (base64 decodes to 32+ octets).' });
+        return true;
+      }
       const buf = new ArrayBuffer(32);
       const v = new Uint8Array(buf);
       for (let i = 0; i < 32 && i < bin.length; i++) v[i] = bin.charCodeAt(i);

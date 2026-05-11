@@ -17,6 +17,18 @@ import * as bitcoin from 'bitcoinjs-lib';
 bitcoin.initEccLib(ecc);
 const bip32 = BIP32Factory(ecc);
 
+const DEFAULT_FETCH_TIMEOUT_MS = 15_000;
+
+async function fetchWithTimeout (url: string, init: RequestInit): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), DEFAULT_FETCH_TIMEOUT_MS);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export interface FabricBitcoinNodeConfig {
   baseUrl: string;
 }
@@ -104,7 +116,7 @@ async function fabricJsonRpcPost (
   params: unknown[] = []
 ): Promise<unknown> {
   const url = `${baseUrl.replace(/\/+$/, '')}${pathSuffix}`;
-  const res = await fetch(url, {
+  const res = await fetchWithTimeout(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
     body: JSON.stringify({ jsonrpc: '2.0', id: Date.now(), method, params })
@@ -153,7 +165,7 @@ export async function fetchWalletBalance (baseUrl: string, xpub: string, network
     if (addresses.length > 0) params.set('addresses', addresses.join(','));
     params.set('xpub', xpub);
 
-    const res = await fetch(`${url}?${params.toString()}`, {
+    const res = await fetchWithTimeout(`${url}?${params.toString()}`, {
       headers: { Accept: 'application/json' }
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -172,20 +184,8 @@ export async function fetchWalletBalance (baseUrl: string, xpub: string, network
       updatedAt: Date.now()
     };
   } catch {
-    try {
-      const r = await bitcoinRpc(baseUrl, 'getbalance', []) as number;
-      const btcSats = Math.round((Number(r) || 0) * 1e8);
-      return {
-        balanceSats: btcSats,
-        confirmedSats: btcSats,
-        unconfirmedSats: 0,
-        network: networkName,
-        height: null,
-        updatedAt: Date.now()
-      };
-    } catch {
-      return { balanceSats: 0, confirmedSats: 0, unconfirmedSats: 0, network: networkName, height: null, updatedAt: Date.now() };
-    }
+    /* Hub exposes GET /services/bitcoin/addresses for xpub-scoped balance only; avoid node-wide getbalance (unrelated wallet). */
+    return { balanceSats: 0, confirmedSats: 0, unconfirmedSats: 0, network: networkName, height: null, updatedAt: Date.now() };
   }
 }
 
@@ -232,5 +232,7 @@ export function formatSats (sats: number): string {
 }
 
 export function formatBtc (sats: number): string {
-  return (Number(sats) / 1e8).toFixed(8);
+  const n = Number(sats);
+  if (!Number.isFinite(n)) return '0.00000000';
+  return (n / 1e8).toFixed(8);
 }

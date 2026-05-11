@@ -37,8 +37,17 @@ test.describe('release gate: @fabric/http bearer + JSON-RPC', () => {
     });
     const text = await res.text();
     expect(res.status(), text).toBe(200);
-    const body = JSON.parse(text) as { jsonrpc: string; result: { ok: boolean; t: string } };
-    expect(body.jsonrpc).toBe('2.0');
-    expect(body.result).toEqual({ ok: true, t: 'ReleaseGatePing' });
+    let body: unknown;
+    try {
+      body = JSON.parse(text);
+    } catch (e) {
+      throw new Error(`Release gate: response is not JSON. First 200 chars: ${text.slice(0, 200)}`);
+    }
+    expect(body, 'parsed JSON body').toEqual(expect.any(Object));
+    const o = body as Record<string, unknown>;
+    expect(typeof o.jsonrpc, 'jsonrpc field').toBe('string');
+    expect(o.jsonrpc).toBe('2.0');
+    expect(o.result, 'result field').toEqual(expect.any(Object));
+    expect(o.result).toEqual({ ok: true, t: 'ReleaseGatePing' });
   });
 });

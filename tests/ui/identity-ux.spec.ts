@@ -1,7 +1,7 @@
 'use strict';
 
 import { test, expect } from './extension.fixtures';
-import { ensureHarnessFabricNodeActive } from './helpers/fabricNodeSettings';
+import { ensureHarnessFabricNodeActive, fabricNodeListRowRe } from './helpers/fabricNodeSettings';
 import { loginWithTestMnemonic } from './helpers/popupAuth';
 
 test.describe('@fabric/passport logged-in UX', () => {
@@ -58,10 +58,11 @@ test.describe('@fabric/passport logged-in UX', () => {
       await expect(page.locator('.message .header').filter({ hasText: /^Settings$/ })).toBeVisible();
       await expect(page.getByRole('heading', { name: /Fabric Nodes/i })).toBeVisible();
       await expect(page.getByRole('button', { name: /Register background mesh/i })).toBeVisible();
+      const harness = baseURL ?? 'http://localhost:3044';
       const hubInput = page.getByPlaceholder('https://hub.fabric.pub or http://127.0.0.1:3003');
-      await hubInput.fill(baseURL ?? 'http://localhost:3044');
+      await hubInput.fill(harness);
       await page.getByRole('button', { name: /^Add Fabric Node$/ }).click();
-      const fabricRow = page.getByRole('listitem').filter({ hasText: /3044/ }).last();
+      const fabricRow = page.getByRole('listitem').filter({ hasText: fabricNodeListRowRe(harness) }).last();
       await expect(fabricRow).toBeVisible({ timeout: 15000 });
       await fabricRow.locator('button[title="Set active for mesh"]').click();
       await page.getByRole('button', { name: /Register background mesh/i }).click();

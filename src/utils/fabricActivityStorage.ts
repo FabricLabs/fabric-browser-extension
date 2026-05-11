@@ -11,22 +11,29 @@ async function writeLocal (t: number): Promise<void> {
   await chrome.storage.local.set({ [FABRIC_LAST_ACTIVITY_MS]: t });
 }
 
+function normalizeActivityTs (ts: number): number {
+  return Number.isFinite(ts) && ts >= 0 ? ts : Date.now();
+}
+
 export async function touchFabricActivity (ts: number = Date.now()): Promise<void> {
+  const t = normalizeActivityTs(ts);
   if (typeof chrome === 'undefined' || !chrome.storage) {
     try {
-      localStorage.setItem(DEV_LS_KEY, String(ts));
+      localStorage.setItem(DEV_LS_KEY, String(t));
     } catch (_) {}
     return;
   }
   try {
     if (chrome.storage.session) {
-      await chrome.storage.session.set({ [FABRIC_LAST_ACTIVITY_MS]: ts });
+      await chrome.storage.session.set({ [FABRIC_LAST_ACTIVITY_MS]: t });
       return;
     }
   } catch (_) {
     /* session may be unavailable in some contexts */
   }
-  await writeLocal(ts);
+  try {
+    await writeLocal(t);
+  } catch (_) {}
 }
 
 export async function readFabricActivityMs (): Promise<number | null> {
@@ -34,8 +41,8 @@ export async function readFabricActivityMs (): Promise<number | null> {
     try {
       const v = localStorage.getItem(DEV_LS_KEY);
       if (v) {
-        const n = parseInt(v, 10);
-        if (!Number.isNaN(n)) return n;
+      const n = parseInt(v, 10);
+      if (Number.isFinite(n) && n >= 0) return n;
       }
     } catch (_) {}
     return null;
@@ -44,13 +51,13 @@ export async function readFabricActivityMs (): Promise<number | null> {
     if (chrome.storage.session) {
       const s = await chrome.storage.session.get(FABRIC_LAST_ACTIVITY_MS);
       const v = s[FABRIC_LAST_ACTIVITY_MS];
-      if (typeof v === 'number' && !Number.isNaN(v)) return v;
+      if (typeof v === 'number' && Number.isFinite(v) && v >= 0) return v;
     }
   } catch (_) {}
   try {
     const l = await chrome.storage.local.get(FABRIC_LAST_ACTIVITY_MS);
     const v = l[FABRIC_LAST_ACTIVITY_MS];
-    if (typeof v === 'number' && !Number.isNaN(v)) return v;
+    if (typeof v === 'number' && Number.isFinite(v) && v >= 0) return v;
   } catch (_) {}
   return null;
 }

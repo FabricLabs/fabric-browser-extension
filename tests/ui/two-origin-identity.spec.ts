@@ -17,7 +17,13 @@ test.describe('Shared identity across two site origins (same seed)', () => {
     expect(baseURL, 'playwright use.baseURL').toBeTruthy();
     const b = new URL(baseURL as string);
     const port = b.port || (b.protocol === 'https:' ? '443' : '80');
-    const originLoopback = `${b.protocol}//127.0.0.1:${port}`;
+    const otherHost =
+      b.hostname === 'localhost' || b.hostname === '::1'
+        ? '127.0.0.1'
+        : b.hostname === '127.0.0.1'
+          ? 'localhost'
+          : '127.0.0.1';
+    const originOther = `${b.protocol}//${otherHost}:${port}`;
 
     const popup = await context.newPage();
     try {
@@ -35,15 +41,15 @@ test.describe('Shared identity across two site origins (same seed)', () => {
           () => document.documentElement?.getAttribute('data-fabric-passport') != null,
           { timeout: 20000 }
         );
-        await pLo.goto(`${originLoopback}/test.html`, { waitUntil: 'domcontentloaded' });
+        await pLo.goto(`${originOther}/test.html`, { waitUntil: 'domcontentloaded' });
         await pLo.waitForFunction(
           () => document.documentElement?.getAttribute('data-fabric-passport') != null,
           { timeout: 20000 }
         );
         expect(
-          pLocal.url().split('/').slice(0, 3).join('/'),
-          'first tab origin is not 127.0.0.1 (different host for cross-origin check)'
-        ).not.toBe(originLoopback);
+          new URL(pLocal.url()).origin,
+          'harness page and second tab use different hosts for cross-origin check'
+        ).not.toBe(new URL(originOther).origin);
       } finally {
         await pLocal.close();
         await pLo.close();

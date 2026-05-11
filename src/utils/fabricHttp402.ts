@@ -64,9 +64,15 @@ export function resolveBolt11From402 (
   fabricHeaderUtf8Json: FabricPaymentRequestPayload | null,
   wwwAuthenticate: string | null | undefined
 ): string | undefined {
-  const ln = fabricHeaderUtf8Json?.invoice?.bolt11;
-  if (typeof ln === 'string' && ln.startsWith('ln')) return ln.trim();
+  const lnRaw = fabricHeaderUtf8Json?.invoice?.bolt11;
+  if (typeof lnRaw === 'string') {
+    const ln = lnRaw.trim();
+    if (ln.startsWith('ln')) return ln;
+  }
   const l402 = parseL402WWWAuthenticate(wwwAuthenticate);
-  if (typeof l402.invoice === 'string' && l402.invoice.startsWith('ln')) return l402.invoice.trim();
+  if (typeof l402.invoice === 'string') {
+    const inv = l402.invoice.trim();
+    if (inv.startsWith('ln')) return inv;
+  }
   return undefined;
 }

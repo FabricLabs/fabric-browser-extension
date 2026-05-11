@@ -15,6 +15,18 @@ function extractActiveHubAddress (state: unknown): string | null {
 
 export type PassportBolt11PayResult = { ok: boolean; message: string };
 
+const PAY_RPC_TIMEOUT_MS = 15_000;
+
+async function fetchJsonWithTimeout (url: string, init: RequestInit): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), PAY_RPC_TIMEOUT_MS);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /**
  * Attempt to pay a BOLT11 via the user's active Fabric node JSON-RPC (`PayBolt11Invoice`).
  * Servers may omit this — callers should fall back to copy / Lightning URI.
@@ -36,7 +48,7 @@ export async function attemptPayBolt11ViaActiveFabricNode (bolt11: string): Prom
 
   const base = hub.replace(/\/+$/, '');
   try {
-    const res = await fetch(`${base}/services/rpc`, {
+    const res = await fetchJsonWithTimeout(`${base}/services/rpc`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
       body: JSON.stringify({
@@ -64,9 +76,12 @@ export async function attemptPayBolt11ViaActiveFabricNode (bolt11: string): Prom
       message: 'Unexpected response from Fabric node RPC. Copy the Lightning invoice manually.'
     };
   } catch (e) {
-    return {
-      ok: false,
-      message: String(e instanceof Error ? e.message : e)
-    };
+    const aborted =
+      (e instanceof Error && e.name === 'AbortError') ||
+      (typeof DOMException !== 'undefined' && e instanceof DOMException && e.name === 'AbortError');
+    if (aborted) {
+      return { ok: false, message: `Fabric node RPC timed out after ${PAY_RPC_TIMEOUT_MS / 1000}s.` };
+    }
+    return { ok: false, message: String(e instanceof Error ? e.message : e) };
   }
 }

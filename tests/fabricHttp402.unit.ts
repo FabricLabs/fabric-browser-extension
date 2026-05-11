@@ -44,6 +44,15 @@ describe('fabricHttp402 (402 payment headers)', () => {
     assert.strictEqual(u, fromFabric);
   });
 
+  it('resolveBolt11 trims whitespace before ln prefix check', () => {
+    const bolt = '  lnbc1trimmed  ';
+    const fabric = decodeFabricPaymentRequestHeader(
+      Buffer.from(JSON.stringify({ invoice: { bolt11: bolt } }), 'utf8').toString('base64url')
+    );
+    const u = resolveBolt11From402(fabric, null);
+    assert.strictEqual(u, 'lnbc1trimmed');
+  });
+
   it('resolveBolt11 falls back to L402 when Fabric has no bolt11', () => {
     const fromL402 =
       'lnbc1fallback';

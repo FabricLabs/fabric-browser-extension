@@ -1,10 +1,8 @@
-'use strict';
-
 /**
  * Cross-platform defaults for mesh-remote UI tests (avoid bash `${VAR:-default}` on Windows).
  */
 
-const { spawn } = require('child_process');
+import { spawn } from 'node:child_process';
 
 process.env.FABRIC_ACTION_DEBUG_URL =
   process.env.FABRIC_ACTION_DEBUG_URL || 'http://127.0.0.1:3044/api/endpoint';

@@ -16,21 +16,28 @@ export const test = base.extend<{
 }>({
   context: async ({}, use) => {
     const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'fabric-pw-ext-'));
-    const context = await chromium.launchPersistentContext(userDataDir, {
-      channel: 'chromium',
-      headless: !!process.env.CI,
-      args: [
-        `--disable-extensions-except=${pathToExtension}`,
-        `--load-extension=${pathToExtension}`,
-        '--no-sandbox',
-        '--disable-web-security',
-        '--allow-insecure-localhost'
-      ],
-      ignoreDefaultArgs: ['--enable-automation'],
-      viewport: { width: 1280, height: 720 }
-    });
-    await use(context);
-    await context.close();
+    let context: BrowserContext | null = null;
+    try {
+      context = await chromium.launchPersistentContext(userDataDir, {
+        channel: 'chromium',
+        headless: !!process.env.CI,
+        args: [
+          `--disable-extensions-except=${pathToExtension}`,
+          `--load-extension=${pathToExtension}`,
+          '--no-sandbox',
+          '--disable-web-security',
+          '--allow-insecure-localhost'
+        ],
+        ignoreDefaultArgs: ['--enable-automation'],
+        viewport: { width: 1280, height: 720 }
+      });
+      await use(context);
+    } finally {
+      if (context) await context.close();
+      try {
+        fs.rmSync(userDataDir, { recursive: true, force: true });
+      } catch (_) {}
+    }
   },
 
   extensionId: async ({ context, baseURL }, use) => {

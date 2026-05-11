@@ -17,7 +17,7 @@ describe('fabricIdentityBech32 / X-Fabric-Identity', () => {
     assert.ok(id != null && isFabricIdBech32m(id));
   });
 
-  it('format uses derived id for publicKeyHex', () => {
+  it('format overrides stale id by deriving from publicKeyHex', () => {
     const id = publicKeyHexToIdBech32m(gCompressed);
     assert.ok(id);
     assert.strictEqual(formatXFabricIdentityValue({ publicKeyHex: gCompressed, id: 'stale' }), id);
