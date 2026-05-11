@@ -1,6 +1,7 @@
 'use strict';
 
 import type { FabricPaymentRequestPayload } from '../utils/fabricHttp402';
+import { swallowNonFatal } from '../utils/nonFatal';
 
 const OVERLAY_ID = 'fabric-passport-http402-overlay';
 
@@ -64,7 +65,8 @@ export function showFabric402Overlay (opts: {
     line.style.cssText = 'margin:0 0 12px;font-size:12px;word-break:break-all;color:#64748b';
     line.textContent = u.origin + u.pathname + u.search;
     panel.appendChild(line);
-  } catch {
+  } catch (err: unknown) {
+    swallowNonFatal('fabric402-overlay-request-url', err);
     const line = document.createElement('p');
     line.style.cssText = 'margin:0 0 12px;font-size:12px;color:#64748b';
     const s = opts.requestUrl;
@@ -166,7 +168,9 @@ export function showFabric402Overlay (opts: {
     b.addEventListener('click', () => {
       try {
         onClick();
-      } catch (_) {}
+      } catch (err: unknown) {
+        swallowNonFatal('fabric402-overlay-button', err);
+      }
     });
     return b;
   };
@@ -176,7 +180,8 @@ export function showFabric402Overlay (opts: {
       btn('Copy invoice', false, false, async () => {
         try {
           await navigator.clipboard.writeText(b11);
-        } catch (_) {
+        } catch (err: unknown) {
+          swallowNonFatal('fabric402-clipboard-copy', err);
           if (boltTa) {
             boltTa.select();
             document.execCommand('copy');
@@ -190,7 +195,8 @@ export function showFabric402Overlay (opts: {
         const uri = `lightning:${b11}`;
         try {
           window.open(uri, '_blank', 'noopener,noreferrer');
-        } catch (_) {
+        } catch (err: unknown) {
+          swallowNonFatal('fabric402-lightning-open', err);
           window.location.href = uri;
         }
       })

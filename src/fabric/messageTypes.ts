@@ -1,5 +1,7 @@
 'use strict';
 
+import { swallowNonFatal } from '../utils/nonFatal';
+
 /**
  * Canonical Fabric message type constants and notification-routing metadata.
  *
@@ -139,7 +141,11 @@ export function tryParseNotifiableMessage (raw: string): {
 
     // Unwrap P2P_CHAT_MESSAGE envelope
     if (obj && obj.type === P2P_CHAT_MESSAGE && obj.object && typeof obj.object.content === 'string') {
-      try { obj = JSON.parse(obj.object.content); } catch { /* not JSON content */ }
+      try {
+        obj = JSON.parse(obj.object.content);
+      } catch (err: unknown) {
+        swallowNonFatal('fabric-notifiable-inner-json', err);
+      }
     }
 
     // Unwrap GenericMessage envelope
@@ -153,7 +159,8 @@ export function tryParseNotifiableMessage (raw: string): {
     if (!descriptor) return null;
 
     return { messageType: obj.type, payload: obj };
-  } catch {
+  } catch (err: unknown) {
+    swallowNonFatal('fabric-notifiable-parse', err);
     return null;
   }
 }

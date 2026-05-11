@@ -4,6 +4,8 @@
  * Master key lives in extension storage; replace via setMasterKeyFromBytes after user unlock for stronger binding.
  */
 
+import { swallowNonFatal } from '../utils/nonFatal';
+
 const DS_PREFIX = 'fabric_ds_enc:';
 const MASTER_KEY_STORAGE = 'fabric_bg_ds_master_key_b64';
 
@@ -62,7 +64,8 @@ export async function fabricDsGet<T = unknown> (key: string): Promise<T | null> 
   try {
     const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, aes, ct);
     return JSON.parse(new TextDecoder().decode(plain)) as T;
-  } catch {
+  } catch (err: unknown) {
+    swallowNonFatal('fabric-ds-decrypt', err);
     return null;
   }
 }

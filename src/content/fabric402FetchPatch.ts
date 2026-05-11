@@ -7,6 +7,7 @@ import {
 } from '../utils/fabricHttp402';
 import { FABRIC_PAYMENT_REQUEST_HEADER } from '../constants/fabric402';
 import { showFabric402Overlay } from './fabric402OverlayDom';
+import { swallowNonFatal } from '../utils/nonFatal';
 
 declare global {
   interface Window {
@@ -50,7 +51,8 @@ export function installFabric402FetchInterceptor (): void {
           if (typeof input === 'string') urlStr = input;
           else if (input instanceof Request) urlStr = input.url;
           else urlStr = String(input);
-        } catch (_) {
+        } catch (err: unknown) {
+          swallowNonFatal('fabric402-fetch-request-url', err);
           urlStr = '';
         }
 
@@ -62,8 +64,8 @@ export function installFabric402FetchInterceptor (): void {
             wwwAuthenticate: wwwRaw
           });
         });
-      } catch (_) {
-        // never break callers
+      } catch (err: unknown) {
+        swallowNonFatal('fabric402-fetch-interceptor', err);
       }
       return res;
     });

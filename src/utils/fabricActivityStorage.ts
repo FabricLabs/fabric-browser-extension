@@ -1,3 +1,5 @@
+import { swallowNonFatal } from './nonFatal';
+
 /**
  * Last user activity for wallet auto-lock (popup + cross-popup idle).
  * Prefer session storage so it clears when the browser profile session ends; fall back to local.
@@ -20,7 +22,9 @@ export async function touchFabricActivity (ts: number = Date.now()): Promise<voi
   if (typeof chrome === 'undefined' || !chrome.storage) {
     try {
       localStorage.setItem(DEV_LS_KEY, String(t));
-    } catch (_) {}
+    } catch (err: unknown) {
+      swallowNonFatal('fabric-activity-dev-ls', err);
+    }
     return;
   }
   try {
@@ -28,12 +32,14 @@ export async function touchFabricActivity (ts: number = Date.now()): Promise<voi
       await chrome.storage.session.set({ [FABRIC_LAST_ACTIVITY_MS]: t });
       return;
     }
-  } catch (_) {
-    /* session may be unavailable in some contexts */
+  } catch (err: unknown) {
+    swallowNonFatal('fabric-activity-session', err);
   }
   try {
     await writeLocal(t);
-  } catch (_) {}
+  } catch (err: unknown) {
+    swallowNonFatal('fabric-activity-local', err);
+  }
 }
 
 export async function readFabricActivityMs (): Promise<number | null> {
@@ -41,10 +47,12 @@ export async function readFabricActivityMs (): Promise<number | null> {
     try {
       const v = localStorage.getItem(DEV_LS_KEY);
       if (v) {
-      const n = parseInt(v, 10);
-      if (Number.isFinite(n) && n >= 0) return n;
+        const n = parseInt(v, 10);
+        if (Number.isFinite(n) && n >= 0) return n;
       }
-    } catch (_) {}
+    } catch (err: unknown) {
+      swallowNonFatal('fabric-activity-read-dev-ls', err);
+    }
     return null;
   }
   try {
@@ -53,11 +61,15 @@ export async function readFabricActivityMs (): Promise<number | null> {
       const v = s[FABRIC_LAST_ACTIVITY_MS];
       if (typeof v === 'number' && Number.isFinite(v) && v >= 0) return v;
     }
-  } catch (_) {}
+  } catch (err: unknown) {
+    swallowNonFatal('fabric-activity-read-session', err);
+  }
   try {
     const l = await chrome.storage.local.get(FABRIC_LAST_ACTIVITY_MS);
     const v = l[FABRIC_LAST_ACTIVITY_MS];
     if (typeof v === 'number' && Number.isFinite(v) && v >= 0) return v;
-  } catch (_) {}
+  } catch (err: unknown) {
+    swallowNonFatal('fabric-activity-read-local', err);
+  }
   return null;
 }

@@ -1,6 +1,7 @@
 'use strict';
 
 import { Buffer } from 'buffer';
+import { swallowNonFatal } from './nonFatal';
 
 /** Reject pathological header values before base64 decode / JSON parse. */
 const MAX_PAYMENT_REQUEST_HEADER_CHARS = 16384;
@@ -43,7 +44,8 @@ export function decodeFabricPaymentRequestHeader (encoded: string | null | undef
     const json = Buffer.from(raw, 'base64url').toString('utf8');
     const o = JSON.parse(json);
     return o && typeof o === 'object' && !Array.isArray(o) ? (o as FabricPaymentRequestPayload) : null;
-  } catch {
+  } catch (err: unknown) {
+    swallowNonFatal('fabric-payment-request-decode', err);
     return null;
   }
 }

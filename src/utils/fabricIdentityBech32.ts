@@ -7,6 +7,7 @@
 
 import { bech32m } from 'bech32';
 import { Buffer } from 'buffer';
+import { swallowNonFatal } from './nonFatal';
 
 export function publicKeyHexToIdBech32m (publicKeyHex: string): string | null {
   const h = publicKeyHex.replace(/^0x/i, '');
@@ -25,7 +26,8 @@ export function isFabricIdBech32m (s: string): boolean {
   try {
     const d = bech32m.decode(s);
     return d.prefix === 'id';
-  } catch {
+  } catch (err: unknown) {
+    swallowNonFatal('fabric-id-bech32m-decode', err);
     return false;
   }
 }

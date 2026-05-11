@@ -10,7 +10,8 @@ export function getHubMeshPageUrl (): string | null {
   const rel = (process.env.FABRIC_HUB_MESH_PATH || 'hub-mesh-bridge.html').replace(/^\//, '');
   try {
     return new URL(rel, base).href;
-  } catch {
+  } catch (err: unknown) {
+    void err;
     return null;
   }
 }

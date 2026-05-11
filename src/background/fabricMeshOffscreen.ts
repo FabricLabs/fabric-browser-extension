@@ -6,6 +6,7 @@ import {
   createFabricPeerConnection
 } from '../fabric/fabricWebRTCPeering';
 import { tryParseNotifiableMessage } from '../fabric/messageTypes';
+import { swallowNonFatal } from '../utils/nonFatal';
 
 type MeshToBgMessage =
   | { type: 'MESH_READY' }
@@ -15,7 +16,9 @@ type MeshToBgMessage =
 function notifyBg (msg: MeshToBgMessage): void {
   try {
     void chrome.runtime.sendMessage(msg);
-  } catch (_) {}
+  } catch (err: unknown) {
+    swallowNonFatal('mesh-notify-bg', err);
+  }
 }
 
 let ws: WebSocket | null = null;
@@ -50,13 +53,17 @@ export function stopMeshSignaling (): void {
       ws.onerror = null;
       ws.onmessage = null;
       ws.close();
-    } catch (_) {}
+    } catch (err: unknown) {
+      swallowNonFatal('mesh-ws-close', err);
+    }
     ws = null;
   }
   for (const [, pc] of peerConnections) {
     try {
       pc.close();
-    } catch (_) {}
+    } catch (err: unknown) {
+      swallowNonFatal('mesh-pc-close', err);
+    }
   }
   peerConnections.clear();
 }
@@ -132,7 +139,9 @@ export function meshDropPeerConnection (peerId: string): void {
   if (pc) {
     try {
       pc.close();
-    } catch (_) {}
+    } catch (err: unknown) {
+      swallowNonFatal('mesh-drop-pc', err);
+    }
     peerConnections.delete(peerId);
   }
 }

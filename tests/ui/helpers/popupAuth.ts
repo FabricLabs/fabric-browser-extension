@@ -24,8 +24,8 @@ export async function loginWithTestMnemonic (
   try {
     await page.getByText('Loaded Identities').waitFor({ state: 'visible', timeout: 3000 });
     return;
-  } catch {
-    /* not logged in yet */
+  } catch (err: unknown) {
+    void err;
   }
   await expect(page.getByText(/don't have an identity yet/i)).toBeVisible();
   await page.getByRole('button', { name: /Use Existing/i }).click();

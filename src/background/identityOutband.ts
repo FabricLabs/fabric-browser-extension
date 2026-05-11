@@ -16,6 +16,7 @@ import {
   X_FABRIC_IDENTITY
 } from '../constants/identityOutband';
 import { formatXFabricIdentityValue } from './identityOutbandValue';
+import { swallowNonFatal } from '../utils/nonFatal';
 
 const ALL_URLS = '<all_urls>';
 
@@ -65,7 +66,8 @@ export async function reapplyIdentityOutbandRules (): Promise<void> {
       try {
         const u = new URL(o);
         return u.protocol === 'http:' || u.protocol === 'https:';
-      } catch {
+      } catch (err: unknown) {
+        swallowNonFatal('identity-outband-trust-url', err);
         return false;
       }
     })
@@ -84,7 +86,8 @@ export async function reapplyIdentityOutbandRules (): Promise<void> {
         const h = u.hostname;
         const p = u.port || (u.protocol === 'https:' ? '443' : '80');
         urlFilter = `*://${h}:${p}/*`;
-      } catch {
+      } catch (err: unknown) {
+        swallowNonFatal('identity-outband-rule-url', err);
         continue;
       }
       const ruleId = DNR_IDENTITY_HEADER_RULE_ID_MIN + i;
@@ -144,7 +147,9 @@ let mergeTrustedChain: Promise<void> = Promise.resolve();
 
 export async function mergeTrustedNodeOrigin (origin: string): Promise<void> {
   const job = mergeTrustedChain.then(() => mergeTrustedNodeOriginImpl(origin));
-  mergeTrustedChain = job.catch(() => {});
+  mergeTrustedChain = job.catch((err: unknown) => {
+    swallowNonFatal('merge-trusted-node-origin', err);
+  });
   await job;
 }
 
@@ -152,7 +157,8 @@ async function mergeTrustedNodeOriginImpl (origin: string): Promise<void> {
   let u: URL;
   try {
     u = new URL(origin);
-  } catch {
+  } catch (err: unknown) {
+    swallowNonFatal('merge-trusted-node-parse', err);
     return;
   }
   if (u.protocol !== 'http:' && u.protocol !== 'https:') return;
@@ -188,8 +194,8 @@ export function initIdentityOutband (): void {
         const origin = new URL(d.url).origin;
         if (!trafficOrigins.has(origin)) return;
         touchTraffic(origin, 0);
-      } catch {
-        // ignore
+      } catch (err: unknown) {
+        swallowNonFatal('identity-traffic-on-before', err);
       }
     },
     filter
@@ -205,8 +211,8 @@ export function initIdentityOutband (): void {
           const n = parseInt(cl, 10);
           if (Number.isFinite(n) && n > 0) addResponseBytes(origin, n);
         }
-      } catch {
-        // ignore
+      } catch (err: unknown) {
+        swallowNonFatal('identity-traffic-on-headers', err);
       }
     },
     filter,

@@ -95,7 +95,8 @@ async function apiHarnessOk (baseUrl: string): Promise<boolean> {
     });
     const o = j && typeof j === 'object' ? (j as Record<string, unknown>) : null;
     return !!(o && o.success === true && o.source === 'local-test-server');
-  } catch {
+  } catch (err: unknown) {
+    void err;
     return false;
   }
 }

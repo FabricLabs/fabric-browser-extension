@@ -14,6 +14,7 @@ import {
   reapplyIdentityOutbandRules
 } from './identityOutband';
 import { attemptPayBolt11ViaActiveFabricNode } from './passportBolt11Pay';
+import { swallowNonFatal } from '../utils/nonFatal';
 
 const NOTIFY_ID_MESH = 'fabric-mesh-line';
 
@@ -42,6 +43,8 @@ export function handleFabricRuntimeMessage (
   deps: FabricRuntimeMessageDeps
 ): boolean | undefined {
   if (!message || typeof message !== 'object') return undefined;
+  const selfId = chrome.runtime.id;
+  if (sender.id != null && sender.id !== selfId) return undefined;
   const m = message as Record<string, unknown>;
   const { fabricActionDebugUrl, syncMeshFromStorage } = deps;
 
@@ -148,7 +151,8 @@ export function handleFabricRuntimeMessage (
     try {
       const u = new URL(/^https?:\/\//i.test(hubAddress) ? hubAddress : `https://${hubAddress}`);
       expectedOrigin = u.origin;
-    } catch {
+    } catch (err: unknown) {
+      swallowNonFatal('hub-register-mesh-url', err);
       sendResponse({ ok: false, error: 'invalid_hub_address' });
       return false;
     }

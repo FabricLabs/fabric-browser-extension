@@ -1,6 +1,8 @@
 /// <reference types="chrome"/>
 'use strict';
 
+import { swallowNonFatal } from './utils/nonFatal';
+
 /**
  * Tiny script loaded before `content.js` so E2E/tests can detect injection even if the
  * main bundle is slow or fails during initialization (WASM, interceptors, etc.).
@@ -12,6 +14,6 @@ try {
   };
   if (document.documentElement) apply();
   else document.addEventListener('DOMContentLoaded', apply, { once: true });
-} catch (_) {
-  /* ignore */
+} catch (err: unknown) {
+  swallowNonFatal('content-marker-init', err);
 }

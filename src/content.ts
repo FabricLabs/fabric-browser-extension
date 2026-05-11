@@ -6,6 +6,7 @@ import {
   FABRIC_HUB_UNREGISTER_MESH
 } from './fabric/hubMeshBridge';
 import { installFabric402FetchInterceptor } from './content/fabric402FetchPatch';
+import { swallowNonFatal } from './utils/nonFatal';
 
 declare global {
   interface Window {
@@ -36,7 +37,8 @@ window.addEventListener('message', (event: MessageEvent) => {
       const raw = data.hubAddress.trim();
       const u = new URL(/^https?:\/\//i.test(raw) ? raw : `https://${raw}`);
       expectedOrigin = u.origin;
-    } catch {
+    } catch (err: unknown) {
+      swallowNonFatal('hub-mesh-postmessage-url', err);
       return;
     }
     if (event.origin !== expectedOrigin) return;
@@ -58,6 +60,8 @@ window.addEventListener('message', (event: MessageEvent) => {
 
 // Listen for messages from the extension
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  const selfId = chrome.runtime.id;
+  if (sender.id != null && sender.id !== selfId) return undefined;
   if (message.type === 'FABRIC_ACTION') {
     sendResponse({ success: true });
     return true;

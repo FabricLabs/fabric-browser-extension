@@ -88,8 +88,8 @@ async function waitForExtensionId (context: BrowserContext, serverBase: string):
     if (found) return found;
     try {
       await context.waitForEvent('serviceworker', { timeout: 400 });
-    } catch {
-      /* poll until deadline */
+    } catch (err: unknown) {
+      void err;
     }
   }
   throw new Error(

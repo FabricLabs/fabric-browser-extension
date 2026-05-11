@@ -13,6 +13,7 @@
 import { BIP32Factory, BIP32Interface } from 'bip32';
 import * as ecc from 'tiny-secp256k1';
 import * as bitcoin from 'bitcoinjs-lib';
+import { swallowNonFatal } from '../utils/nonFatal';
 
 bitcoin.initEccLib(ecc);
 const bip32 = BIP32Factory(ecc);
@@ -82,7 +83,8 @@ export function deriveReceiveAddresses (xpub: string, network: bitcoin.networks.
       if (address) addrs.push(address);
     }
     return addrs;
-  } catch {
+  } catch (err: unknown) {
+    swallowNonFatal('bitcoin-derive-receive-addrs', err);
     return [];
   }
 }
@@ -99,12 +101,13 @@ export function deriveReceiveAddress (xpub: string, networkName: string, index =
       const child = root.derive(0).derive(index);
       const { address } = bitcoin.payments.p2wpkh({ pubkey: Buffer.from(child.publicKey), network });
       if (address) return address;
-    } catch {
-      // Leaf key — derive from the key itself
+    } catch (err: unknown) {
+      swallowNonFatal('bitcoin-derive-receive-index', err);
     }
     const { address } = bitcoin.payments.p2wpkh({ pubkey: Buffer.from(root.publicKey), network });
     return address ?? null;
-  } catch {
+  } catch (err: unknown) {
+    swallowNonFatal('bitcoin-derive-receive-address', err);
     return null;
   }
 }
@@ -145,7 +148,8 @@ export async function fetchBitcoinStatus (baseUrl: string): Promise<BitcoinStatu
       bestBlockHash: typeof r?.bestHash === 'string' ? r.bestHash : (typeof r?.bestBlockHash === 'string' ? r.bestBlockHash : null),
       mempoolTxCount: typeof r?.mempoolTxCount === 'number' ? r.mempoolTxCount : null
     };
-  } catch {
+  } catch (err: unknown) {
+    swallowNonFatal('bitcoin-fetch-status', err);
     return { available: false, network: null, height: null, bestBlockHash: null, mempoolTxCount: null };
   }
 }
@@ -183,8 +187,8 @@ export async function fetchWalletBalance (baseUrl: string, xpub: string, network
       height: status.height,
       updatedAt: Date.now()
     };
-  } catch {
-    /* Hub exposes GET /services/bitcoin/addresses for xpub-scoped balance only; avoid node-wide getbalance (unrelated wallet). */
+  } catch (err: unknown) {
+    swallowNonFatal('bitcoin-fetch-wallet-balance', err);
     return { balanceSats: 0, confirmedSats: 0, unconfirmedSats: 0, network: networkName, height: null, updatedAt: Date.now() };
   }
 }
@@ -203,7 +207,8 @@ export async function fetchTransactionHistory (baseUrl: string, count = 25): Pro
       fee: typeof tx.fee === 'number' ? tx.fee : undefined,
       label: typeof tx.label === 'string' ? tx.label : undefined
     })).reverse();
-  } catch {
+  } catch (err: unknown) {
+    swallowNonFatal('bitcoin-fetch-tx-history', err);
     return [];
   }
 }
@@ -212,7 +217,8 @@ export async function fetchReceiveAddressFromNode (baseUrl: string): Promise<str
   try {
     const addr = await bitcoinRpc(baseUrl, 'getnewaddress', ['', 'bech32']) as string;
     return typeof addr === 'string' ? addr : null;
-  } catch {
+  } catch (err: unknown) {
+    swallowNonFatal('bitcoin-getnewaddress', err);
     return null;
   }
 }

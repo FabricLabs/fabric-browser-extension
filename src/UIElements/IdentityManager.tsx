@@ -36,6 +36,7 @@ import * as bitcoin from 'bitcoinjs-lib';
 import { FABRIC_KEY_DERIVATION_PATH } from '@fabric/core/constants';
 import { FABRIC_STATE_STORAGE_KEY } from '../constants/fabricExtension';
 import { PASSPORT_EXTENSION_VERSION } from '../constants/extensionVersion';
+import { swallowNonFatal } from '../utils/nonFatal';
 import crypto from 'crypto';
 
 bitcoin.initEccLib(ecc);
@@ -176,7 +177,8 @@ function verifyBitcoinMessageForAddress (
     }
     const dec = bitcoin.address.fromBase58Check(addr);
     return dec.version === network.pubKeyHash && Buffer.compare(dec.hash, pkh) === 0;
-  } catch {
+  } catch (err: unknown) {
+    swallowNonFatal('verify-btc-message-address', err);
     return false;
   }
 }
@@ -1390,7 +1392,8 @@ const IdentityManager = () => {
       setSignUnlockPassword('');
       setShowAutoLockBanner(false);
       bumpUserActivity();
-    } catch {
+    } catch (err: unknown) {
+      void err;
       setSignUnlockError('Wrong password or unreadable wallet data.');
     }
   };
@@ -2609,7 +2612,11 @@ const IdentityManager = () => {
                     basic
                     inverted
                     onClick={() => {
-                      try { navigator.clipboard.writeText(receiveAddr); } catch {}
+                      try {
+                        void navigator.clipboard.writeText(receiveAddr);
+                      } catch (err: unknown) {
+                        swallowNonFatal('identity-copy-receive-addr', err);
+                      }
                     }}
                   >
                     <Icon name="copy" /> Copy
@@ -3700,8 +3707,8 @@ const IdentityManager = () => {
           id.isCurrent ? { ...id, balance: formatBtc(bal.balanceSats) } : id
         ));
       }
-    } catch {
-      // silent
+    } catch (err: unknown) {
+      swallowNonFatal('identity-wallet-balance-refresh', err);
     } finally {
       setWalletBalanceLoading(false);
     }
@@ -3714,7 +3721,8 @@ const IdentityManager = () => {
     try {
       const txs = await fetchTransactionHistory(base, 25);
       setWalletTxs(txs);
-    } catch {
+    } catch (err: unknown) {
+      swallowNonFatal('identity-wallet-tx-refresh', err);
       setWalletTxs([]);
     } finally {
       setWalletTxsLoading(false);
@@ -3771,8 +3779,8 @@ const IdentityManager = () => {
         if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
           void chrome.runtime.sendMessage({ type: 'FABRIC_TRUSTED_NODE_ORIGIN', origin: trustedOrigin });
         }
-      } catch {
-        /* ignore */
+      } catch (err: unknown) {
+        swallowNonFatal('identity-trusted-origin-message', err);
       }
       if (currentIdentity && currentIdentity.publicKeyHex) {
         await fetch(`${base}/services/rpc`, {

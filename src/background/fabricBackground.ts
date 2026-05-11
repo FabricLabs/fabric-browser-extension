@@ -3,6 +3,7 @@
 import { FABRIC_MESH_HUB_REGISTRATION_KEY, FABRIC_STATE_STORAGE_KEY } from '../constants/fabricExtension';
 import { handleFabricRuntimeMessage } from './fabricBackgroundRuntimeMessages';
 import { initIdentityOutband } from './identityOutband';
+import { swallowNonFatal } from '../utils/nonFatal';
 
 declare const __FABRIC_ACTION_DEBUG_URL__: string;
 const FABRIC_ACTION_DEBUG_URL =
@@ -60,11 +61,14 @@ async function extractMeshHubAddress (): Promise<string | null> {
     const regBag = await chrome.storage.local.get(FABRIC_MESH_HUB_REGISTRATION_KEY);
     const fromReg = registrationHubAddress(regBag[FABRIC_MESH_HUB_REGISTRATION_KEY]);
     if (fromReg) return fromReg;
-  } catch (_) {}
+  } catch (err: unknown) {
+    swallowNonFatal('mesh-hub-storage', err);
+  }
   try {
     const data = await chrome.storage.local.get(FABRIC_STATE_STORAGE_KEY);
     return extractActiveFabricHub(data[FABRIC_STATE_STORAGE_KEY]);
-  } catch (_) {
+  } catch (err: unknown) {
+    swallowNonFatal('fabric-state-storage', err);
     return null;
   }
 }
@@ -75,15 +79,17 @@ async function ensureOffscreenDocument (): Promise<void> {
       const has = await chrome.offscreen.hasDocument();
       if (has) return;
     }
-  } catch (_) {}
+  } catch (err: unknown) {
+    swallowNonFatal('offscreen-has-document', err);
+  }
   try {
     await chrome.offscreen.createDocument({
       url: chrome.runtime.getURL(OFFSCREEN_PATH),
       reasons: [chrome.offscreen.Reason.WEB_RTC],
       justification: 'Maintain Fabric Protocol WebRTC signaling and peer mesh while the popup is closed.'
     });
-  } catch (_) {
-    /* Document may already exist (race) */
+  } catch (err: unknown) {
+    swallowNonFatal('offscreen-create-document', err);
   }
 }
 
@@ -104,7 +110,9 @@ function registerMeshPort (port: chrome.runtime.Port): void {
   port.onDisconnect.addListener(() => {
     meshPort = null;
   });
-  port.onMessage.addListener((_msg: unknown) => {});
+  port.onMessage.addListener((msg: unknown) => {
+    void msg;
+  });
   flushMeshQueue();
 }
 
