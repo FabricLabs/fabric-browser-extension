@@ -2,7 +2,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { execSync } = require('child_process');
+const { spawnSync } = require('child_process');
 
 const root = path.resolve(__dirname, '..');
 const dist = path.join(root, 'dist');
@@ -24,10 +24,10 @@ if (!fs.existsSync(dist)) {
 fs.mkdirSync(zipDir, { recursive: true });
 if (fs.existsSync(zipPath)) fs.unlinkSync(zipPath);
 
-try {
-  execSync(`zip -r "${zipPath}" .`, { cwd: dist, stdio: 'inherit' });
-} catch (err) {
-  console.error('Failed to create ZIP archive. Is the zip CLI installed?', err);
+const zipRun = spawnSync('zip', ['-r', zipPath, '.'], { cwd: dist, stdio: 'inherit' });
+if (zipRun.error || zipRun.status !== 0) {
+  const detail = zipRun.error || new Error(`zip exited with status ${zipRun.status}`);
+  console.error('Failed to create ZIP archive. Is the zip CLI installed?', detail.message);
   process.exit(1);
 }
 const mb = (fs.statSync(zipPath).size / 1024 / 1024).toFixed(2);

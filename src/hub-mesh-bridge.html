@@ -39,11 +39,11 @@
           source: SOURCE,
           type: 'FABRIC_HUB_REGISTER_MESH',
           hubAddress: hubAddress
-        }, '*');
+        }, window.location.origin);
         setStatus('Sent register for ' + hubAddress + ' — check extension notifications / service worker.');
       };
       document.getElementById('unregister').onclick = function () {
-        window.postMessage({ source: SOURCE, type: 'FABRIC_HUB_UNREGISTER_MESH' }, '*');
+        window.postMessage({ source: SOURCE, type: 'FABRIC_HUB_UNREGISTER_MESH' }, window.location.origin);
         setStatus('Sent unregister.');
       };
     })();

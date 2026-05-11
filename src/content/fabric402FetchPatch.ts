@@ -35,12 +35,13 @@ export function installFabric402FetchInterceptor (): void {
         const wwwRaw = typeof res.headers.get === 'function' ? res.headers.get('www-authenticate') : null;
         const l402 = parseL402WWWAuthenticate(wwwRaw);
         const bolt11 = resolveBolt11From402(fabricDecoded, wwwRaw);
+        const bolt11Trimmed = typeof bolt11 === 'string' ? bolt11.trim() : '';
 
-        const hasL402Invoice = typeof l402.invoice === 'string' && l402.invoice.startsWith('ln');
+        const hasL402Invoice = typeof l402.invoice === 'string' && l402.invoice.trim().startsWith('ln');
         const show =
           fabricDecoded != null ||
           hasL402Invoice ||
-          (typeof bolt11 === 'string' && bolt11.startsWith('ln'));
+          bolt11Trimmed.startsWith('ln');
 
         if (!show) return res;
 
@@ -57,7 +58,7 @@ export function installFabric402FetchInterceptor (): void {
           showFabric402Overlay({
             requestUrl: urlStr || window.location.href,
             fabric: fabricDecoded,
-            bolt11,
+            bolt11: bolt11Trimmed || undefined,
             wwwAuthenticate: wwwRaw
           });
         });

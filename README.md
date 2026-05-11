@@ -1,5 +1,4 @@
-# Passport Browser Extension
-
+# `@fabric/passport`
 [![codecov](https://codecov.io/gh/FabricLabs/fabric-browser-extension/graph/badge.svg)](https://codecov.io/gh/FabricLabs/fabric-browser-extension)
 
 Browser Extension for managing identities and logging in to Fabric applications.

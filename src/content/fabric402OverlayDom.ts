@@ -114,8 +114,8 @@ export function showFabric402Overlay (opts: {
   }
 
   let boltTa: HTMLTextAreaElement | null = null;
-  const b11 = opts.bolt11;
-  if (b11 && b11.startsWith('ln')) {
+  const b11 = typeof opts.bolt11 === 'string' ? opts.bolt11.trim() : '';
+  if (b11.startsWith('ln')) {
     const lab = document.createElement('label');
     lab.style.cssText = 'display:block;margin:10px 0 6px;color:#cbd5e1;font-size:12px;font-weight:500';
     lab.textContent = 'Lightning invoice (BOLT11)';
@@ -171,7 +171,7 @@ export function showFabric402Overlay (opts: {
     return b;
   };
 
-  if (b11 && b11.startsWith('ln')) {
+  if (b11.startsWith('ln')) {
     row.appendChild(
       btn('Copy invoice', false, false, async () => {
         try {

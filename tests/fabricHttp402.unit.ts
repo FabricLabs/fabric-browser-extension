@@ -9,6 +9,11 @@ import {
 } from '../src/utils/fabricHttp402';
 
 describe('fabricHttp402 (402 payment headers)', () => {
+  it('rejects oversize payment-request header strings before decode', () => {
+    const huge = 'a'.repeat(20000);
+    assert.strictEqual(decodeFabricPaymentRequestHeader(huge), null);
+  });
+
   it('decodes X-Fabric-Payment-Request base64url JSON', () => {
     const bolt11 =
       'lnbc1ptestinvoice';
