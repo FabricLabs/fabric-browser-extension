@@ -60,6 +60,7 @@ import {
   type WalletTransaction,
   type BitcoinStatus
 } from '../fabric/bitcoinService';
+import { requestHubRegtestFaucet } from '../utils/fabricHubFaucet';
 
 const bip32 = BIP32Factory(ecc);
 
@@ -202,6 +203,10 @@ const truncateMiddle = (str: string | undefined, frontLen: number = 5, backLen: 
   return `${str.slice(0, frontLen)}...${str.slice(-backLen)}`;
 };
 
+function formatUnknownError (err: unknown): string {
+  return err instanceof Error ? err.message : 'Unknown error';
+}
+
 // Test bech32m implementation
 const testBech32m = () => {
   console.log('Testing bech32m implementation...');
@@ -216,9 +221,9 @@ const testBech32m = () => {
         console.error(`Reencoded as: ${reencoded}`);
         return false;
       }
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error(`Valid test vector failed: ${vector}`);
-      console.error(`Error: ${error?.message || 'Unknown error'}`);
+      console.error(`Error: ${formatUnknownError(error)}`);
       return false;
     }
   }
@@ -230,7 +235,7 @@ const testBech32m = () => {
       console.error(`Invalid test vector passed: ${str}`);
       console.error(`Expected reason: ${reason}`);
       return false;
-    } catch (error: any) {
+    } catch (_expected: unknown) {
       // Expected failure
     }
   }
@@ -287,13 +292,13 @@ const testBIP32 = () => {
           }
 
           console.log(`✓ Path ${chain.path} passed`);
-        } catch (error: any) {
-          console.error(`Failed to derive path ${chain.path}:`, error?.message || 'Unknown error');
+        } catch (error: unknown) {
+          console.error(`Failed to derive path ${chain.path}:`, formatUnknownError(error));
           return false;
         }
       }
-    } catch (error: any) {
-      console.error(`Failed to process seed ${vector.seed}:`, error?.message || 'Unknown error');
+    } catch (error: unknown) {
+      console.error(`Failed to process seed ${vector.seed}:`, formatUnknownError(error));
       return false;
     }
   }
@@ -304,7 +309,7 @@ const testBIP32 = () => {
       bip32.fromBase58(vector);
       console.error(`Invalid test vector passed: ${vector}`);
       return false;
-    } catch (error: any) {
+    } catch (_expected: unknown) {
       console.log(`✓ Invalid vector rejected as expected: ${vector}`);
     }
   }
@@ -334,6 +339,17 @@ interface Identity {
 interface KeyPairStorage {
   public: string;
   private: string;
+}
+
+function isKeyPairStorage (k: unknown): k is KeyPairStorage {
+  if (!k || typeof k !== 'object') return false;
+  const o = k as Record<string, unknown>;
+  return (
+    typeof o.public === 'string' &&
+    typeof o.private === 'string' &&
+    /^[0-9a-f]+$/i.test(o.public) &&
+    /^[0-9a-f]+$/i.test(o.private)
+  );
 }
 
 interface BitcoinNode {
@@ -415,7 +431,9 @@ const DEFAULT_SETTINGS = {
   /** Same default as `@fabric/core/constants` FABRIC_KEY_DERIVATION_PATH (hub / Fabric identity). */
   derivationPath: FABRIC_KEY_DERIVATION_PATH,
   bitcoinNodes: DEFAULT_BITCOIN_NODES,
-  fabricNodes: DEFAULT_FABRIC_NODES
+  fabricNodes: DEFAULT_FABRIC_NODES,
+  /** Optional; must match Hub `FABRIC_BITCOIN_XPUB_QUERY_TOKEN` when the hub gates xpub scans. */
+  xpubQueryToken: ''
 };
 
 interface Settings {
@@ -423,6 +441,7 @@ interface Settings {
   derivationPath: string;
   bitcoinNodes: BitcoinNode[];
   fabricNodes: FabricNode[];
+  xpubQueryToken: string;
 }
 
 function normalizeSettings (raw: Partial<Settings> | undefined): Settings {
@@ -438,7 +457,9 @@ function normalizeSettings (raw: Partial<Settings> | undefined): Settings {
         ? raw.derivationPath
         : DEFAULT_SETTINGS.derivationPath,
     bitcoinNodes: Array.isArray(raw?.bitcoinNodes) ? raw.bitcoinNodes : DEFAULT_SETTINGS.bitcoinNodes,
-    fabricNodes: Array.isArray(raw?.fabricNodes) ? raw.fabricNodes : DEFAULT_SETTINGS.fabricNodes
+    fabricNodes: Array.isArray(raw?.fabricNodes) ? raw.fabricNodes : DEFAULT_SETTINGS.fabricNodes,
+    xpubQueryToken:
+      typeof raw?.xpubQueryToken === 'string' ? raw.xpubQueryToken : DEFAULT_SETTINGS.xpubQueryToken
   };
 }
 
@@ -455,13 +476,15 @@ interface WalletCryptoV1 {
 interface StorageState {
   keys: KeyPairStorage[];
   identities: Identity[];
-  blobs: any[];
+  blobs: unknown[];
   settings: Settings;
   /** Per-identity encrypted account xprv (identity id → blob). */
   walletCryptos?: Record<string, WalletCryptoV1>;
   /** @deprecated Single-blob format; migrated to walletCryptos on load. */
   walletCrypto?: WalletCryptoV1;
 }
+
+type IdentityDebugPanelState = StorageState | { error: string };
 
 const WALLET_PBKDF2_ITERATIONS = 200_000;
 
@@ -611,7 +634,7 @@ function getActiveBitcoinNode (nodes: BitcoinNode[]): BitcoinNode | null {
 }
 
 // Add function to make RPC requests
-const makeRPCRequest = async (node: BitcoinNode, method: string, params: any[]): Promise<any> => {
+const makeRPCRequest = async (node: BitcoinNode, method: string, params: unknown[]): Promise<unknown> => {
   const headers = buildBitcoinRpcHeaders(node.connectionString);
   const postUrl = getBitcoinRpcPostUrl(node.connectionString);
 
@@ -679,9 +702,12 @@ const ensureWalletLoaded = async (node: BitcoinNode): Promise<string> => {
       }
 
       // If default wallet can't be loaded/created, try listing available wallets
-      const wallets = await makeRPCRequest(node, 'listwallets', []);
-      if (wallets && wallets.length > 0) {
-        return wallets[0]; // Use the first available wallet
+      const walletsRaw = await makeRPCRequest(node, 'listwallets', []);
+      if (Array.isArray(walletsRaw) && walletsRaw.length > 0) {
+        const firstWallet = walletsRaw[0];
+        if (typeof firstWallet === 'string') {
+          return firstWallet;
+        }
       }
 
       // If no wallets available, create a new one with timestamp
@@ -711,7 +737,7 @@ interface GeneratedValues {
   publicKey: string;
   xCoord: Buffer;
   bech32mEncoded: string;
-  masterKey: any;  // Using any for now since bip32.BIP32Interface isn't available
+  masterKey: BIP32Interface;
 }
 
 const IdentityManager = () => {
@@ -723,7 +749,7 @@ const IdentityManager = () => {
   const [password, setPassword] = useState<string>('');
   const [passwordState, setPasswordState] = useState<PasswordState>('input');
   const [identities, setIdentities] = useState<Identity[]>([]);
-  const [debugInfo, setDebugInfo] = useState<any>(null);
+  const [debugInfo, setDebugInfo] = useState<IdentityDebugPanelState | null>(null);
   const [showDebug, setShowDebug] = useState<boolean>(false);
   const [showPassword, setShowPassword] = useState<boolean>(false);
   const [confirmationSeed, setConfirmationSeed] = useState<string>('');
@@ -772,19 +798,24 @@ const IdentityManager = () => {
   const [walletBalanceLoading, setWalletBalanceLoading] = useState(false);
   const [walletTxs, setWalletTxs] = useState<WalletTransaction[]>([]);
   const [walletTxsLoading, setWalletTxsLoading] = useState(false);
-  const [walletView, setWalletView] = useState<'balance' | 'receive' | 'history' | 'send' | null>(null);
+  const [walletView, setWalletView] = useState<'balance' | 'receive' | 'history' | 'send' | 'faucet' | null>(null);
   const [btcStatus, setBtcStatus] = useState<BitcoinStatus | null>(null);
   const [receiveAddr, setReceiveAddr] = useState<string | null>(null);
   const [receiveAddrIdx, setReceiveAddrIdx] = useState(0);
   const [sendAddr, setSendAddr] = useState('');
   const [sendAmountSats, setSendAmountSats] = useState('');
   const [sendError, setSendError] = useState<string | null>(null);
+  const [faucetAddr, setFaucetAddr] = useState('');
+  const [faucetAmountSats, setFaucetAmountSats] = useState('10000');
+  const [faucetLoading, setFaucetLoading] = useState(false);
+  const [faucetMsg, setFaucetMsg] = useState<{ type: 'ok' | 'err'; text: string; txid?: string } | null>(null);
 
   const [settings, setSettings] = useState<Settings>({
     autoLockTimer: DEFAULT_SETTINGS.autoLockTimer,
     derivationPath: DEFAULT_SETTINGS.derivationPath,
     bitcoinNodes: DEFAULT_SETTINGS.bitcoinNodes,
-    fabricNodes: DEFAULT_SETTINGS.fabricNodes
+    fabricNodes: DEFAULT_SETTINGS.fabricNodes,
+    xpubQueryToken: DEFAULT_SETTINGS.xpubQueryToken
   });
 
   // Create a memoized version of the wordlist
@@ -1438,7 +1469,11 @@ const IdentityManager = () => {
         const walletName = await ensureWalletLoaded(rpcNode);
         console.log('Using wallet:', walletName);
 
-        const address = await makeRPCRequest(rpcNode, 'getnewaddress', ['message-signing', 'legacy']);
+        const addressRaw = await makeRPCRequest(rpcNode, 'getnewaddress', ['message-signing', 'legacy']);
+        if (typeof addressRaw !== 'string' || !addressRaw.trim()) {
+          throw new Error('getnewaddress returned an unexpected response from the node.');
+        }
+        const address = addressRaw;
 
         try {
           await makeRPCRequest(rpcNode, 'dumpprivkey', [address]);
@@ -1447,8 +1482,11 @@ const IdentityManager = () => {
           throw new Error('Could not access private key for signing. Please ensure the wallet is unlocked and has private keys enabled.');
         }
 
-        const signature = await makeRPCRequest(rpcNode, 'signmessage', [address, messageToSign]);
-        setSignature(signature);
+        const signatureRaw = await makeRPCRequest(rpcNode, 'signmessage', [address, messageToSign]);
+        if (typeof signatureRaw !== 'string') {
+          throw new Error('signmessage returned an unexpected response from the node.');
+        }
+        setSignature(signatureRaw);
         setPubkeyToVerify(address);
         setShowSignature(true);
         return;
@@ -1508,11 +1546,12 @@ const IdentityManager = () => {
           return;
         }
         await ensureWalletLoaded(rpcNode);
-        const isValid = await makeRPCRequest(rpcNode, 'verifymessage', [
+        const verifyRaw = await makeRPCRequest(rpcNode, 'verifymessage', [
           pubkeyToVerify,
           signatureToVerify,
           messageToVerify
         ]);
+        const isValid = verifyRaw === true;
         setVerificationResult(isValid ? 'Signature is valid (via RPC).' : 'Signature is invalid (via RPC).');
       } catch (error) {
         console.error('Failed to verify message via RPC:', error);
@@ -1526,7 +1565,7 @@ const IdentityManager = () => {
     }
   };
 
-  const handleSettingsChange = (key: keyof typeof settings, value: any) => {
+  const handleSettingsChange = <K extends keyof Settings>(key: K, value: Settings[K]) => {
     setSettings(prev => ({
       ...prev,
       [key]: value
@@ -1612,12 +1651,7 @@ const IdentityManager = () => {
 
           // Validate key pairs if present
           if (data.state.keys && Array.isArray(data.state.keys)) {
-            const validKeyPairs = data.state.keys.every((key: any) =>
-              typeof key.public === 'string' &&
-              typeof key.private === 'string' &&
-              /^[0-9a-f]+$/i.test(key.public) &&
-              /^[0-9a-f]+$/i.test(key.private)
-            );
+            const validKeyPairs = data.state.keys.every(isKeyPairStorage);
 
             if (!validKeyPairs) {
               throw new Error('Invalid key pair format in backup');
@@ -2583,7 +2617,14 @@ const IdentityManager = () => {
             basic
             inverted
             active={walletView === 'history'}
-            onClick={() => { setWalletView(walletView === 'history' ? null : 'history'); if (walletTxs.length === 0) void refreshWalletTxs(); }}
+            onClick={() => {
+              if (walletView === 'history') {
+                setWalletView(null);
+              } else {
+                setWalletView('history');
+                void refreshWalletTxs();
+              }
+            }}
           >
             <Icon name="list" /> History
           </Button>
@@ -2594,6 +2635,24 @@ const IdentityManager = () => {
             onClick={() => { setWalletView(walletView === 'send' ? null : 'send'); setSendError(null); }}
           >
             <Icon name="send" /> Send
+          </Button>
+          <Button
+            basic
+            inverted
+            active={walletView === 'faucet'}
+            onClick={() => {
+              const next = walletView === 'faucet' ? null : 'faucet';
+              if (next === 'faucet') {
+                setFaucetMsg(null);
+                const cur = identities.find(id => id.isCurrent);
+                const net = btcStatus?.network || 'regtest';
+                const a = cur?.xpub ? deriveReceiveAddress(cur.xpub, net, receiveAddrIdx) : null;
+                setFaucetAddr(prev => (prev.trim() ? prev : (a || '')));
+              }
+              setWalletView(next);
+            }}
+          >
+            <Icon name="tint" /> Faucet
           </Button>
         </Button.Group>
 
@@ -2648,8 +2707,8 @@ const IdentityManager = () => {
               <p style={{ color: 'rgba(255,255,255,0.45)', fontSize: '0.85em' }}>No transactions yet.</p>
             ) : (
               <List divided inverted size="small" style={{ maxHeight: '14em', overflowY: 'auto' }}>
-                {walletTxs.map(tx => (
-                  <List.Item key={tx.txid + tx.category}>
+                {walletTxs.map((tx, idx) => (
+                  <List.Item key={`${tx.txid}-${idx}`}>
                     <List.Content>
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                         <span style={{ color: tx.amount >= 0 ? '#21ba45' : '#db2828', fontFamily: 'monospace', fontWeight: 'bold' }}>
@@ -2705,6 +2764,93 @@ const IdentityManager = () => {
                 Sends via the active Fabric node's Bitcoin service (Hub wallet). Transaction signing with local keys (PSBT) is planned.
               </p>
             </Form>
+          </div>
+        )}
+
+        {walletView === 'faucet' && (
+          <div style={{ marginTop: '0.75em' }}>
+            <p style={{ color: 'rgba(255,255,255,0.65)', fontSize: '0.82em', marginBottom: '0.5em' }}>
+              Request regtest coins from the Hub wallet on your active Fabric authority (
+              <code style={{ wordBreak: 'break-all' }}>{getActiveFabricBase() || '—'}</code>
+              ). Same contract as Fabric Hub:{' '}
+              <code style={{ fontSize: '0.78em' }}>POST /services/bitcoin/faucet</code>.
+            </p>
+            {btcStatus?.network && btcStatus.network !== 'regtest' ? (
+              <Message warning size="small" style={{ marginBottom: '0.5em' }}>
+                <p style={{ margin: 0 }}>
+                  Faucet is only supported on <strong>regtest</strong>. This node reports <strong>{btcStatus.network}</strong> — requests may be rejected.
+                </p>
+              </Message>
+            ) : null}
+            <p style={{ fontSize: '0.78em', color: 'rgba(255,255,255,0.45)', margin: '0 0 0.5em' }}>
+              Public operator faucet (same playnet style):{' '}
+              <a href="https://hub.faucet.pub/" target="_blank" rel="noopener noreferrer">hub.faucet.pub</a>
+              {' · '}
+              <a href="https://hub.fabric.pub/services/bitcoin/faucet" target="_blank" rel="noopener noreferrer">hub.fabric.pub</a>
+            </p>
+            <Form>
+              <Form.Field>
+                <label style={{ color: 'rgba(255,255,255,0.7)', fontSize: '0.85em' }}>Regtest address</label>
+                <Input
+                  placeholder="bcrt1…"
+                  value={faucetAddr}
+                  onChange={e => setFaucetAddr(e.target.value)}
+                  fluid
+                  size="small"
+                />
+              </Form.Field>
+              <Form.Field>
+                <label style={{ color: 'rgba(255,255,255,0.7)', fontSize: '0.85em' }}>Amount (sats, max 1,000,000)</label>
+                <Input
+                  type="number"
+                  min={1}
+                  max={1_000_000}
+                  value={faucetAmountSats}
+                  onChange={e => setFaucetAmountSats(e.target.value)}
+                  fluid
+                  size="small"
+                />
+              </Form.Field>
+              <Button.Group size="small" fluid>
+                <Button
+                  basic
+                  inverted
+                  type="button"
+                  disabled={!receiveAddr}
+                  onClick={() => {
+                    if (receiveAddr) setFaucetAddr(receiveAddr);
+                  }}
+                >
+                  Use receive address
+                </Button>
+                <Button
+                  primary
+                  type="button"
+                  loading={faucetLoading}
+                  disabled={!getActiveFabricBase() || !faucetAddr.trim()}
+                  onClick={() => { void handleFaucetRequest(); }}
+                >
+                  Request from hub faucet
+                </Button>
+              </Button.Group>
+            </Form>
+            {faucetMsg ? (
+              <Message
+                style={{ marginTop: '0.75em' }}
+                positive={faucetMsg.type === 'ok'}
+                negative={faucetMsg.type === 'err'}
+                size="small"
+                onDismiss={() => setFaucetMsg(null)}
+              >
+                <Message.Header>{faucetMsg.type === 'ok' ? 'Faucet' : 'Faucet failed'}</Message.Header>
+                <p style={{ margin: '0.35em 0 0', wordBreak: 'break-word' }}>{faucetMsg.text}</p>
+                {faucetMsg.txid ? (
+                  <p style={{ margin: '0.35em 0 0', fontFamily: 'monospace', fontSize: '0.82em' }}>
+                    txid: {faucetMsg.txid}
+                  </p>
+                ) : null}
+              </Message>
+            ) : null}
           </div>
         )}
       </Segment>
@@ -3577,6 +3723,20 @@ const IdentityManager = () => {
           <h4 style={{ marginTop: '2em' }}>Bitcoin Nodes</h4>
           {renderNodeList()}
           {renderTestNodeModal()}
+          <Form.Field style={{ marginTop: '1em', maxWidth: '32rem' }}>
+            <label style={{ color: 'rgba(255,255,255,0.9)' }}>Hub xpub query token (optional)</label>
+            <Input
+              type="password"
+              autoComplete="off"
+              placeholder="Matches FABRIC_BITCOIN_XPUB_QUERY_TOKEN when the hub requires it"
+              value={settings.xpubQueryToken}
+              onChange={(e) => handleSettingsChange('xpubQueryToken', e.target.value)}
+              fluid
+            />
+            <p style={{ marginTop: '0.5em', fontSize: '0.85em', color: 'rgba(255,255,255,0.65)' }}>
+              When the Hub gates watch-only <code style={{ fontSize: '0.85em' }}>GET /services/bitcoin/xpub</code> (balance and transaction scans), paste the same shared secret here. Leave empty for hubs that allow anonymous xpub queries.
+            </p>
+          </Form.Field>
 
           <h4 style={{ marginTop: '2em' }}>Fabric Nodes</h4>
           <p style={{ marginBottom: '0.75em', color: 'rgba(255,255,255,0.85)' }}>
@@ -3700,7 +3860,9 @@ const IdentityManager = () => {
         setWalletBalance(null);
         return;
       }
-      const bal = await fetchWalletBalance(base, cur.xpub, status.network || 'regtest');
+      const bal = await fetchWalletBalance(base, cur.xpub, status.network || 'regtest', {
+        xpubQueryToken: settings.xpubQueryToken
+      });
       setWalletBalance(bal);
       if (bal.balanceSats != null) {
         setIdentities(prev => prev.map(id =>
@@ -3712,14 +3874,21 @@ const IdentityManager = () => {
     } finally {
       setWalletBalanceLoading(false);
     }
-  }, [getActiveFabricBase, identities]);
+  }, [getActiveFabricBase, identities, settings.xpubQueryToken]);
 
   const refreshWalletTxs = useCallback(async () => {
     const base = getActiveFabricBase();
-    if (!base) return;
+    const cur = identities.find(id => id.isCurrent);
+    if (!base || !cur?.xpub) {
+      setWalletTxs([]);
+      return;
+    }
     setWalletTxsLoading(true);
     try {
-      const txs = await fetchTransactionHistory(base, 25);
+      const net = btcStatus?.network || 'regtest';
+      const txs = await fetchTransactionHistory(base, cur.xpub, net, 25, {
+        xpubQueryToken: settings.xpubQueryToken
+      });
       setWalletTxs(txs);
     } catch (err: unknown) {
       swallowNonFatal('identity-wallet-tx-refresh', err);
@@ -3727,7 +3896,44 @@ const IdentityManager = () => {
     } finally {
       setWalletTxsLoading(false);
     }
-  }, [getActiveFabricBase]);
+  }, [getActiveFabricBase, identities, btcStatus, settings.xpubQueryToken]);
+
+  const handleFaucetRequest = useCallback(async () => {
+    const base = getActiveFabricBase();
+    if (!base) {
+      setFaucetMsg({
+        type: 'err',
+        text: 'No active Fabric node. Open Settings → Fabric Nodes and activate your remote authority (Hub URL).'
+      });
+      return;
+    }
+    const address = faucetAddr.trim();
+    if (!address) {
+      setFaucetMsg({ type: 'err', text: 'Enter a regtest receive address (e.g. bcrt1…).' });
+      return;
+    }
+    const raw = parseInt(faucetAmountSats, 10);
+    const amountSats = Math.max(1, Math.min(1_000_000, Number.isFinite(raw) ? raw : 10_000));
+    setFaucetLoading(true);
+    setFaucetMsg(null);
+    try {
+      const r = await requestHubRegtestFaucet(base, { address, amountSats });
+      if (!r.ok) {
+        setFaucetMsg({ type: 'err', text: r.error });
+      } else {
+        setFaucetMsg({
+          type: 'ok',
+          text: `Hub accepted faucet send of ${r.faucet.amountSats.toLocaleString()} sats.`,
+          txid: r.faucet.txid
+        });
+        void refreshWalletBalance();
+      }
+    } catch (err: unknown) {
+      setFaucetMsg({ type: 'err', text: err instanceof Error ? err.message : String(err) });
+    } finally {
+      setFaucetLoading(false);
+    }
+  }, [getActiveFabricBase, faucetAddr, faucetAmountSats, refreshWalletBalance]);
 
   const deriveCurrentReceiveAddr = useCallback(() => {
     const cur = identities.find(id => id.isCurrent);
@@ -3742,6 +3948,11 @@ const IdentityManager = () => {
       refreshWalletBalance();
     }
   }, [state]);
+
+  const currentIdentityId = identities.find(i => i.isCurrent)?.id ?? null;
+  useEffect(() => {
+    setWalletTxs([]);
+  }, [currentIdentityId]);
 
   useEffect(() => {
     if (walletView === 'receive') deriveCurrentReceiveAddr();

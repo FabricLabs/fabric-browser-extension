@@ -4,7 +4,8 @@
  * Bitcoin wallet service for Fabric Passport.
  *
  * Uses a Fabric node's `/services/bitcoin` HTTP API as a block-explorer and wallet backend.
- * Keys never leave the extension; only xpub-derived watch addresses are sent for balance lookups.
+ * Keys never leave the extension; only xpub-derived watch addresses are sent for balance lookups
+ * (`GET …/services/bitcoin/xpub?xpub=…&addresses=…`).
  *
  * Compatible with any Fabric node that exposes the standard Bitcoin service surface
  * (hub.fabric.pub, local `node scripts/hub.js`, or any `@fabric/http` instance with Bitcoin enabled).
@@ -32,6 +33,22 @@ async function fetchWithTimeout (url: string, init: RequestInit): Promise<Respon
 
 export interface FabricBitcoinNodeConfig {
   baseUrl: string;
+}
+
+/** Optional auth for Hub watch-only xpub routes when `FABRIC_BITCOIN_XPUB_QUERY_TOKEN` is set. */
+export interface FabricBitcoinHttpOpts {
+  xpubQueryToken?: string | null;
+}
+
+function trimXpubQueryToken (t?: string | null): string | undefined {
+  const s = String(t ?? '').trim();
+  return s || undefined;
+}
+
+function xpubQueryAuthHeaders (xpubQueryToken?: string | null): Record<string, string> {
+  const tok = trimXpubQueryToken(xpubQueryToken);
+  if (!tok) return {};
+  return { 'X-Fabric-Xpub-Query-Token': tok };
 }
 
 export interface WalletBalance {
@@ -70,16 +87,36 @@ function networkFromName (name: string): bitcoin.networks.Network {
 }
 
 /**
+ * Decode an extended public key regardless of whether the chain is regtest/testnet/mainnet.
+ * Fabric / Hub identities typically store a mainnet-prefixed `xpub` (BIP32 version bytes) while
+ * the node runs regtest — `bip32.fromBase58(xpub, regtest)` rejects that mismatch.
+ */
+function decodeBip32Root (xpub: string): BIP32Interface | null {
+  const trimmed = String(xpub || '').trim();
+  if (!trimmed) return null;
+  for (const net of [bitcoin.networks.bitcoin, bitcoin.networks.testnet, bitcoin.networks.regtest]) {
+    try {
+      return bip32.fromBase58(trimmed, net);
+    } catch (_e) {
+      /* try next network's version bytes */
+    }
+  }
+  return null;
+}
+
+/**
  * Derive BIP84 (native SegWit) receive addresses from an xpub for watch-only balance.
  * Path: m/84'/0'/0'/0/i (external chain)
  */
-export function deriveReceiveAddresses (xpub: string, network: bitcoin.networks.Network, count = 20): string[] {
+export function deriveReceiveAddresses (xpub: string, networkName: string, count = 20): string[] {
+  const addressNetwork = networkFromName(networkName);
+  const root = decodeBip32Root(xpub);
+  if (!root) return [];
   try {
-    const root = bip32.fromBase58(xpub, network);
     const addrs: string[] = [];
     for (let i = 0; i < count; i++) {
       const child = root.derive(0).derive(i);
-      const { address } = bitcoin.payments.p2wpkh({ pubkey: Buffer.from(child.publicKey), network });
+      const { address } = bitcoin.payments.p2wpkh({ pubkey: Buffer.from(child.publicKey), network: addressNetwork });
       if (address) addrs.push(address);
     }
     return addrs;
@@ -94,17 +131,18 @@ export function deriveReceiveAddresses (xpub: string, network: bitcoin.networks.
  * Falls back to the xpub's own key when it's a leaf (no child derivation possible).
  */
 export function deriveReceiveAddress (xpub: string, networkName: string, index = 0): string | null {
-  const network = networkFromName(networkName);
+  const addressNetwork = networkFromName(networkName);
+  const root = decodeBip32Root(xpub);
+  if (!root) return null;
   try {
-    const root = bip32.fromBase58(xpub, network);
     try {
       const child = root.derive(0).derive(index);
-      const { address } = bitcoin.payments.p2wpkh({ pubkey: Buffer.from(child.publicKey), network });
+      const { address } = bitcoin.payments.p2wpkh({ pubkey: Buffer.from(child.publicKey), network: addressNetwork });
       if (address) return address;
     } catch (err: unknown) {
       swallowNonFatal('bitcoin-derive-receive-index', err);
     }
-    const { address } = bitcoin.payments.p2wpkh({ pubkey: Buffer.from(root.publicKey), network });
+    const { address } = bitcoin.payments.p2wpkh({ pubkey: Buffer.from(root.publicKey), network: addressNetwork });
     return address ?? null;
   } catch (err: unknown) {
     swallowNonFatal('bitcoin-derive-receive-address', err);
@@ -154,9 +192,13 @@ export async function fetchBitcoinStatus (baseUrl: string): Promise<BitcoinStatu
   }
 }
 
-export async function fetchWalletBalance (baseUrl: string, xpub: string, networkName: string): Promise<WalletBalance> {
-  const network = networkFromName(networkName);
-  const addresses = deriveReceiveAddresses(xpub, network, 20);
+export async function fetchWalletBalance (
+  baseUrl: string,
+  xpub: string,
+  networkName: string,
+  opts?: FabricBitcoinHttpOpts
+): Promise<WalletBalance> {
+  const addresses = deriveReceiveAddresses(xpub, networkName, 20);
 
   try {
     const status = await fetchBitcoinStatus(baseUrl);
@@ -164,13 +206,14 @@ export async function fetchWalletBalance (baseUrl: string, xpub: string, network
       return { balanceSats: 0, confirmedSats: 0, unconfirmedSats: 0, network: null, height: null, updatedAt: Date.now() };
     }
 
-    const url = `${baseUrl.replace(/\/+$/, '')}/services/bitcoin/addresses`;
+    const root = baseUrl.replace(/\/+$/, '');
     const params = new URLSearchParams();
-    if (addresses.length > 0) params.set('addresses', addresses.join(','));
     params.set('xpub', xpub);
+    if (addresses.length > 0) params.set('addresses', addresses.join(','));
+    const path = `/services/bitcoin/xpub?${params.toString()}`;
 
-    const res = await fetchWithTimeout(`${url}?${params.toString()}`, {
-      headers: { Accept: 'application/json' }
+    const res = await fetchWithTimeout(`${root}${path}`, {
+      headers: { Accept: 'application/json', ...xpubQueryAuthHeaders(opts?.xpubQueryToken) }
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
@@ -193,20 +236,54 @@ export async function fetchWalletBalance (baseUrl: string, xpub: string, network
   }
 }
 
-export async function fetchTransactionHistory (baseUrl: string, count = 25): Promise<WalletTransaction[]> {
+export async function fetchTransactionHistory (
+  baseUrl: string,
+  xpub: string,
+  networkName: string,
+  count = 25,
+  opts?: FabricBitcoinHttpOpts
+): Promise<WalletTransaction[]> {
+  const trimmedXpub = String(xpub || '').trim();
+  if (!trimmedXpub) return [];
+
+  const root = baseUrl.replace(/\/+$/, '');
+  const limit = Math.max(1, Math.min(100, count));
+  const watchAddrs = deriveReceiveAddresses(trimmedXpub, networkName, 50);
+  const params = new URLSearchParams();
+  params.set('xpub', trimmedXpub);
+  params.set('limit', String(limit));
+  if (watchAddrs.length > 0) {
+    params.set('addresses', watchAddrs.join(','));
+  }
+
+  const path = `/services/bitcoin/xpub/transactions?${params.toString()}`;
+
   try {
-    const txs = await bitcoinRpc(baseUrl, 'listtransactions', ['*', count, 0, true]) as Array<Record<string, unknown>>;
-    if (!Array.isArray(txs)) return [];
-    return txs.map(tx => ({
-      txid: String(tx.txid || ''),
-      amount: Number(tx.amount || 0),
-      confirmations: Number(tx.confirmations || 0),
-      time: Number(tx.time || tx.timereceived || 0),
-      category: String(tx.category || 'unknown'),
-      address: typeof tx.address === 'string' ? tx.address : undefined,
-      fee: typeof tx.fee === 'number' ? tx.fee : undefined,
-      label: typeof tx.label === 'string' ? tx.label : undefined
-    })).reverse();
+    const res = await fetchWithTimeout(`${root}${path}`, {
+      headers: { Accept: 'application/json', ...xpubQueryAuthHeaders(opts?.xpubQueryToken) }
+    });
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}`);
+    }
+    const data = (await res.json()) as Record<string, unknown>;
+    const raw = data.transactions;
+    if (!Array.isArray(raw)) return [];
+
+    return raw.map((tx: Record<string, unknown>) => {
+      const ourAmt = tx.ourAmount != null ? Number(tx.ourAmount) : NaN;
+      const legacyAmt = tx.amount != null ? Number(tx.amount) : 0;
+      const amountBtc = Number.isFinite(ourAmt) ? ourAmt : legacyAmt;
+      return {
+        txid: String(tx.txid || ''),
+        amount: amountBtc,
+        confirmations: Number(tx.confirmations || 0),
+        time: Number(tx.time || tx.blocktime || tx.timereceived || 0),
+        category: String(tx.category || 'receive'),
+        address: typeof tx.address === 'string' ? tx.address : undefined,
+        fee: typeof tx.fee === 'number' ? tx.fee : undefined,
+        label: typeof tx.label === 'string' ? tx.label : undefined
+      };
+    });
   } catch (err: unknown) {
     swallowNonFatal('bitcoin-fetch-tx-history', err);
     return [];
