@@ -1,9 +1,9 @@
 'use strict';
 
-import { BIP32Factory } from 'bip32';
+import { BIP32Factory, type TinySecp256k1Interface } from 'bip32';
 import ecc from '@bitcoinerlab/secp256k1';
 
-const bip32 = BIP32Factory(ecc as any);
+const bip32 = BIP32Factory(ecc as unknown as TinySecp256k1Interface);
 
 /**
  * Validates an extended public key (xpub) using BIP32 format.
@@ -31,7 +31,7 @@ export function validateXpub (xpub: string): boolean {
     }
 
     return true;
-  } catch (error) {
+  } catch (_error: unknown) {
     // If any error occurs during validation, the xpub is invalid
     return false;
   }

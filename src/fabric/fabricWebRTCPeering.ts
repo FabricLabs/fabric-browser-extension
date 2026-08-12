@@ -1,3 +1,5 @@
+import { swallowNonFatal } from '../utils/nonFatal';
+
 /**
  * Browser-side helpers for Fabric Protocol WebRTC peering.
  * Matches hub.fabric.pub Bridge conventions: signaling over Hub WebSocket (`wss://host:port/`)
@@ -27,7 +29,7 @@ export interface ParsedFabricHubAddress {
  */
 export function parseFabricHubAddress (input: string): ParsedFabricHubAddress | null {
   try {
-    const raw = input == null ? '' : String(input).trim();
+    const raw = String(input ?? '').trim();
     if (!raw) return null;
 
     const hasScheme = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(raw);
@@ -41,7 +43,8 @@ export function parseFabricHubAddress (input: string): ParsedFabricHubAddress | 
 
     const wsOrigin = (secure ? 'wss' : 'ws') + `://${host}:${port}`;
     return { host, port, secure, wsOrigin, raw };
-  } catch {
+  } catch (err: unknown) {
+    swallowNonFatal('parse-fabric-hub-address', err);
     return null;
   }
 }
@@ -105,7 +108,9 @@ export function testFabricSignalingReachable (
     const t = window.setTimeout(() => {
       try {
         ws.close();
-      } catch (_) {}
+      } catch (err: unknown) {
+        swallowNonFatal('fabric-ws-timeout-close', err);
+      }
       reject(new Error('WebSocket open timed out'));
     }, timeoutMs);
 
@@ -114,7 +119,9 @@ export function testFabricSignalingReachable (
       const subprotocol = ws.protocol || '(negotiated)';
       try {
         ws.close();
-      } catch (_) {}
+      } catch (err: unknown) {
+        swallowNonFatal('fabric-ws-probe-close', err);
+      }
       resolve({ url, subprotocol });
     };
 

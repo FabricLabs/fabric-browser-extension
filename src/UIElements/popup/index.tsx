@@ -6,9 +6,7 @@ import { createRoot } from 'react-dom/client';
 
 // Fabric
 import IdentityManager from '../IdentityManager';
-
-// Semantic UI
-import 'semantic-ui-css/semantic.min.css';
+import '@fabric/http/assets/semantic.min.css';
 
 const container = document.getElementById('fabric-root');
 const root = createRoot(container!);

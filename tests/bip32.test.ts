@@ -1,7 +1,7 @@
 'use strict';
 
 import assert from 'assert';
-import { BIP32Factory } from 'bip32';
+import { BIP32Factory, type TinySecp256k1Interface } from 'bip32';
 import { INVALID_BIP32_TEST_VECTORS, VALID_BIP32_TEST_VECTORS } from '../src/crypto/vectors';
 import ecc from '@bitcoinerlab/secp256k1';
 
@@ -9,7 +9,7 @@ describe('BIP32 implementation', () => {
   describe('invalid test vectors', () => {
     INVALID_BIP32_TEST_VECTORS.forEach((vector) => {
       it(`should reject invalid extended key: ${vector}`, () => {
-        const bip32 = BIP32Factory(ecc as any);
+        const bip32 = BIP32Factory(ecc as unknown as TinySecp256k1Interface);
         try {
           bip32.fromBase58(vector);
           assert.fail(`Invalid test vector passed: ${vector}`);
@@ -24,7 +24,7 @@ describe('BIP32 implementation', () => {
   describe('valid test vectors', () => {
     VALID_BIP32_TEST_VECTORS.forEach((vector) => {
       it(`should correctly derive keys from seed ${vector.seed}`, () => {
-        const bip32 = BIP32Factory(ecc as any);
+        const bip32 = BIP32Factory(ecc as unknown as TinySecp256k1Interface);
         const root = bip32.fromSeed(Buffer.from(vector.seed, 'hex'));
         
         vector.chains.forEach(({ path, xpub, xprv }) => {

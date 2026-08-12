@@ -20,7 +20,8 @@ const Interface: React.FC = () => {
   useEffect(() => {
     // Check if user has completed onboarding
     chrome.storage.local.get(['onboardingComplete'], (result) => {
-      setHasCompletedOnboarding(result.onboardingComplete || false);
+      const v = result.onboardingComplete;
+      setHasCompletedOnboarding(v === true);
     });
   }, []);
 

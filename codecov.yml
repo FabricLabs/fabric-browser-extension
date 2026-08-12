@@ -1,0 +1,6 @@
+# https://docs.codecov.com/docs/codecov-yaml
+# c8 instruments `src/**` only; extra ignores document vendored / generated paths.
+coverage:
+  ignore:
+    - assets/**/*
+    - libraries/**/*

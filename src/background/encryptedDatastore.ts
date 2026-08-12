@@ -4,6 +4,8 @@
  * Master key lives in extension storage; replace via setMasterKeyFromBytes after user unlock for stronger binding.
  */
 
+import { swallowNonFatal } from '../utils/nonFatal';
+
 const DS_PREFIX = 'fabric_ds_enc:';
 const MASTER_KEY_STORAGE = 'fabric_bg_ds_master_key_b64';
 
@@ -62,11 +64,42 @@ export async function fabricDsGet<T = unknown> (key: string): Promise<T | null> 
   try {
     const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, aes, ct);
     return JSON.parse(new TextDecoder().decode(plain)) as T;
-  } catch {
+  } catch (err: unknown) {
+    swallowNonFatal('fabric-ds-decrypt', err);
     return null;
   }
 }
 
 export async function fabricDsRemove (key: string): Promise<void> {
   await chrome.storage.local.remove(`${DS_PREFIX}${key}`);
+}
+
+/**
+ * List decrypted values whose logical keys start with `prefix`.
+ * @param prefix e.g. `notification:`
+ * @param limit Max rows (newest-ish; storage order is not guaranteed — sorted by receivedAt when present)
+ */
+export async function fabricDsListPrefix<T = unknown> (
+  prefix: string,
+  limit = 40
+): Promise<Array<{ key: string; value: T }>> {
+  const all = await chrome.storage.local.get(null);
+  const out: Array<{ key: string; value: T }> = [];
+  const needle = `${DS_PREFIX}${prefix}`;
+  for (const storageKey of Object.keys(all || {})) {
+    if (!storageKey.startsWith(needle)) continue;
+    const logical = storageKey.slice(DS_PREFIX.length);
+    try {
+      const value = await fabricDsGet<T>(logical);
+      if (value != null) out.push({ key: logical, value });
+    } catch (err: unknown) {
+      swallowNonFatal('fabric-ds-list-prefix', err);
+    }
+  }
+  out.sort((a, b) => {
+    const ta = Number((a.value as { receivedAt?: number })?.receivedAt) || 0;
+    const tb = Number((b.value as { receivedAt?: number })?.receivedAt) || 0;
+    return tb - ta;
+  });
+  return out.slice(0, Math.max(1, Math.min(200, limit)));
 }

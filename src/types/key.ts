@@ -2,6 +2,7 @@
 
 import { IIdentity } from './identity';
 import { ec as EC } from 'elliptic';
+import type { EllipticSecp256k1KeyPair } from 'elliptic';
 import { BIP32Factory, TinySecp256k1Interface } from 'bip32';
 import ecc from '@bitcoinerlab/secp256k1';
 import { mnemonicToSeedSync } from 'bip39';
@@ -11,7 +12,7 @@ const ec = new EC('secp256k1');
 const bip32 = BIP32Factory(ecc as unknown as TinySecp256k1Interface);
 
 export class Key {
-  private keypair: any;
+  private keypair: EllipticSecp256k1KeyPair | null = null;
   private xpub: string | null = null;
   private xprv: string | null = null;
   private publicKey: string | null = null;

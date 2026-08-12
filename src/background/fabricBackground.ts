@@ -1,6 +1,9 @@
 'use strict';
 
 import { FABRIC_MESH_HUB_REGISTRATION_KEY, FABRIC_STATE_STORAGE_KEY } from '../constants/fabricExtension';
+import { handleFabricRuntimeMessage } from './fabricBackgroundRuntimeMessages';
+import { initIdentityOutband } from './identityOutband';
+import { swallowNonFatal } from '../utils/nonFatal';
 
 declare const __FABRIC_ACTION_DEBUG_URL__: string;
 const FABRIC_ACTION_DEBUG_URL =
@@ -15,12 +18,9 @@ interface ExtensionServiceWorkerGlobal {
   addEventListener (type: string, listener: (ev: Event) => void): void;
   clients: { claim (): Promise<unknown> };
 }
-import { fabricDsGet, fabricDsSet, fabricDsRemove, setDatastoreMasterKeyFromBytes } from './encryptedDatastore';
-import { findMessageTypeDescriptor, type NotificationPriority } from '../fabric/messageTypes';
 
 const OFFSCREEN_PATH = 'background/offscreen.html';
 const ALARM_MESH_KEEPALIVE = 'fabric_mesh_keepalive';
-const NOTIFY_ID_MESH = 'fabric-mesh-line';
 
 let meshPort: chrome.runtime.Port | null = null;
 const pendingMeshMessages: object[] = [];
@@ -61,11 +61,14 @@ async function extractMeshHubAddress (): Promise<string | null> {
     const regBag = await chrome.storage.local.get(FABRIC_MESH_HUB_REGISTRATION_KEY);
     const fromReg = registrationHubAddress(regBag[FABRIC_MESH_HUB_REGISTRATION_KEY]);
     if (fromReg) return fromReg;
-  } catch (_) {}
+  } catch (err: unknown) {
+    swallowNonFatal('mesh-hub-storage', err);
+  }
   try {
     const data = await chrome.storage.local.get(FABRIC_STATE_STORAGE_KEY);
     return extractActiveFabricHub(data[FABRIC_STATE_STORAGE_KEY]);
-  } catch (_) {
+  } catch (err: unknown) {
+    swallowNonFatal('fabric-state-storage', err);
     return null;
   }
 }
@@ -76,15 +79,17 @@ async function ensureOffscreenDocument (): Promise<void> {
       const has = await chrome.offscreen.hasDocument();
       if (has) return;
     }
-  } catch (_) {}
+  } catch (err: unknown) {
+    swallowNonFatal('offscreen-has-document', err);
+  }
   try {
     await chrome.offscreen.createDocument({
       url: chrome.runtime.getURL(OFFSCREEN_PATH),
       reasons: [chrome.offscreen.Reason.WEB_RTC],
       justification: 'Maintain Fabric Protocol WebRTC signaling and peer mesh while the popup is closed.'
     });
-  } catch (_) {
-    /* Document may already exist (race) */
+  } catch (err: unknown) {
+    swallowNonFatal('offscreen-create-document', err);
   }
 }
 
@@ -94,19 +99,9 @@ async function syncMeshFromStorage (): Promise<void> {
     await ensureOffscreenDocument();
     if (hub) postToMesh({ type: 'START_MESH', hubAddress: hub });
     else postToMesh({ type: 'STOP_MESH' });
-  } catch (e) {
+  } catch (e: unknown) {
     console.warn('[FABRIC:BG] mesh sync failed', e);
   }
-}
-
-function showFabricNotification (title: string, message: string): void {
-  chrome.notifications.create(NOTIFY_ID_MESH, {
-    type: 'basic',
-    iconUrl: 'icons/icon128.png',
-    title,
-    message,
-    priority: 0
-  });
 }
 
 function registerMeshPort (port: chrome.runtime.Port): void {
@@ -115,7 +110,9 @@ function registerMeshPort (port: chrome.runtime.Port): void {
   port.onDisconnect.addListener(() => {
     meshPort = null;
   });
-  port.onMessage.addListener((_msg: unknown) => {});
+  port.onMessage.addListener((msg: unknown) => {
+    void msg;
+  });
   flushMeshQueue();
 }
 
@@ -134,200 +131,11 @@ export function registerFabricBackground (): void {
     registerMeshPort(port);
   });
 
-  chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-    if (!message || typeof message !== 'object') return undefined;
-    const m = message as Record<string, unknown>;
-
-    if (m.type === 'CONTENT_SCRIPT_LOADED') {
-      const tabId = (_sender as chrome.runtime.MessageSender).tab?.id;
-      if (tabId != null) {
-        void chrome.tabs.sendMessage(tabId, {
-          type: 'EXTENSION_ID',
-          id: chrome.runtime.id
-        });
-      }
-      return false;
-    }
-
-    if (m.type === 'GET_EXTENSION_ID') {
-      sendResponse({ extensionId: chrome.runtime.id });
-      return false;
-    }
-
-    if (m.type === 'FABRIC_ACTION') {
-      fetch(FABRIC_ACTION_DEBUG_URL)
-        .then((r) => r.json())
-        .then((data) => sendResponse(data))
-        .catch((error) => sendResponse({ error: error.message }));
-      return true;
-    }
-
-    if (m.type === 'STORE_SETTINGS') {
-      chrome.storage.local.clear(() => {
-        chrome.storage.local.set(m.data as object, () => sendResponse({ success: true }));
-      });
-      return true;
-    }
-
-    if (m.type === 'GET_SETTINGS') {
-      chrome.storage.local.get(null, (data) => sendResponse(data));
-      return true;
-    }
-
-    if (m.type === 'FABRIC_DS_SET' && typeof m.key === 'string') {
-      void fabricDsSet(m.key, m.value).then(() => sendResponse({ ok: true })).catch((e) => sendResponse({ error: String(e) }));
-      return true;
-    }
-
-    if (m.type === 'FABRIC_DS_GET' && typeof m.key === 'string') {
-      void fabricDsGet(m.key).then((v) => sendResponse({ value: v })).catch((e) => sendResponse({ error: String(e) }));
-      return true;
-    }
-
-    if (m.type === 'FABRIC_DS_REMOVE' && typeof m.key === 'string') {
-      void fabricDsRemove(m.key).then(() => sendResponse({ ok: true })).catch((e) => sendResponse({ error: String(e) }));
-      return true;
-    }
-
-    if (m.type === 'FABRIC_DS_SET_MASTER_KEY' && m.rawKeyB64 && typeof m.rawKeyB64 === 'string') {
-      try {
-        const bin = atob(m.rawKeyB64);
-        const buf = new ArrayBuffer(32);
-        const v = new Uint8Array(buf);
-        for (let i = 0; i < 32 && i < bin.length; i++) v[i] = bin.charCodeAt(i);
-        void setDatastoreMasterKeyFromBytes(buf).then(() => sendResponse({ ok: true }));
-      } catch (e) {
-        sendResponse({ error: String(e) });
-      }
-      return true;
-    }
-
-    if (m.type === 'FABRIC_REQUEST_MESH_SYNC') {
-      void syncMeshFromStorage().then(() => sendResponse({ ok: true }));
-      return true;
-    }
-
-    /** Trusted: sent from extension popup (chrome-extension://…/popup.html). */
-    if (m.type === 'FABRIC_MESH_REGISTER_FROM_POPUP' && typeof m.hubAddress === 'string') {
-      const hubAddress = m.hubAddress.trim();
-      void chrome.storage.local.set({
-        [FABRIC_MESH_HUB_REGISTRATION_KEY]: {
-          hubAddress,
-          registeredAt: Date.now(),
-          source: 'popup'
-        }
-      }, () => {
-        void syncMeshFromStorage().then(() => sendResponse({ ok: true }));
-      });
-      return true;
-    }
-
-    if (m.type === 'FABRIC_MESH_UNREGISTER_FROM_POPUP') {
-      void chrome.storage.local.remove(FABRIC_MESH_HUB_REGISTRATION_KEY, () => {
-        void syncMeshFromStorage().then(() => sendResponse({ ok: true }));
-      });
-      return true;
-    }
-
-    /**
-     * Hub page → content script: `postMessage` with source `fabric-hub`.
-     * Validates `pageOrigin` matches the Hub URL origin.
-     */
-    if (m.type === 'FABRIC_HUB_REGISTER_MESH' && typeof m.hubAddress === 'string' && typeof m.pageOrigin === 'string') {
-      const hubAddress = m.hubAddress.trim();
-      let expectedOrigin: string;
-      try {
-        const u = new URL(/^https?:\/\//i.test(hubAddress) ? hubAddress : `https://${hubAddress}`);
-        expectedOrigin = u.origin;
-      } catch {
-        sendResponse({ ok: false, error: 'invalid_hub_address' });
-        return false;
-      }
-      if (m.pageOrigin !== expectedOrigin) {
-        sendResponse({ ok: false, error: 'origin_mismatch' });
-        return false;
-      }
-      void chrome.storage.local.set({
-        [FABRIC_MESH_HUB_REGISTRATION_KEY]: {
-          hubAddress,
-          pageOrigin: m.pageOrigin,
-          registeredAt: Date.now(),
-          source: 'hub_page'
-        }
-      }, () => {
-        void syncMeshFromStorage().then(() => sendResponse({ ok: true }));
-      });
-      return true;
-    }
-
-    if (m.type === 'FABRIC_HUB_UNREGISTER_MESH' && typeof m.pageOrigin === 'string') {
-      void chrome.storage.local.get(FABRIC_MESH_HUB_REGISTRATION_KEY, (got) => {
-        const cur = got[FABRIC_MESH_HUB_REGISTRATION_KEY] as Record<string, unknown> | undefined;
-        if (!cur) {
-          sendResponse({ ok: true });
-          return;
-        }
-        const src = cur.source;
-        const prevOrigin = typeof cur.pageOrigin === 'string' ? cur.pageOrigin : null;
-        if (src === 'hub_page' && prevOrigin === m.pageOrigin) {
-          void chrome.storage.local.remove(FABRIC_MESH_HUB_REGISTRATION_KEY, () => {
-            void syncMeshFromStorage().then(() => sendResponse({ ok: true }));
-          });
-          return;
-        }
-        sendResponse({ ok: false, error: 'not_owner' });
-      });
-      return true;
-    }
-
-    if (m.type === 'MESH_SIGNALING') {
-      const event = m.event as string;
-      const hub = typeof m.hubAddress === 'string' ? m.hubAddress : '';
-      if (event === 'open') {
-        showFabricNotification('Fabric mesh', `Signaling connected to ${hub}`);
-        void fabricDsSet('mesh_last_open', { hub, ts: Date.now() });
-      } else if (event === 'close') {
-        showFabricNotification('Fabric mesh', `Signaling disconnected (${hub})`);
-      } else if (event === 'error') {
-        showFabricNotification('Fabric mesh', `Signaling error: ${hub}`);
-      }
-      return false;
-    }
-
-    if (m.type === 'FABRIC_NODE_MESSAGE' && typeof m.messageType === 'string' && m.payload && typeof m.payload === 'object') {
-      const descriptor = findMessageTypeDescriptor(m.messageType);
-      if (descriptor && descriptor.notificationPriority !== 'silent') {
-        const node = typeof m.nodeAddress === 'string' ? m.nodeAddress : 'a Fabric node';
-        const payload = m.payload as Record<string, unknown>;
-        const noteField = typeof payload.note === 'string' && payload.note ? payload.note : '';
-        const contentField = typeof payload.content === 'string' && payload.content ? payload.content : '';
-        const body = noteField
-          ? `${node}: ${noteField.slice(0, 120)}`
-          : contentField
-            ? `${node}: ${contentField.slice(0, 120)}`
-            : `${descriptor.label} from ${node}`;
-        const chromePriority: Record<NotificationPriority, number> = { high: 2, normal: 1, low: 0, silent: 0 };
-        const idSuffix = typeof payload.inviteId === 'string' ? payload.inviteId.slice(0, 16)
-          : typeof payload.id === 'string' ? payload.id.slice(0, 16)
-          : String(Date.now());
-        chrome.notifications.create(`fabric-${m.messageType}-${idSuffix}`, {
-          type: 'basic',
-          iconUrl: 'icons/icon128.png',
-          title: descriptor.label,
-          message: body,
-          priority: chromePriority[descriptor.notificationPriority] ?? 1
-        });
-        void fabricDsSet(`notification:${m.messageType}:${idSuffix}`, {
-          nodeAddress: m.nodeAddress,
-          messageType: m.messageType,
-          payload,
-          receivedAt: Date.now()
-        });
-      }
-      return false;
-    }
-
-    return undefined;
+  chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    return handleFabricRuntimeMessage(message, sender, sendResponse, {
+      fabricActionDebugUrl: FABRIC_ACTION_DEBUG_URL,
+      syncMeshFromStorage
+    });
   });
 
   chrome.storage.onChanged.addListener((changes, area) => {
@@ -340,7 +148,7 @@ export function registerFabricBackground (): void {
     void syncMeshFromStorage();
     try {
       chrome.alarms.create(ALARM_MESH_KEEPALIVE, { periodInMinutes: 5 });
-    } catch (e) {
+    } catch (e: unknown) {
       console.warn('[FABRIC:BG] alarms not available', e);
     }
   });
@@ -351,7 +159,7 @@ export function registerFabricBackground (): void {
         chrome.alarms.create(ALARM_MESH_KEEPALIVE, { periodInMinutes: 5 });
       }
     });
-  } catch (e) {
+  } catch (e: unknown) {
     console.warn('[FABRIC:BG] alarms get/create', e);
   }
 
@@ -366,4 +174,5 @@ export function registerFabricBackground (): void {
   });
 
   void syncMeshFromStorage();
+  initIdentityOutband();
 }

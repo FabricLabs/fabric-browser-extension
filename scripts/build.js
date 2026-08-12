@@ -1,7 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const archiver = require('archiver');
-const { execSync } = require('child_process');
+const { spawnSync } = require('child_process');
 
 // Configuration
 const BUILD_DIR = path.resolve(__dirname, '../dist');
@@ -26,8 +26,15 @@ if (fs.existsSync(BUILD_DIR)) {
 console.log('🚀 Starting production build...');
 
 try {
-  // Run production build
-  execSync('npm run build', { stdio: 'inherit' });
+  const root = path.resolve(__dirname, '..');
+  const npmRun = spawnSync('npm', ['run', 'build'], {
+    cwd: root,
+    stdio: 'inherit',
+    env: process.env,
+    shell: false
+  });
+  if (npmRun.error) throw npmRun.error;
+  if (npmRun.status !== 0) throw new Error(`npm run build exited with status ${npmRun.status}`);
   console.log('✅ Production build completed successfully');
 
   // Copy manifest file

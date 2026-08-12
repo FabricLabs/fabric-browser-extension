@@ -5,7 +5,7 @@ export type IHistory = string;
 export type IAddress = string | undefined;
 
 export interface IChain {
-  address: any,
+  address: IAddress,
   history: IHistory,
   connectedWebsites: Array<string>,
   allowed: boolean
