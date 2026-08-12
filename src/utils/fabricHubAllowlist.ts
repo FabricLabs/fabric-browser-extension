@@ -1,15 +1,15 @@
 /**
  * Allowed Hub HTTP origins for fabric://login and fabric://link (Passport).
  * Mirrors `@fabric/http/functions/fabricHubAllowlist` for the extension bundle.
+ *
+ * Default network hubs are **HTTPS-only**. Cleartext production origins require
+ * an explicit `opts.extra` allowlist entry. Loopback `http://` remains allowed.
  */
 
 export const DEFAULT_FABRIC_HUB_ORIGINS = [
   'https://hub.fabric.pub',
-  'http://hub.fabric.pub',
   'https://relay.goon.vc',
-  'http://relay.goon.vc',
-  'https://goon.vc',
-  'http://goon.vc'
+  'https://goon.vc'
 ] as const;
 
 export function normalizeHubOrigin (raw: string): string | null {

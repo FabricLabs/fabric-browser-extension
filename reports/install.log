@@ -1,11 +1,11 @@
-$ npm i
+$ npm i --allow-git=all
 
-added 1751 packages, and audited 1752 packages in 1m
+added 1739 packages, and audited 1740 packages in 51s
 
 196 packages are looking for funding
   run `npm fund` for details
 
-42 vulnerabilities (6 low, 19 moderate, 17 high)
+39 vulnerabilities (6 low, 16 moderate, 17 high)
 
 To address all issues possible (including breaking changes), run:
   npm audit fix --force
