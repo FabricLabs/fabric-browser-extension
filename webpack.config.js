@@ -1,8 +1,42 @@
 'use strict';
 
+const fs = require('fs');
 const path = require('path');
 const webpack = require('webpack');
 const packageJson = require('./package.json');
+
+/** Themes + fonts for `@fabric/http` Semantic (Fomantic); CSS uses `url(themes/fabric/...)` relative to `css/*.css`. */
+const FABRIC_HTTP_PKG = path.resolve(__dirname, 'node_modules/@fabric/http');
+let FABRIC_HTTP_ROOT = FABRIC_HTTP_PKG;
+try {
+  // npm link / file: installs resolve outside node_modules; webpack include must use realpath.
+  FABRIC_HTTP_ROOT = fs.realpathSync(FABRIC_HTTP_PKG);
+} catch (_) {
+  if (process.env.FABRIC_HTTP && fs.existsSync(process.env.FABRIC_HTTP)) {
+    FABRIC_HTTP_ROOT = path.resolve(process.env.FABRIC_HTTP);
+  } else if (fs.existsSync(path.resolve(__dirname, '../fabric-http'))) {
+    FABRIC_HTTP_ROOT = path.resolve(__dirname, '../fabric-http');
+  }
+}
+const FABRIC_HTTP_ASSETS = path.join(FABRIC_HTTP_ROOT, 'assets');
+const FABRIC_HTTP_ASSETS_ALIASES = Array.from(new Set([
+  FABRIC_HTTP_ASSETS,
+  path.join(FABRIC_HTTP_PKG, 'assets'),
+  path.resolve(__dirname, '../fabric-http/assets')
+].filter((p) => fs.existsSync(p))));
+
+/** Prefer sibling / FABRIC_HTTP checkout so invite JSON helpers stay current. */
+function resolveFabricHttpInviteModule () {
+  const roots = [];
+  if (process.env.FABRIC_HTTP) roots.push(path.resolve(process.env.FABRIC_HTTP));
+  roots.push(path.resolve(__dirname, '../fabric-http'));
+  roots.push(path.resolve(__dirname, 'node_modules/@fabric/http'));
+  for (const root of roots) {
+    const file = path.join(root, 'functions', 'federationContractInvite.js');
+    if (fs.existsSync(file)) return file;
+  }
+  return path.resolve(__dirname, 'node_modules/@fabric/http/functions/federationContractInvite.js');
+}
 const MiniCssExtractPlugin = require('mini-css-extract-plugin');
 const HtmlWebpackPlugin = require('html-webpack-plugin');
 const CopyPlugin = require('copy-webpack-plugin');
@@ -65,16 +99,26 @@ module.exports = (env) => {
     resolve: {
       extensions: ['.tsx', '.ts', '.js', '.jsx', '.json', '.wasm'],
       fallback: {
+        // fabricNativeAccel is stubbed below; keep fs/path from breaking other Node-only probes.
+        fs: false,
+        path: require.resolve('path-browserify'),
         crypto: require.resolve('crypto-browserify'),
         stream: require.resolve('stream-browserify'),
         buffer: require.resolve('buffer/'),
-        util: require.resolve('util/')
+        util: require.resolve('util/'),
+        // Absolute: linked ../fabric-clean bech32 must not look for process under fabric-clean/node_modules.
+        process: require.resolve('process/browser')
       },
       alias: {
         vm: 'vm-browserify',
+        'process/browser': require.resolve('process/browser'),
         // Package exports only expose ./constants for `require`; map explicitly for webpack/browser.
         '@fabric/core/constants': path.resolve(__dirname, 'node_modules/@fabric/core/constants.js'),
-        '@fabric/http/assets': path.resolve(__dirname, 'node_modules/@fabric/http/assets')
+        '@fabric/core/types/message': path.resolve(__dirname, 'node_modules/@fabric/core/types/message.js'),
+        '@fabric/http/assets': path.resolve(__dirname, 'node_modules/@fabric/http/assets'),
+        '@fabric/http/functions/federationContractInvite': resolveFabricHttpInviteModule(),
+        // Browser: skip Node fs/createRequire loader; use the aliased http module directly.
+        [path.resolve(__dirname, 'src/utils/loadFederationContractInvite.js')]: resolveFabricHttpInviteModule()
       }
     },
     module: {
@@ -105,9 +149,8 @@ module.exports = (env) => {
           oneOf: [
             {
               // Keep @fabric/http semantic bundle untouched; it embeds data: font URLs.
-              include: [
-                path.join(__dirname, 'node_modules/@fabric/http/assets')
-              ],
+              // Include realpath (npm link) as well as the node_modules path.
+              include: FABRIC_HTTP_ASSETS_ALIASES,
               use: [
                 MiniCssExtractPlugin.loader,
                 {
@@ -169,13 +212,18 @@ module.exports = (env) => {
         )
       }),
       new webpack.ProvidePlugin({
-        process: 'process/browser',
+        process: require.resolve('process/browser'),
         Buffer: ['buffer', 'Buffer']
       }),
       new webpack.IgnorePlugin({
         resourceRegExp: /^\.\/wordlists\/(?!english)/,
         contextRegExp: /bip39/
       }),
+      // Stub optional fabric.node (dynamic require). Matches npm package and file:../fabric-clean symlink.
+      new webpack.NormalModuleReplacementPlugin(
+        /[\\/](@fabric[\\/]core|fabric-clean)[\\/]functions[\\/]fabricNativeAccel\.js$/,
+        path.resolve(__dirname, 'shims/fabricNativeAccel.browser.js')
+      ),
       new HtmlWebpackPlugin({
         filename: 'popup.html',
         template: 'src/UIElements/popup/index.html',
@@ -202,6 +250,10 @@ module.exports = (env) => {
           {
             from: 'src/hub-mesh-bridge.html',
             to: 'hub-mesh-bridge.html'
+          },
+          {
+            from: path.join(FABRIC_HTTP_ASSETS, 'themes'),
+            to: 'css/themes'
           }
         ],
       }),

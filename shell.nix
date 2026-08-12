@@ -25,7 +25,8 @@ in
       fi
       alias l='ls -la'
 
-      alias tf-get-deploy-private-key='terraform state pull | jq -r ".resources[] | select(.name == \"deploy\") | .instances[0].attributes.private_key_pem"'
+      # Do not alias terraform private-key extraction into the shell (scrollback / history risk).
+      # Retrieve deploy keys manually with explicit intent and chmod 600 files only.
       alias tf-get-deploy-public-key='terraform state pull | jq -r ".resources[] | select(.name == \"deploy\") | .instances[0].attributes.public_key_openssh"'
     '';
   }

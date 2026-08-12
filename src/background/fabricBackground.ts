@@ -99,7 +99,7 @@ async function syncMeshFromStorage (): Promise<void> {
     await ensureOffscreenDocument();
     if (hub) postToMesh({ type: 'START_MESH', hubAddress: hub });
     else postToMesh({ type: 'STOP_MESH' });
-  } catch (e) {
+  } catch (e: unknown) {
     console.warn('[FABRIC:BG] mesh sync failed', e);
   }
 }
@@ -148,7 +148,7 @@ export function registerFabricBackground (): void {
     void syncMeshFromStorage();
     try {
       chrome.alarms.create(ALARM_MESH_KEEPALIVE, { periodInMinutes: 5 });
-    } catch (e) {
+    } catch (e: unknown) {
       console.warn('[FABRIC:BG] alarms not available', e);
     }
   });
@@ -159,7 +159,7 @@ export function registerFabricBackground (): void {
         chrome.alarms.create(ALARM_MESH_KEEPALIVE, { periodInMinutes: 5 });
       }
     });
-  } catch (e) {
+  } catch (e: unknown) {
     console.warn('[FABRIC:BG] alarms get/create', e);
   }
 

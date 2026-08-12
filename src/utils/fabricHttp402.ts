@@ -64,7 +64,7 @@ export function parseL402WWWAuthenticate (value: string | null | undefined): { i
   while ((m = re.exec(v)) !== null && guard < L402_WWW_AUTHENTICATE_PARAM_MAX) {
     guard += 1;
     const key = m[1].toLowerCase();
-    const val = m[2].replace(/\\(.)/g, '$1');
+    const val = m[2].replace(/\\(.)/g, '$1').trim();
     if (key === 'invoice') out.invoice = val;
     if (key === 'macaroon') out.macaroon = val;
   }

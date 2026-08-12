@@ -75,7 +75,7 @@ export async function attemptPayBolt11ViaActiveFabricNode (bolt11: string): Prom
       ok: false,
       message: 'Unexpected response from Fabric node RPC. Copy the Lightning invoice manually.'
     };
-  } catch (e) {
+  } catch (e: unknown) {
     const aborted =
       (e instanceof Error && e.name === 'AbortError') ||
       (typeof DOMException !== 'undefined' && e instanceof DOMException && e.name === 'AbortError');

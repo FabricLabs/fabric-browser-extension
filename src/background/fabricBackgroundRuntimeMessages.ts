@@ -6,8 +6,22 @@
  */
 
 import { FABRIC_MESH_HUB_REGISTRATION_KEY, FABRIC_STATE_STORAGE_KEY } from '../constants/fabricExtension';
-import { findMessageTypeDescriptor, type NotificationPriority } from '../fabric/messageTypes';
-import { fabricDsGet, fabricDsSet, fabricDsRemove, setDatastoreMasterKeyFromBytes } from './encryptedDatastore';
+import {
+  FABRIC_PENDING_SITE_LOGIN_KEY,
+  FABRIC_RUNTIME_SITE_LOGIN_CLEAR,
+  FABRIC_RUNTIME_SITE_LOGIN_COMPLETE,
+  FABRIC_RUNTIME_SITE_LOGIN_GET,
+  FABRIC_RUNTIME_SITE_LOGIN_REQUEST
+} from '../constants/siteLogin';
+import {
+  FABRIC_PENDING_DEVICE_LINK_KEY,
+  FABRIC_RUNTIME_DEVICE_LINK_CLEAR,
+  FABRIC_RUNTIME_DEVICE_LINK_COMPLETE,
+  FABRIC_RUNTIME_DEVICE_LINK_GET,
+  FABRIC_RUNTIME_DEVICE_LINK_REQUEST
+} from '../constants/deviceLink';
+import { findMessageTypeDescriptor, summarizeNotifiablePayload, type NotificationPriority } from '../fabric/messageTypes';
+import { fabricDsGet, fabricDsSet, fabricDsRemove, fabricDsListPrefix, setDatastoreMasterKeyFromBytes } from './encryptedDatastore';
 import {
   getFabricTrafficSnapshot,
   mergeTrustedNodeOrigin,
@@ -15,6 +29,28 @@ import {
 } from './identityOutband';
 import { attemptPayBolt11ViaActiveFabricNode } from './passportBolt11Pay';
 import { swallowNonFatal } from '../utils/nonFatal';
+
+type PendingSiteLoginRow = {
+  sessionId: string;
+  hubBase: string;
+  origin: string;
+  message: string;
+  pageOrigin: string;
+  createdAt: number;
+  tabId?: number;
+};
+
+type PendingDeviceLinkRow = {
+  sessionId: string;
+  hubBase: string;
+  origin: string;
+  nonce: string;
+  label: string;
+  initiator: { id: string; xpub: string; pubkeyHex?: string };
+  pageOrigin: string;
+  createdAt: number;
+  tabId?: number;
+};
 
 const NOTIFY_ID_MESH = 'fabric-mesh-line';
 
@@ -68,7 +104,11 @@ export function handleFabricRuntimeMessage (
     fetch(fabricActionDebugUrl)
       .then((r) => r.json())
       .then((data) => sendResponse(data))
-      .catch((error) => sendResponse({ error: error.message }));
+      .catch((error: unknown) =>
+        sendResponse({
+          error: error instanceof Error ? error.message : String(error)
+        })
+      );
     return true;
   }
 
@@ -97,6 +137,37 @@ export function handleFabricRuntimeMessage (
     return true;
   }
 
+  if (m.type === 'FABRIC_LIST_ARC_NOTIFICATIONS') {
+    const limit = typeof m.limit === 'number' ? m.limit : 30;
+    void fabricDsListPrefix('notification:', limit)
+      .then((rows) => sendResponse({
+        ok: true,
+        items: rows.map((r) => {
+          const v = r.value as {
+            messageType?: string;
+            payload?: Record<string, unknown>;
+            nodeAddress?: string;
+            receivedAt?: number;
+          };
+          const messageType = v.messageType || 'unknown';
+          const descriptor = findMessageTypeDescriptor(messageType);
+          return {
+            key: r.key,
+            messageType,
+            label: descriptor ? descriptor.label : messageType,
+            arc: !!(descriptor && descriptor.arc),
+            priority: descriptor ? descriptor.notificationPriority : 'normal',
+            summary: summarizeNotifiablePayload(messageType, v.payload || {}, v.nodeAddress),
+            nodeAddress: v.nodeAddress || null,
+            payload: v.payload || null,
+            receivedAt: v.receivedAt || null
+          };
+        })
+      }))
+      .catch((e) => sendResponse({ ok: false, error: String(e) }));
+    return true;
+  }
+
   if (m.type === 'FABRIC_DS_SET_MASTER_KEY' && m.rawKeyB64 && typeof m.rawKeyB64 === 'string') {
     try {
       const bin = atob(m.rawKeyB64);
@@ -108,7 +179,7 @@ export function handleFabricRuntimeMessage (
       const v = new Uint8Array(buf);
       for (let i = 0; i < 32 && i < bin.length; i++) v[i] = bin.charCodeAt(i);
       void setDatastoreMasterKeyFromBytes(buf).then(() => sendResponse({ ok: true }));
-    } catch (e) {
+    } catch (e: unknown) {
       sendResponse({ error: String(e) });
     }
     return true;
@@ -212,15 +283,10 @@ export function handleFabricRuntimeMessage (
     if (descriptor && descriptor.notificationPriority !== 'silent') {
       const node = typeof m.nodeAddress === 'string' ? m.nodeAddress : 'a Fabric node';
       const payload = m.payload as Record<string, unknown>;
-      const noteField = typeof payload.note === 'string' && payload.note ? payload.note : '';
-      const contentField = typeof payload.content === 'string' && payload.content ? payload.content : '';
-      const body = noteField
-        ? `${node}: ${noteField.slice(0, 120)}`
-        : contentField
-          ? `${node}: ${contentField.slice(0, 120)}`
-          : `${descriptor.label} from ${node}`;
+      const body = summarizeNotifiablePayload(m.messageType, payload, node);
       const chromePriority: Record<NotificationPriority, number> = { high: 2, normal: 1, low: 0, silent: 0 };
       const idSuffix = typeof payload.inviteId === 'string' ? payload.inviteId.slice(0, 16)
+        : typeof payload.proposalId === 'string' ? payload.proposalId.slice(0, 16)
         : typeof payload.id === 'string' ? payload.id.slice(0, 16)
         : String(Date.now());
       chrome.notifications.create(`fabric-${m.messageType}-${idSuffix}`, {
@@ -234,7 +300,8 @@ export function handleFabricRuntimeMessage (
         nodeAddress: m.nodeAddress,
         messageType: m.messageType,
         payload,
-        receivedAt: Date.now()
+        receivedAt: Date.now(),
+        arc: descriptor.arc === true
       });
     }
     return false;
@@ -262,6 +329,134 @@ export function handleFabricRuntimeMessage (
   if (m.type === 'GET_FABRIC_TRAFFIC_METRICS') {
     sendResponse({ ok: true, ...getFabricTrafficSnapshot() });
     return false;
+  }
+
+  /** Content script: queue a client-signed site login for the popup to approve. */
+  if (m.type === FABRIC_RUNTIME_SITE_LOGIN_REQUEST) {
+    const sessionId = typeof m.sessionId === 'string' ? m.sessionId.trim() : '';
+    const hubBase = typeof m.hubBase === 'string' ? m.hubBase.trim() : '';
+    const origin = typeof m.origin === 'string' ? m.origin.trim() : '';
+    const message = typeof m.message === 'string' ? m.message : '';
+    const pageOrigin = typeof m.pageOrigin === 'string' ? m.pageOrigin.trim() : '';
+    if (!sessionId || !hubBase || !message || !pageOrigin || pageOrigin !== origin) {
+      sendResponse({ ok: false, error: 'invalid_site_login' });
+      return false;
+    }
+    const row: PendingSiteLoginRow = {
+      sessionId,
+      hubBase,
+      origin,
+      message,
+      pageOrigin,
+      createdAt: Date.now(),
+      tabId: sender.tab?.id
+    };
+    const persist = chrome.storage.session
+      ? chrome.storage.session.set({ [FABRIC_PENDING_SITE_LOGIN_KEY]: row })
+      : chrome.storage.local.set({ [FABRIC_PENDING_SITE_LOGIN_KEY]: row });
+    void Promise.resolve(persist).then(() => {
+      showFabricNotification('Fabric Passport', `Sign-in request from ${origin}`);
+      // Best-effort: focus the extension action so the user opens the popup.
+      try {
+        if (chrome.action?.openPopup) {
+          void chrome.action.openPopup().catch((err: unknown) => swallowNonFatal('site-login-open-popup', err));
+        }
+      } catch (err: unknown) {
+        swallowNonFatal('site-login-open-popup', err);
+      }
+      sendResponse({ ok: true });
+    }).catch((e: unknown) => {
+      sendResponse({ ok: false, error: String(e) });
+    });
+    return true;
+  }
+
+  if (m.type === FABRIC_RUNTIME_SITE_LOGIN_GET) {
+    const store = chrome.storage.session || chrome.storage.local;
+    void store.get(FABRIC_PENDING_SITE_LOGIN_KEY, (got) => {
+      const pending = got[FABRIC_PENDING_SITE_LOGIN_KEY] as PendingSiteLoginRow | undefined;
+      sendResponse({
+        pending: pending || null,
+        tabId: pending && typeof pending.tabId === 'number' ? pending.tabId : undefined
+      });
+    });
+    return true;
+  }
+
+  if (m.type === FABRIC_RUNTIME_SITE_LOGIN_CLEAR || m.type === FABRIC_RUNTIME_SITE_LOGIN_COMPLETE) {
+    const store = chrome.storage.session || chrome.storage.local;
+    void store.remove(FABRIC_PENDING_SITE_LOGIN_KEY, () => sendResponse({ ok: true }));
+    return true;
+  }
+
+  /** Content script: queue a mutual device-link offer for the popup to approve (responder). */
+  if (m.type === FABRIC_RUNTIME_DEVICE_LINK_REQUEST) {
+    const sessionId = typeof m.sessionId === 'string' ? m.sessionId.trim() : '';
+    const hubBase = typeof m.hubBase === 'string' ? m.hubBase.trim() : '';
+    const origin = typeof m.origin === 'string' ? m.origin.trim() : '';
+    const nonce = typeof m.nonce === 'string' ? m.nonce.trim() : '';
+    const label = typeof m.label === 'string' ? m.label.trim() : 'device';
+    const pageOrigin = typeof m.pageOrigin === 'string' ? m.pageOrigin.trim() : '';
+    const initiator = m.initiator && typeof m.initiator === 'object'
+      ? (m.initiator as { id?: string; xpub?: string; pubkeyHex?: string })
+      : null;
+    if (
+      !sessionId || !hubBase || !nonce || !pageOrigin || pageOrigin !== origin ||
+      !initiator || typeof initiator.id !== 'string' || typeof initiator.xpub !== 'string'
+    ) {
+      sendResponse({ ok: false, error: 'invalid_device_link' });
+      return false;
+    }
+    const row: PendingDeviceLinkRow = {
+      sessionId,
+      hubBase,
+      origin,
+      nonce,
+      label,
+      initiator: {
+        id: initiator.id,
+        xpub: initiator.xpub,
+        pubkeyHex: typeof initiator.pubkeyHex === 'string' ? initiator.pubkeyHex : undefined
+      },
+      pageOrigin,
+      createdAt: Date.now(),
+      tabId: sender.tab?.id
+    };
+    const persist = chrome.storage.session
+      ? chrome.storage.session.set({ [FABRIC_PENDING_DEVICE_LINK_KEY]: row })
+      : chrome.storage.local.set({ [FABRIC_PENDING_DEVICE_LINK_KEY]: row });
+    void Promise.resolve(persist).then(() => {
+      showFabricNotification('Fabric Passport', `Device-link offer from ${origin}`);
+      try {
+        if (chrome.action?.openPopup) {
+          void chrome.action.openPopup().catch((err: unknown) => swallowNonFatal('device-link-open-popup', err));
+        }
+      } catch (err: unknown) {
+        swallowNonFatal('device-link-open-popup', err);
+      }
+      sendResponse({ ok: true });
+    }).catch((e: unknown) => {
+      sendResponse({ ok: false, error: String(e) });
+    });
+    return true;
+  }
+
+  if (m.type === FABRIC_RUNTIME_DEVICE_LINK_GET) {
+    const store = chrome.storage.session || chrome.storage.local;
+    void store.get(FABRIC_PENDING_DEVICE_LINK_KEY, (got) => {
+      const pending = got[FABRIC_PENDING_DEVICE_LINK_KEY] as PendingDeviceLinkRow | undefined;
+      sendResponse({
+        pending: pending || null,
+        tabId: pending && typeof pending.tabId === 'number' ? pending.tabId : undefined
+      });
+    });
+    return true;
+  }
+
+  if (m.type === FABRIC_RUNTIME_DEVICE_LINK_CLEAR || m.type === FABRIC_RUNTIME_DEVICE_LINK_COMPLETE) {
+    const store = chrome.storage.session || chrome.storage.local;
+    void store.remove(FABRIC_PENDING_DEVICE_LINK_KEY, () => sendResponse({ ok: true }));
+    return true;
   }
 
   return undefined;

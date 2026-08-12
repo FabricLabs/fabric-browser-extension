@@ -25,7 +25,7 @@ export const generateSeed = () => {
 * @param    {password}    encryption password set in wallet initialization
 * @return   {IAccount}         account object generated with supplied seed and password
 */
-export const generateAccount = async (mnemonic: any[], password: any) => {
+export const generateAccount = async (mnemonic: string[] | string, password: string) => {
   let _mnemonic;
   if (typeof mnemonic === 'object') {
     _mnemonic = mnemonic.join(' ');
@@ -63,7 +63,7 @@ export const generateAccount = async (mnemonic: any[], password: any) => {
   return result;
 };
 /*
-export const generateAddressFromPvtKey = (privateKey: any, chainNo = 0, addressNo = 0) => {
+export const generateAddressFromPvtKey = (privateKey: string, chainNo = 0, addressNo = 0) => {
   const hdKey = HDKey.fromExtendedKey(privateKey.toString());
   const addrNode = hdKey.derive(getDerivationPathOfChain(chainNo, addressNo) as string);
 

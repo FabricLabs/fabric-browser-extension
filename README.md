@@ -69,6 +69,32 @@ See `node_modules/@fabric/http/docs/RELEASE_GATE.md` when `@fabric/http` is link
 5. When the wallet has been imported or created, you can toggle and view addresses for the chains you enabled.
 6. On Fabric sites, use the app’s own Fabric login / identity flow (and the extension’s **Connect & register** where offered); the Passport popup and content scripts follow the Fabric message and storage contracts used across FabricLabs repos.
 
+### Client-signed site login (Passport ↔ desktop)
+Sites that use Hub `POST /sessions` can offer **Sign in with Passport** alongside `fabric://login` (GoonCitizen / Hub desktop). The page `postMessage`s:
+
+```js
+window.postMessage({
+  source: 'fabric-site',
+  type: 'FABRIC_SITE_LOGIN_REQUEST',
+  sessionId, hub: location.origin, origin: location.origin, message
+}, location.origin);
+```
+
+Passport queues the challenge, the popup approves, and POSTs BIP340 `{ signature, pubkeyHex, identity }` to `/sessions/:id/signatures` (same body as GoonCitizen). Poll `GET /sessions/:id` until `status: 'signed'`.
+
+### Mutual device-link (separate seeds)
+Hub Identity → **Create link offer** → `fabric://link?…`, or on the Hub page **Approve with Passport**:
+
+```js
+window.postMessage({
+  source: 'fabric-site',
+  type: 'FABRIC_DEVICE_LINK_REQUEST',
+  sessionId, hub: location.origin, origin: location.origin
+}, location.origin);
+```
+
+Passport signs as **responder**; the initiator countersigns. Seeds stay per-app.
+
 ## Encryption
 Data stored in leveldb is encrypted with the subtleCrypto AES-GCM algorithm. Encryption methods are found in fabric/core/types/subtleCrypto
 

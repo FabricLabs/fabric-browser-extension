@@ -131,6 +131,7 @@ export function deriveReceiveAddresses (xpub: string, networkName: string, count
  * Falls back to the xpub's own key when it's a leaf (no child derivation possible).
  */
 export function deriveReceiveAddress (xpub: string, networkName: string, index = 0): string | null {
+  if (!Number.isInteger(index) || index < 0) return null;
   const addressNetwork = networkFromName(networkName);
   const root = decodeBip32Root(xpub);
   if (!root) return null;

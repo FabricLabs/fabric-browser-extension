@@ -3,61 +3,108 @@
 
 import { chromium, type BrowserContext } from 'playwright';
 import * as assert from 'assert';
+import * as fs from 'fs';
 import * as http from 'http';
+import * as os from 'os';
 import * as path from 'path';
 import { ensureLocalTestServer, type LocalTestServerHandle } from './harness/localTestServer';
 
 /** Absolute path so Chrome / Chromium both load the unpacked extension reliably. */
 const EXTENSION_PATH = path.resolve(__dirname, '..', 'assets');
 
+/** Options for `chromium.launchPersistentContext` (Playwright does not export this type name). */
+type LaunchPersistentContextOptions = NonNullable<Parameters<typeof chromium.launchPersistentContext>[1]>;
+
 /**
- * Playwright browser `channel` values to try, in order.
- * Default is Playwright’s bundled Chromium only (required for reliable MV3 service-worker discovery).
- * Override with `FABRIC_PLAYWRIGHT_CHANNEL=chrome` if you use a system browser (may be flaky for extensions).
+ * Playwright browser distribution tokens to try, in order.
+ * Use `null` for Playwright’s bundled Chromium (no `channel` — most reliable for MV3).
+ * Override with `FABRIC_PLAYWRIGHT_CHANNEL=chrome` (or comma-list) for a system browser.
+ * Default is bundled-only: system Chrome still writes Crashpad under the real ~/Library
+ * (HOME is ignored for that path on macOS), which fails in restricted agent sandboxes.
  */
-function extensionTestPlaywrightChannels (): string[] {
+function extensionTestPlaywrightChannels (): Array<string | null> {
   const raw = process.env.FABRIC_PLAYWRIGHT_CHANNEL || process.env.PLAYWRIGHT_CHANNEL;
   if (raw && String(raw).trim()) {
     return String(raw)
       .split(/[\s,]+/)
       .map((s) => s.trim())
-      .filter(Boolean);
+      .filter(Boolean)
+      .map((s) => (s === 'bundled' || s === 'default' ? null : s));
   }
-  return ['chromium'];
+  return [null];
+}
+
+/**
+ * Isolate writable dirs for Chromium where the host honors HOME/XDG.
+ * Note: macOS Chrome/Chromium Crashpad still uses the real user Library path.
+ */
+function chromiumIsolatedEnv (userDataDir: string): { [key: string]: string } {
+  const home = userDataDir;
+  const env: { [key: string]: string } = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (typeof value === 'string') env[key] = value;
+  }
+  env.HOME = home;
+  env.USERPROFILE = home;
+  env.XDG_CONFIG_HOME = path.join(home, '.config');
+  env.XDG_CACHE_HOME = path.join(home, '.cache');
+  env.XDG_DATA_HOME = path.join(home, '.local', 'share');
+  return env;
 }
 
 async function launchExtensionContext (userDataDir: string): Promise<BrowserContext> {
+  fs.mkdirSync(userDataDir, { recursive: true });
+  const crashDir = path.join(userDataDir, 'Crashpad');
+  fs.mkdirSync(crashDir, { recursive: true });
+  // Best-effort stubs if a build honors HOME for Application Support.
+  for (const product of ['Chromium', 'Google/Chrome']) {
+    fs.mkdirSync(path.join(userDataDir, 'Library', 'Application Support', product, 'Crashpad'), {
+      recursive: true
+    });
+  }
+
   const headless = !!process.env.CI;
-  const base = {
+  const base: LaunchPersistentContextOptions = {
     headless,
+    env: chromiumIsolatedEnv(userDataDir),
     args: [
       `--disable-extensions-except=${EXTENSION_PATH}`,
       `--load-extension=${EXTENSION_PATH}`,
       '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
       '--disable-web-security',
       '--allow-insecure-localhost',
-      '--disable-features=BlockInsecurePrivateNetworkRequests'
+      '--disable-features=BlockInsecurePrivateNetworkRequests',
+      '--disable-breakpad',
+      '--disable-crash-reporter',
+      `--crash-dumps-dir=${crashDir}`
     ],
-    ignoreDefaultArgs: ['--enable-automation'],
+    // Playwright defaults include `--disable-extensions`, which fights `--load-extension`.
+    ignoreDefaultArgs: ['--enable-automation', '--disable-extensions'],
     viewport: { width: 1280, height: 720 }
   };
   const channels = extensionTestPlaywrightChannels();
-  let lastErr: Error | null = null;
+  const errors: string[] = [];
   for (const ch of channels) {
     try {
-      return await chromium.launchPersistentContext(userDataDir, {
-        ...base,
-        channel: ch as 'chromium' | 'chrome' | 'msedge'
-      });
+      const opts: LaunchPersistentContextOptions = { ...base };
+      if (ch) opts.channel = ch as 'chrome' | 'msedge' | 'chromium';
+      return await chromium.launchPersistentContext(userDataDir, opts);
     } catch (e) {
-      lastErr = e instanceof Error ? e : new Error(String(e));
+      const err = e instanceof Error ? e : new Error(String(e));
+      errors.push(`[${ch || 'bundled'}] ${err.message}`);
     }
   }
+  const joined = errors.join('\n---\n');
+  const hint = /Operation not permitted|xattr|Crashpad/i.test(joined)
+    ? ' Host denied Chromium Crashpad/xattr under ~/Library (macOS Crashpad ignores HOME). Re-run outside a restricted sandbox.'
+    : '';
   throw new Error(
-    `Playwright could not launch a browser (tried: ${channels.join(', ')}). ` +
+    `Playwright could not launch a browser (tried: ${channels.map((c) => c || 'bundled').join(', ')}). ` +
       'Install Playwright’s Chromium: npx playwright install chromium (or npm run playwright:install). ' +
       'The extension test script runs that before mocha. ' +
-      `Last error: ${lastErr ? lastErr.message : 'unknown'}`
+      `Errors:\n${joined || 'unknown'}.${hint}`
   );
 }
 
@@ -108,7 +155,7 @@ describe('Browser extension (Playwright + Mocha)', function () {
   before(async function () {
     server = await ensureLocalTestServer(3044);
     const userDataDir = path.join(
-      require('os').tmpdir(),
+      os.tmpdir(),
       `fabric-passport-mocha-${Date.now()}-${Math.random().toString(16).slice(2)}`
     );
 

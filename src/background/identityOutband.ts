@@ -112,7 +112,7 @@ export async function reapplyIdentityOutbandRules (): Promise<void> {
       removeRuleIds: allReservedRuleIds(),
       addRules
     });
-  } catch (e) {
+  } catch (e: unknown) {
     console.warn('[FABRIC:OUTBAND] updateDynamicRules failed', e);
   }
 }

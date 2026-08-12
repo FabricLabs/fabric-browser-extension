@@ -17,6 +17,10 @@ declare global {
 
 /**
  * Wrap `fetch` so 402 responses with Fabric payment headers prompt the Passport UI.
+ *
+ * Runs in the **isolated** content-script world today (needed for chrome.runtime
+ * messaging used by login / device-link). Page-world `window.fetch` is not patched
+ * until a MAIN-world injector (or dual content_scripts entry) lands — see SECURITY.md.
  */
 export function installFabric402FetchInterceptor (): void {
   if (typeof window === 'undefined' || typeof window.fetch !== 'function') return;

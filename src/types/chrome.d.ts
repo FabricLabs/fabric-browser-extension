@@ -1,10 +1,10 @@
 declare namespace chrome {
   namespace storage {
     interface StorageArea {
-      get(keys: string | string[] | null): Promise<{ [key: string]: any }>;
-      get(keys: string | string[] | null, callback: (items: { [key: string]: any }) => void): void;
-      set(items: { [key: string]: any }): Promise<void>;
-      set(items: { [key: string]: any }, callback?: () => void): void;
+      get(keys: string | string[] | null): Promise<{ [key: string]: unknown }>;
+      get(keys: string | string[] | null, callback: (items: { [key: string]: unknown }) => void): void;
+      set(items: { [key: string]: unknown }): Promise<void>;
+      set(items: { [key: string]: unknown }, callback?: () => void): void;
       remove(keys: string | string[]): Promise<void>;
       remove(keys: string | string[], callback?: () => void): void;
     }
@@ -22,7 +22,7 @@ declare namespace chrome {
 
     interface MessageEvent {
       type: string;
-      [key: string]: any;
+      [key: string]: unknown;
     }
 
     const onInstalled: {
@@ -30,7 +30,7 @@ declare namespace chrome {
     };
 
     const onMessage: {
-      addListener(callback: (message: MessageEvent, sender: MessageSender, sendResponse: (response?: any) => void) => void | boolean): void;
+      addListener(callback: (message: MessageEvent, sender: MessageSender, sendResponse: (response?: unknown) => void) => void | boolean): void;
     };
   }
 } 

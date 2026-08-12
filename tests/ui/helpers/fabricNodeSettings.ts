@@ -28,6 +28,9 @@ export async function ensureHarnessFabricNodeActive (page: Page, baseURL?: strin
   const row = page.getByRole('listitem').filter({ hasText: rowMatch }).last();
   await expect(row).toBeVisible({ timeout: 15000 });
   const setMeshActive = row.locator('button[title="Set active for mesh"]');
-  if (await setMeshActive.count()) await setMeshActive.click();
+  if (await setMeshActive.count()) {
+    await setMeshActive.click();
+    await expect(setMeshActive).toHaveCount(0);
+  }
   await page.getByRole('button', { name: /^Back$/ }).click();
 }
