@@ -37,8 +37,8 @@
   },
   "dependencies": {
     "@bitcoinerlab/secp256k1": "=1.2.0",
-    "@fabric/core": "FabricLabs/fabric#aa516d31729a86be59e7257f4e91a86733ab8d5e",
-    "@fabric/http": "FabricLabs/fabric-http#54560cb90346fc1aaf01f8ad0fe69a5a1494e68e",
+    "@fabric/core": "FabricLabs/fabric#feature/rsi",
+    "@fabric/http": "FabricLabs/fabric-http#feature/rsi",
     "bip32": "=5.0.0-rc.0",
     "bip39": "=3.1.0",
     "bitcoinjs-lib": "=6.1.7",
