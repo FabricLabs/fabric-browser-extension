@@ -10,6 +10,8 @@ import {
   FABRIC_RUNTIME_DEVICE_LINK_GET
 } from '../constants/deviceLink';
 import { completeDeviceLinkAsResponder, type DeviceLinkPending } from '../utils/fabricDeviceLinkSign';
+import { publishIdentityCrossSign } from '../utils/identityCrossSignPublish';
+import { mergeLinkedDevice } from '../utils/linkedDevices';
 import { swallowNonFatal } from '../utils/nonFatal';
 
 export type PendingDeviceLink = DeviceLinkPending & {
@@ -103,6 +105,27 @@ export default function DeviceLinkPrompt (props: Props): React.ReactElement | nu
         setBusy(false);
         return;
       }
+      const peerPk = pending.initiator && pending.initiator.pubkeyHex;
+      if (peerPk && pending.nonce) {
+        void publishIdentityCrossSign({
+          hubBase: pending.hubBase,
+          privateKeyHex,
+          xpub,
+          peerPubkey: peerPk,
+          nonce: pending.nonce
+        }).catch((err: unknown) => swallowNonFatal('identity-cross-sign-publish', err));
+      }
+      void mergeLinkedDevice({
+        kind: 'device-link',
+        peerFabricId: posted.peerFabricId,
+        peerXpub: pending.initiator && pending.initiator.xpub,
+        peerPubkey: peerPk,
+        nonce: pending.nonce,
+        label: pending.label || posted.label || 'Linked device',
+        hubOrigin: pending.origin || pending.hubBase,
+        linkedAt: new Date().toISOString(),
+        role: 'responder'
+      }).catch((err: unknown) => swallowNonFatal('linked-devices-merge', err));
       notifyPage(tabId, {
         source: 'fabric-passport',
         type: FABRIC_DEVICE_LINK_RESULT,
@@ -132,8 +155,8 @@ export default function DeviceLinkPrompt (props: Props): React.ReactElement | nu
       <Modal.Header>Link this device</Modal.Header>
       <Modal.Content>
         <p>
-          Another Fabric app wants a mutual identity link (separate seeds, dual Schnorr).
-          Approve only if you started this on the other device.
+          Any Fabric peer (Passport, Android, or desktop) can create or accept this link.
+          Separate seeds, dual BIP340 Schnorr. Approve only if you started this on the other device.
         </p>
         {needsUnlock || !privateKeyHex ? (
           <Message warning>

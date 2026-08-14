@@ -5,6 +5,8 @@ Browser Extension for managing identities and logging in to Fabric applications.
 
 Push/PR workflows run **`npm run report:coverage`** (see `.github/workflows/test.yaml`) and upload **`reports/coverage.lcov`** to [Codecov](https://codecov.io/gh/FabricLabs/fabric-browser-extension), matching **FabricLabs/fabric** / **fabric-http**.
 
+Security posture and leftover work: [SECURITY.md](SECURITY.md), [docs/OUTSTANDING.md](docs/OUTSTANDING.md). Never commit `assets.pem` or store zips.
+
 ## Features
 Additional extension features and configurations can be accessed in the settings page on the top-right corner of the first home-page
 - Wallet password, also used to encrypt data before being stored
@@ -69,8 +71,8 @@ See `node_modules/@fabric/http/docs/RELEASE_GATE.md` when `@fabric/http` is link
 5. When the wallet has been imported or created, you can toggle and view addresses for the chains you enabled.
 6. On Fabric sites, use the app’s own Fabric login / identity flow (and the extension’s **Connect & register** where offered); the Passport popup and content scripts follow the Fabric message and storage contracts used across FabricLabs repos.
 
-### Client-signed site login (Passport ↔ desktop)
-Sites that use Hub `POST /sessions` can offer **Sign in with Passport** alongside `fabric://login` (GoonCitizen / Hub desktop). The page `postMessage`s:
+### Client-signed site login (Passport ↔ GoonCitizen ↔ Android)
+Sites that use Hub `POST /sessions` can offer **Sign in with Passport** alongside `fabric://login` (GoonCitizen desktop or Android). Interchangeable D-011 signers: Passport | GoonCitizen desktop | GoonCitizen Android. The page `postMessage`s:
 
 ```js
 window.postMessage({
@@ -93,7 +95,7 @@ window.postMessage({
 }, location.origin);
 ```
 
-Passport signs as **responder**; the initiator countersigns. Seeds stay per-app.
+Passport signs as **responder**; the initiator countersigns. Seeds stay per-app. After `status: linked`, Passport publishes `IdentityCrossSign` (mutual BIP340) so the mesh can treat the two pubkeys as one identity cluster. `postMessage` names stay `FABRIC_SITE_LOGIN_*` / `FABRIC_DEVICE_LINK_*`.
 
 ## Encryption
 Data stored in leveldb is encrypted with the subtleCrypto AES-GCM algorithm. Encryption methods are found in fabric/core/types/subtleCrypto

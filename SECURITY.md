@@ -1,6 +1,8 @@
 # Security (Fabric Passport / browser extension)
 Browser wallet and identity extension for Fabric site login and mesh participation.
 
+**Outstanding queue:** [docs/OUTSTANDING.md](docs/OUTSTANDING.md).
+
 ## Adversarial environment
 Fabric networks are intended for deployment where **peers, relays, hubs, and operators may be hostile**. Design and review against:
 
@@ -16,7 +18,7 @@ The extension MUST refuse to sign site-login / device-link completions for non-a
 ## Outstanding (PR #3 / RSI follow-ups)
 - **Page-world 402 fetch patch** — `installFabric402FetchInterceptor` runs in the isolated content script today (login/device-link messaging needs that world). Page `fetch` is not patched until a MAIN-world injector (or dual `content_scripts` entry) lands; keep Hub/UI 402 flows working via extension UI prompts in the meantime. Module `src/content/fabric402FetchPatch.ts` exists; limitation is world isolation, not a missing file.
 - **xpub in query strings** — wallet balance / history still use Hub `GET /services/bitcoin/xpub…` (Hub API shape); moving xpub into POST bodies needs coordinated Hub endpoints.
-- ~~**`@fabric/core` / `@fabric/http` pin hygiene**~~ — pins: core `aa516d31…`, http `54560cb9…` (aligned with Hub RSI after `npm run report:install` from `feature/rsi`). Bump deliberately with Hub / http; do not leave moving branch tips in releases. `report:install` keeps `package-lock.json`.
+- ~~**`@fabric/core` / `@fabric/http` pin hygiene**~~ — `package.json` stays on `FabricLabs/fabric#feature/rsi` and `FabricLabs/fabric-http#feature/rsi`; lockfile SHAs **`3745041e…`** / **`e167d8e…`** after this cut. Bump deliberately with Hub / http; re-pin releases to lockfile SHAs. `report:install` wipes the lockfile then `npm i --allow-git=all`.
 - ~~**Cleartext production hub defaults**~~ — Passport allowlist matches `@fabric/http`: HTTPS-only network hubs; cleartext requires `opts.extra`. Loopback `http://` remains allowed.
 - **npm audit (prod omit-dev)** — remaining findings include transitive `elliptic` (crypto-browserify via `@fabric/http`), `uuid` (jayson via core), and `@babel/core` sourceMappingURL advisory on some trees. Prefer upstream bumps / careful overrides over `npm audit fix --force`. Re-check after each Fabric pin bump.
 - **Manifest net permissions** — `webRequest` / `declarativeNetRequest` remain declared for identity outband header rules; keep rule IDs and handlers in sync when changing outband behavior.
@@ -38,7 +40,7 @@ The extension MUST refuse to sign site-login / device-link completions for non-a
 1. `npm run test:unit` before merging identity / allowlist changes.
 2. Never commit mnemonics, `.pem` signing keys for store packages, or unlocked datastores.
 3. Treat every web origin as potentially malicious when requesting signatures.
-4. Prefer `npm ci` / keep `package-lock.json`; `npm run report:install` removes `node_modules` only.
+4. Prefer `npm ci` / keep `package-lock.json`; `npm run report:install` wipes the lockfile then `npm i --allow-git=all`.
 
 ## Disclosure
 Report issues via the repository issue tracker / maintainer contact in README.

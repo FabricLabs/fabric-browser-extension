@@ -48,6 +48,20 @@ bitcoin.initEccLib(ecc);
 // Semantic UI
 import { Button, Message, Loader, Segment, Form, Input, TextArea, List, Icon, Modal, Popup, Table } from 'semantic-ui-react';
 import { FabricBackgroundMeshActions } from './FabricBackgroundMeshActions';
+import {
+  DEFAULT_DEVICE_LINK_HUB,
+  startDeviceLinkAsInitiator,
+  tickDeviceLinkAsInitiator
+} from '../utils/fabricDeviceLinkSign';
+import { publishIdentityCrossSign, publishIdentityCrossSignKind } from '../utils/identityCrossSignPublish';
+import { REVOKE_TYPE } from '../utils/identityCrossSign';
+import {
+  readLinkedDevices,
+  mergeLinkedDevice,
+  removeLinkedDevice,
+  peerIdOf,
+  type LinkedDevice
+} from '../utils/linkedDevices';
 
 // Services
 import { validateXpub } from '../utils/xpub';
@@ -844,6 +858,44 @@ const IdentityManager = () => {
     xpubQueryToken: DEFAULT_SETTINGS.xpubQueryToken
   });
 
+  const [linkedDevices, setLinkedDevices] = useState<LinkedDevice[]>([]);
+  const [deviceLinkBusy, setDeviceLinkBusy] = useState(false);
+  const [deviceLinkOffer, setDeviceLinkOffer] = useState<{
+    sessionId: string;
+    protocolUrl: string;
+    httpsUrl: string;
+    hubBase: string;
+    origin: string;
+    nonce: string;
+    label: string;
+  } | null>(null);
+  const [deviceLinkError, setDeviceLinkError] = useState<string | null>(null);
+  const deviceLinkPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const refreshLinkedDevices = useCallback(() => {
+    void readLinkedDevices().then(setLinkedDevices);
+  }, []);
+
+  useEffect(() => {
+    refreshLinkedDevices();
+  }, [refreshLinkedDevices]);
+
+  const deviceLinkHubBase = useCallback((): string => {
+    const active = settings.fabricNodes.find(n => n.isActive);
+    const addr = active && active.hubAddress ? active.hubAddress.replace(/\/+$/, '') : '';
+    if (addr && /^https?:\/\//i.test(addr)) return addr;
+    return DEFAULT_DEVICE_LINK_HUB;
+  }, [settings.fabricNodes]);
+
+  const clearDeviceLinkPoll = useCallback(() => {
+    if (deviceLinkPollRef.current) {
+      clearInterval(deviceLinkPollRef.current);
+      deviceLinkPollRef.current = null;
+    }
+  }, []);
+
+  useEffect(() => () => clearDeviceLinkPoll(), [clearDeviceLinkPoll]);
+
   // Create a memoized version of the wordlist
   const wordlist = useMemo(() => bip39Wordlist, []);
 
@@ -862,6 +914,122 @@ const IdentityManager = () => {
       void touchFabricActivity(t);
     }
   }, []);
+
+  const handleStartDeviceLink = useCallback(async () => {
+    const pk = selectedIdentity?.privateKeyHex;
+    const xp = selectedIdentity?.xpub;
+    if (!pk || !xp) {
+      setDeviceLinkError('Unlock your Passport identity before creating a link offer.');
+      return;
+    }
+    clearDeviceLinkPoll();
+    setDeviceLinkBusy(true);
+    setDeviceLinkError(null);
+    const hubBase = deviceLinkHubBase();
+    const started = await startDeviceLinkAsInitiator({
+      privateKeyHex: pk,
+      xpub: xp,
+      hubBase,
+      label: 'Passport'
+    });
+    if (!started.ok) {
+      setDeviceLinkError(started.error);
+      setDeviceLinkBusy(false);
+      return;
+    }
+    setDeviceLinkOffer({
+      sessionId: started.sessionId,
+      protocolUrl: started.protocolUrl,
+      httpsUrl: started.httpsUrl,
+      hubBase: started.hubBase,
+      origin: started.origin,
+      nonce: started.nonce,
+      label: started.label
+    });
+    let attempts = 0;
+    deviceLinkPollRef.current = setInterval(() => {
+      attempts += 1;
+      if (attempts > 240) {
+        clearDeviceLinkPoll();
+        setDeviceLinkBusy(false);
+        setDeviceLinkError('Timed out waiting for the other device to approve.');
+        return;
+      }
+      void (async () => {
+        const tick = await tickDeviceLinkAsInitiator({
+          privateKeyHex: pk,
+          xpub: xp,
+          sessionId: started.sessionId,
+          hubBase: started.hubBase,
+          origin: started.origin,
+          nonce: started.nonce,
+          label: started.label
+        });
+        if (!tick.ok) return;
+        if (tick.status !== 'linked') return;
+        clearDeviceLinkPoll();
+        if (tick.peerPubkey && tick.nonce) {
+          void publishIdentityCrossSign({
+            hubBase: started.hubBase,
+            privateKeyHex: pk,
+            xpub: xp,
+            peerPubkey: tick.peerPubkey,
+            nonce: tick.nonce
+          }).catch((err: unknown) => swallowNonFatal('identity-cross-sign-publish', err));
+        }
+        if (tick.peerFabricId) {
+          await mergeLinkedDevice({
+            kind: 'device-link',
+            peerFabricId: tick.peerFabricId,
+            peerXpub: tick.peerXpub || undefined,
+            peerPubkey: tick.peerPubkey || undefined,
+            nonce: tick.nonce,
+            label: tick.label || 'Linked device',
+            hubOrigin: started.origin,
+            linkedAt: new Date().toISOString(),
+            role: 'initiator'
+          });
+          refreshLinkedDevices();
+        }
+        setDeviceLinkOffer(null);
+        setDeviceLinkBusy(false);
+      })();
+    }, 1500);
+  }, [selectedIdentity, clearDeviceLinkPoll, deviceLinkHubBase, refreshLinkedDevices]);
+
+  const handleRevokeLinkedDevice = useCallback(async (device: LinkedDevice) => {
+    const pk = selectedIdentity?.privateKeyHex;
+    const xp = selectedIdentity?.xpub;
+    if (!pk || !xp) {
+      setDeviceLinkError('Unlock your Passport identity before revoking a device.');
+      return;
+    }
+    const nonce = device.nonce;
+    const peerPubkey = device.peerPubkey || device.pubkey;
+    if (!nonce || !peerPubkey) {
+      setDeviceLinkError('No pairing nonce — complete fabric://link again before revoking.');
+      return;
+    }
+    setDeviceLinkBusy(true);
+    setDeviceLinkError(null);
+    const hubBase = device.hubOrigin || deviceLinkHubBase();
+    const posted = await publishIdentityCrossSignKind({
+      hubBase,
+      privateKeyHex: pk,
+      xpub: xp,
+      peerPubkey,
+      nonce,
+      kind: REVOKE_TYPE
+    });
+    if (!posted.ok) {
+      setDeviceLinkError(posted.error || 'Could not publish IdentityCrossSignRevoke');
+      setDeviceLinkBusy(false);
+      return;
+    }
+    await removeLinkedDevice(peerIdOf(device));
+    refreshLinkedDevices();
+    setDeviceLinkBusy(false);
+  }, [selectedIdentity, deviceLinkHubBase, refreshLinkedDevices]);
 
   const performAutoLock = useCallback(() => {
     setIdentities(prev => {
@@ -4106,8 +4274,113 @@ const IdentityManager = () => {
           {renderFabricNodeList()}
           {renderFabricTestModal()}
 
-          <h4 style={{ marginTop: '2em' }}>Security</h4>
+          <h4 style={{ marginTop: '2em' }}>Security &amp; privacy</h4>
           <List divided relaxed>
+            <List.Item>
+              <List.Content>
+                <List.Header>Linked devices</List.Header>
+                <List.Description>
+                  <p>
+                    Peer-equivalent cluster: Passport, GoonCitizen Android, and desktop can each create or accept
+                    a <code>fabric://link</code>. Revoke publishes a BIP340 IdentityCrossSignRevoke Fabric Message.
+                  </p>
+                  {linkedDevices.length === 0 ? (
+                    <p style={{ color: 'rgba(255,255,255,0.65)' }}>No linked peers yet.</p>
+                  ) : (
+                    <List divided>
+                      {linkedDevices.map((d) => {
+                        const pid = peerIdOf(d);
+                        return (
+                          <List.Item key={pid || d.linkedAt || d.label}>
+                            <List.Content floated="right">
+                              <Button
+                                size="mini"
+                                negative
+                                disabled={deviceLinkBusy || !selectedIdentity?.privateKeyHex}
+                                onClick={() => void handleRevokeLinkedDevice(d)}
+                              >
+                                Revoke
+                              </Button>
+                            </List.Content>
+                            <List.Header>{d.label || d.kind || 'Device'}</List.Header>
+                            <List.Description style={{ wordBreak: 'break-all', fontSize: '0.85em' }}>
+                              {pid || '—'}
+                              {d.hubOrigin ? ` · ${d.hubOrigin}` : ''}
+                            </List.Description>
+                          </List.Item>
+                        );
+                      })}
+                    </List>
+                  )}
+                </List.Description>
+              </List.Content>
+            </List.Item>
+            <List.Item>
+              <List.Content>
+                <List.Header>Add a device</List.Header>
+                <List.Description>
+                  <p>
+                    This Passport identity can start the offer. The other device scans <code>fabric://link</code>
+                    (Android / desktop) or opens the HTTPS landing (another Passport on the hub origin).
+                    Each app keeps its own seed.
+                  </p>
+                  <Button
+                    primary
+                    size="small"
+                    loading={deviceLinkBusy}
+                    disabled={deviceLinkBusy || !selectedIdentity?.privateKeyHex}
+                    onClick={() => void handleStartDeviceLink()}
+                    content={deviceLinkBusy ? 'Waiting for peer…' : 'Add a device'}
+                  />
+                  {!selectedIdentity?.privateKeyHex ? (
+                    <p style={{ marginTop: '0.5em', color: 'rgba(255,200,120,0.95)' }}>
+                      Unlock this identity to create or revoke a link.
+                    </p>
+                  ) : null}
+                  {deviceLinkOffer ? (
+                    <div style={{ marginTop: '0.75em' }}>
+                      <p style={{ fontSize: '0.85em' }}>GoonCitizen desktop / Android</p>
+                      <code style={{ display: 'block', wordBreak: 'break-all', fontSize: '0.8em' }}>
+                        {deviceLinkOffer.protocolUrl}
+                      </code>
+                      <p style={{ fontSize: '0.85em', marginTop: '0.5em' }}>HTTPS landing (Passport on hub origin)</p>
+                      <code style={{ display: 'block', wordBreak: 'break-all', fontSize: '0.8em' }}>
+                        {deviceLinkOffer.httpsUrl}
+                      </code>
+                      <Button
+                        size="mini"
+                        style={{ marginTop: '0.5em' }}
+                        onClick={() => {
+                          try { void navigator.clipboard.writeText(deviceLinkOffer.protocolUrl); } catch (_) {}
+                        }}
+                        content="Copy fabric://link"
+                      />
+                      <Button
+                        size="mini"
+                        style={{ marginLeft: '0.35em' }}
+                        onClick={() => {
+                          try { void navigator.clipboard.writeText(deviceLinkOffer.httpsUrl); } catch (_) {}
+                        }}
+                        content="Copy HTTPS landing"
+                      />
+                      <Button
+                        size="mini"
+                        style={{ marginLeft: '0.35em' }}
+                        onClick={() => {
+                          clearDeviceLinkPoll();
+                          setDeviceLinkOffer(null);
+                          setDeviceLinkBusy(false);
+                        }}
+                        content="Cancel"
+                      />
+                    </div>
+                  ) : null}
+                  {deviceLinkError ? (
+                    <Message negative size="small" style={{ marginTop: '0.75em' }}>{deviceLinkError}</Message>
+                  ) : null}
+                </List.Description>
+              </List.Content>
+            </List.Item>
             <List.Item>
               <List.Content>
                 <List.Header>Backup & Restore</List.Header>

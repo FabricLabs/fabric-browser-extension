@@ -69,4 +69,36 @@ describe('fabricHttp402 (402 payment headers)', () => {
     );
     assert.strictEqual(u, fromL402);
   });
+
+  it('decodes a Hub document-offer listing at markup without leaking cost basis', () => {
+    const payload = {
+      v: 1,
+      scheme: 'fabric-http-document-payment',
+      documentExchange: {
+        offerType: 'FABRIC_DOCUMENT_OFFER',
+        responseType: 'FABRIC_DOCUMENT_OFFER_RESPONSE',
+        inventoryWireOpcodes: {
+          request: 'P2P_INVENTORY_REQUEST',
+          response: 'P2P_INVENTORY_RESPONSE'
+        }
+      },
+      documentOffer: {
+        documentId: 'ab'.repeat(32),
+        purchasePriceSats: 110,
+        costBasisSats: 100,
+        network: 'regtest'
+      }
+    };
+    const decoded = decodeFabricPaymentRequestHeader(
+      Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url')
+    );
+    assert.ok(decoded);
+    assert.strictEqual(decoded?.documentExchange?.offerType, 'FABRIC_DOCUMENT_OFFER');
+    assert.strictEqual(decoded?.documentOffer?.purchasePriceSats, 110);
+    // Overlay (`fabric402OverlayDom`) only renders purchasePriceSats. Hub HTTP
+    // strips costBasisSats; if a leaky peer still sends it, ignore it here.
+    const shown = `Document price: ${Math.round(Number(decoded?.documentOffer?.purchasePriceSats)).toLocaleString('en-US')} sats`;
+    assert.ok(shown.includes('110'));
+    assert.ok(!shown.includes('100'));
+  });
 });
