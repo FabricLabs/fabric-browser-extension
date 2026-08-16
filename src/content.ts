@@ -16,10 +16,9 @@ import {
   FABRIC_DEVICE_LINK_RESULT,
   FABRIC_RUNTIME_DEVICE_LINK_REQUEST
 } from './constants/deviceLink';
-import { fetchPendingDeviceLink } from './utils/fabricDeviceLinkFetch';
+import { evaluateDeviceLinkPageRequest, fetchPendingDeviceLink } from './utils/fabricDeviceLinkFetch';
 import { installFabric402FetchInterceptor } from './content/fabric402FetchPatch';
 import { swallowNonFatal } from './utils/nonFatal';
-import { assertAllowedFabricHub } from './utils/fabricHubAllowlist';
 
 declare global {
   interface Window {
@@ -150,37 +149,22 @@ window.addEventListener('message', (event: MessageEvent) => {
   const declaredOrigin = typeof data.origin === 'string' ? data.origin.trim() : event.origin;
   if (!sessionId || !hubRaw) return;
 
-  let hubBase: string;
-  let hubOrigin: string;
-  try {
-    const u = new URL(hubRaw);
-    if (u.protocol !== 'http:' && u.protocol !== 'https:') return;
-    hubBase = `${u.protocol}//${u.host}`;
-    hubOrigin = u.origin;
-  } catch (err: unknown) {
-    swallowNonFatal('device-link-hub-url', err);
-    return;
-  }
-  const hubGate = assertAllowedFabricHub(hubBase);
-  if (!hubGate.ok) {
+  const pageGate = evaluateDeviceLinkPageRequest({
+    sessionId,
+    hubRaw,
+    declaredOrigin,
+    pageOrigin: event.origin
+  });
+  if (!pageGate.ok) {
     window.postMessage({
       source: 'fabric-passport',
       type: FABRIC_DEVICE_LINK_RESULT,
       ok: false,
-      error: 'hub_not_allowed'
+      error: pageGate.error
     }, event.origin);
     return;
   }
-  hubBase = hubGate.hubBase;
-  if (declaredOrigin !== event.origin || hubOrigin !== event.origin) {
-    window.postMessage({
-      source: 'fabric-passport',
-      type: FABRIC_DEVICE_LINK_RESULT,
-      ok: false,
-      error: 'origin_mismatch'
-    }, event.origin);
-    return;
-  }
+  const hubBase = pageGate.hubBase;
 
   void fetchPendingDeviceLink(hubBase, sessionId).then((pending) => {
     if (!pending.ok) {

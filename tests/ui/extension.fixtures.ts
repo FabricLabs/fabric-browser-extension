@@ -20,7 +20,8 @@ export const test = base.extend<{
     try {
       context = await chromium.launchPersistentContext(userDataDir, {
         channel: 'chromium',
-        headless: !!process.env.CI,
+        // Full Chromium (xvfb on CI). Headless shell cannot load MV3 extensions.
+        headless: false,
         args: [
           `--disable-extensions-except=${pathToExtension}`,
           `--load-extension=${pathToExtension}`,

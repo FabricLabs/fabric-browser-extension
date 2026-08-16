@@ -9,6 +9,7 @@
  */
 
 import { buildClientSignedLoginBody } from './fabricSiteLoginSign';
+import { deviceLinkFetchHeaders } from './fabricDeviceLinkFetch';
 import type { DeviceLinkPending } from './fabricDeviceLinkFetch';
 
 export type { DeviceLinkPending } from './fabricDeviceLinkFetch';
@@ -48,14 +49,8 @@ function randomNonceHex (): string {
   return Array.from(u).map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
-function jsonHeaders (origin: string): Record<string, string> {
-  const o = String(origin || '').replace(/\/$/, '');
-  return {
-    Accept: 'application/json',
-    'Content-Type': 'application/json',
-    Origin: o,
-    Referer: `${o}/`
-  };
+function jsonHeaders (): Record<string, string> {
+  return deviceLinkFetchHeaders({ json: true });
 }
 
 export type DeviceLinkOffer = {
@@ -97,7 +92,7 @@ export async function startDeviceLinkAsInitiator (opts: {
   try {
     const res = await fetch(`${hubBase}/device-links`, {
       method: 'POST',
-      headers: jsonHeaders(origin),
+      headers: jsonHeaders(),
       body: JSON.stringify({
         origin,
         label,
@@ -162,10 +157,9 @@ export async function tickDeviceLinkAsInitiator (opts: {
   | { ok: false; error: string }
 > {
   const base = String(opts.hubBase || '').replace(/\/$/, '');
-  const origin = String(opts.origin || base).replace(/\/$/, '');
   try {
     const get = await fetch(`${base}/device-links/${encodeURIComponent(opts.sessionId)}`, {
-      headers: jsonHeaders(origin),
+      headers: jsonHeaders(),
       cache: 'no-store'
     });
     const st = (await get.json().catch(() => ({}))) as {
@@ -203,7 +197,7 @@ export async function tickDeviceLinkAsInitiator (opts: {
       `${base}/device-links/${encodeURIComponent(opts.sessionId)}/signatures`,
       {
         method: 'POST',
-        headers: jsonHeaders(origin),
+        headers: jsonHeaders(),
         body: JSON.stringify({
           role: 'initiator',
           signature: countersigned.signature,
@@ -264,9 +258,8 @@ export async function completeDeviceLinkAsResponder (
   );
   const body = buildClientSignedLoginBody(linkMessage, privateKeyHex, xpub);
   const base = String(pending.hubBase || '').replace(/\/$/, '');
-  let origin: string;
   try {
-    origin = new URL(base).origin;
+    new URL(base);
   } catch {
     return { ok: false, error: 'invalid hub base' };
   }
@@ -274,12 +267,7 @@ export async function completeDeviceLinkAsResponder (
   try {
     const res = await fetch(url, {
       method: 'POST',
-      headers: {
-        Accept: 'application/json',
-        'Content-Type': 'application/json',
-        Origin: origin,
-        Referer: `${origin}/`
-      },
+      headers: jsonHeaders(),
       body: JSON.stringify({
         role: 'responder',
         signature: body.signature,

@@ -39,18 +39,28 @@
         "no-use-before-define": "off",
         "@typescript-eslint/no-use-before-define": [
             "error"
-        ], // solves 'React' was used before it was defined
+        ],
         "space-before-function-paren": 0,
         "react/prop-types": 0,
         "react/jsx-handler-names": 0,
         "react/jsx-fragments": 0,
         "react/no-unused-prop-types": 0,
+        "react/require-default-props": "off",
         "no-console": "off",
         "linebreak-style": 0,
         "operator-linebreak": "off",
         "max-len": "off",
         "no-underscore-dangle": "off",
         "no-unused-vars": "warn",
+        "no-void": "off",
+        "no-plusplus": "off",
+        "no-shadow": "off",
+        "comma-dangle": "off",
+        "prefer-destructuring": "off",
+        "consistent-return": "off",
+        "no-useless-return": "off",
+        "strict": "off",
+        "import/no-unresolved": "off",
         "react/jsx-filename-extension": [
             1,
             {

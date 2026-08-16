@@ -29,7 +29,7 @@
     "review:coverage": "npm run make:coverage && http-server -p 8000 coverage",
     "start": "webpack serve --config webpack.config.js",
     "serve:test": "npm run build && node scripts/local-test-server.js",
-    "test:unit": "NODE_ENV=test mocha tests/bech32m.test.ts tests/bip32.test.ts tests/bitcoinReceiveAddress.unit.ts tests/identityOutbandValue.unit.ts tests/fabricHttp402.unit.ts tests/fabricSiteLoginSign.unit.ts tests/fabricDeviceLinkSign.unit.ts tests/identityCrossSign.unit.ts tests/identityCrossSignPublish.unit.ts tests/linkedDevices.unit.ts tests/fabricWireNotify.unit.ts tests/fabricHubAllowlist.unit.ts tests/federationWalletInvite.unit.ts tests/adversarialEnvironment.basics.unit.ts",
+    "test:unit": "NODE_ENV=test mocha tests/bech32m.test.ts tests/bip32.test.ts tests/bitcoinReceiveAddress.unit.ts tests/bitcoinWithdraw.unit.ts tests/identityOutbandValue.unit.ts tests/fabricHttp402.unit.ts tests/fabricSiteLoginSign.unit.ts tests/fabricDeviceLinkSign.unit.ts tests/fabricDeviceLinkFlow.unit.ts tests/identityCrossSign.unit.ts tests/identityCrossSignPublish.unit.ts tests/linkedDevices.unit.ts tests/fabricWireNotify.unit.ts tests/arcPublishEvaluate.unit.ts tests/fabricHubAllowlist.unit.ts tests/federationWalletInvite.unit.ts tests/adversarialEnvironment.basics.unit.ts tests/encryptedDatastore.unit.ts",
     "test:extension": "NODE_ENV=test FABRIC_ACTION_DEBUG_URL=http://127.0.0.1:3044/api/endpoint npx playwright install chromium && npm run build && NODE_ENV=test mocha tests/extension.test.ts",
     "playwright:install": "playwright install chromium",
     "test:local": "npm run serve:test",
@@ -42,11 +42,6 @@
     "bip32": "=5.0.0-rc.0",
     "bip39": "=3.1.0",
     "bitcoinjs-lib": "=6.1.7",
-    "process": "=0.11.10",
-    "react": "=18.2.0",
-    "react-dom": "=18.2.0",
-    "semantic-ui-css": "=2.5.0",
-    "semantic-ui-react": "=2.1.5",
     "tiny-secp256k1": "=2.2.4"
   },
   "devDependencies": {
@@ -99,11 +94,16 @@
     "os-browserify": "=0.3.0",
     "path-browserify": "=1.0.1",
     "playwright": "=1.53.1",
+    "process": "=0.11.10",
     "progress-bar-webpack-plugin": "=2.1.0",
     "querystring-es3": "=0.2.1",
+    "react": "=18.2.0",
+    "react-dom": "=18.2.0",
     "require-dot-file": "=0.4.0",
     "sass": "=1.71.1",
     "sass-loader": "=14.1.0",
+    "semantic-ui-css": "=2.5.0",
+    "semantic-ui-react": "=2.1.5",
     "sharp": "0.33.5",
     "sinon": "=20.0.0",
     "stream-browserify": "=3.0.0",
@@ -124,5 +124,27 @@
   },
   "engines": {
     "node": "24.15.0"
-  }
+  },
+  "files": [
+    "src/**",
+    "assets/**",
+    "!assets.zip",
+    "!assets.crx",
+    "!assets.pem",
+    "!assets/**/*.map",
+    "!assets/**/*.mp4",
+    "!assets/semantic.css",
+    "!assets/semantic.js",
+    "!assets/semantic.min.css",
+    "!assets/semantic.min.js",
+    "!assets/css/semantic.min.css",
+    "!assets/themes/**",
+    "!assets/**/*.eot",
+    "!assets/**/*.svg",
+    "!assets/**/*.ttf",
+    "!zip/**",
+    "LICENSE",
+    "README.md",
+    "SECURITY.md"
+  ]
 }

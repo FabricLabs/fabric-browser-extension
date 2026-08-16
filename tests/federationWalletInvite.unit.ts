@@ -7,7 +7,9 @@ import {
   summarizeMultisigWalletInvite,
   normalizeProposedPolicy,
   normalizeSpendingTerms,
-  formatInviteSpendingSummary
+  formatInviteSpendingSummary,
+  publishMultisigWalletInvite,
+  respondToMultisigWalletInvite
 } from '../src/utils/federationWalletInvite';
 
 describe('federationWalletInvite (@fabric/http)', function () {
@@ -52,5 +54,46 @@ describe('federationWalletInvite (@fabric/http)', function () {
     assert.match(summary, /10%/);
     assert.match(summary, /Ops wallet/);
     assert.match(summary, /hub\.example/);
+  });
+
+  it('publishes a v2 invite over SendPeerMessage and can reject it', async function () {
+    const posts: Array<{ method: string; params: unknown[] }> = [];
+    (globalThis as { fetch: typeof fetch }).fetch = (async (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init && init.body)) as { method: string; params: unknown[] };
+      posts.push({ method: body.method, params: body.params || [] });
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ jsonrpc: '2.0', id: 1, result: { status: 'ok' } })
+      } as Response;
+    }) as typeof fetch;
+    try {
+      const published = await publishMultisigWalletInvite({
+        hubBase: 'https://relay.goon.vc',
+        peerIdOrAddress: bob,
+        inviterHubId: alice,
+        inviterPubkey: alice,
+        peerPubkey: bob,
+        threshold: 2,
+        spendingTerms: { mode: 'percent', value: 10 },
+        groupName: 'Ops wallet'
+      });
+      assert.ok(published.inviteId);
+      assert.strictEqual(posts[0].method, 'SendPeerMessage');
+      const invite = parseFederationWalletInvite(published.inviteJson);
+      assert.ok(invite);
+      await respondToMultisigWalletInvite({
+        hubBase: 'https://relay.goon.vc',
+        invite: invite!,
+        accept: false,
+        responderPubkey: bob
+      });
+      assert.strictEqual(posts[1].method, 'SendPeerMessage');
+      const reply = String(posts[1].params[1] || '');
+      assert.match(reply, /FederationContractInviteResponse/);
+      assert.match(reply, /"accept":false/);
+    } finally {
+      delete (globalThis as { fetch?: unknown }).fetch;
+    }
   });
 });

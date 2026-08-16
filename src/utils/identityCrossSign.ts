@@ -1,36 +1,24 @@
 'use strict';
 
 /**
- * Canonical IdentityCrossSign strings — lockstep with
- * `@fabric/hub/functions/identityCrossSign.js` (and GoonCitizen until it
- * requires the Hub export). TS copy is required: webpack must not pull Hub Node.
+ * Canonical IdentityCrossSign strings — `@fabric/core/functions/identityCrossSign`.
+ * TS re-export so webpack does not pull Hub Node.
  */
 
-export const CROSS_SIGN_PREFIX = 'fabric:identity-cross-sign:1';
-export const REVOKE_PREFIX = 'fabric:identity-cross-sign-revoke:1';
-export const SIGN_TYPE = 'IdentityCrossSign';
-export const REVOKE_TYPE = 'IdentityCrossSignRevoke';
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const core = require('@fabric/core/functions/identityCrossSign');
 
-function normHex (value: string): string {
-  return String(value || '').trim().toLowerCase().replace(/^0x/, '');
-}
-
-function normNonce (nonce: string): string | null {
-  const n = normHex(nonce);
-  if (!/^[a-f0-9]{64}$/.test(n)) return null;
-  return n;
-}
+export const CROSS_SIGN_PREFIX: string = core.CROSS_SIGN_PREFIX;
+export const REVOKE_PREFIX: string = core.REVOKE_PREFIX;
+export const SIGN_TYPE: string = core.SIGN_TYPE;
+export const REVOKE_TYPE: string = core.REVOKE_TYPE;
 
 export function buildCrossSignMessage (
   nonce: string,
   localPubkey: string,
   peerPubkey: string
 ): string | null {
-  const n = normNonce(nonce);
-  const local = normHex(localPubkey);
-  const peer = normHex(peerPubkey);
-  if (!n || !local || !peer) return null;
-  return `${CROSS_SIGN_PREFIX}:${n}:${local}:${peer}`;
+  return core.buildCrossSignMessage(nonce, localPubkey, peerPubkey);
 }
 
 export function buildRevokeMessage (
@@ -38,9 +26,5 @@ export function buildRevokeMessage (
   localPubkey: string,
   peerPubkey: string
 ): string | null {
-  const n = normNonce(nonce);
-  const local = normHex(localPubkey);
-  const peer = normHex(peerPubkey);
-  if (!n || !local || !peer) return null;
-  return `${REVOKE_PREFIX}:${n}:${local}:${peer}`;
+  return core.buildRevokeMessage(nonce, localPubkey, peerPubkey);
 }

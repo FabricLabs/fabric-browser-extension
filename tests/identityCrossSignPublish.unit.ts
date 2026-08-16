@@ -70,4 +70,22 @@ describe('identityCrossSignPublish', () => {
     assert.strictEqual(r.ok, false);
     if (!r.ok) assert.match(r.error, /HTTP 401/);
   });
+
+  it('rejects invalid nonce / empty peer pubkey before POST', async function () {
+    const master = new Key();
+    const ident = new Identity(master);
+    const fabric = ident.fabricKey;
+    const priv = Buffer.isBuffer(fabric.private)
+      ? fabric.private.toString('hex')
+      : String(fabric.private);
+    const r = await publishIdentityCrossSignKind({
+      hubBase: 'https://relay.goon.vc',
+      privateKeyHex: priv,
+      xpub: fabric.xpub,
+      peerPubkey: '',
+      nonce: 'zz'
+    });
+    assert.strictEqual(r.ok, false);
+    if (!r.ok) assert.match(r.error, /invalid cross-sign/);
+  });
 });

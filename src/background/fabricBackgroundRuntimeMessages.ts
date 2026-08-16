@@ -5,7 +5,7 @@
  * Split out from fabricBackground.ts to keep registration/setup separate from handler complexity.
  */
 
-import { FABRIC_MESH_HUB_REGISTRATION_KEY, FABRIC_STATE_STORAGE_KEY } from '../constants/fabricExtension';
+import { FABRIC_MESH_HUB_REGISTRATION_KEY } from '../constants/fabricExtension';
 import {
   FABRIC_PENDING_SITE_LOGIN_KEY,
   FABRIC_RUNTIME_SITE_LOGIN_CLEAR,
@@ -29,6 +29,7 @@ import {
 } from './identityOutband';
 import { attemptPayBolt11ViaActiveFabricNode } from './passportBolt11Pay';
 import { swallowNonFatal } from '../utils/nonFatal';
+import { validateQueuedDeviceLinkOffer } from '../utils/fabricDeviceLinkFetch';
 
 type PendingSiteLoginRow = {
   sessionId: string;
@@ -75,7 +76,7 @@ function showFabricNotification (title: string, message: string): void {
 export function handleFabricRuntimeMessage (
   message: unknown,
   sender: chrome.runtime.MessageSender,
-  sendResponse: (response?: unknown) => void,
+  sendResponse: (_response?: unknown) => void,
   deps: FabricRuntimeMessageDeps
 ): boolean | undefined {
   if (!message || typeof message !== 'object') return undefined;
@@ -171,13 +172,13 @@ export function handleFabricRuntimeMessage (
   if (m.type === 'FABRIC_DS_SET_MASTER_KEY' && m.rawKeyB64 && typeof m.rawKeyB64 === 'string') {
     try {
       const bin = atob(m.rawKeyB64);
-      if (bin.length < 32) {
-        sendResponse({ error: 'Master key must be at least 32 bytes (base64 decodes to 32+ octets).' });
+      if (bin.length !== 32) {
+        sendResponse({ error: 'Master key must be 32 bytes (base64 decodes to exactly 32 octets).' });
         return true;
       }
       const buf = new ArrayBuffer(32);
       const v = new Uint8Array(buf);
-      for (let i = 0; i < 32 && i < bin.length; i++) v[i] = bin.charCodeAt(i);
+      for (let i = 0; i < 32; i++) v[i] = bin.charCodeAt(i);
       void setDatastoreMasterKeyFromBytes(buf).then(() => sendResponse({ ok: true }));
     } catch (e: unknown) {
       sendResponse({ error: String(e) });
@@ -336,9 +337,9 @@ export function handleFabricRuntimeMessage (
     const sessionId = typeof m.sessionId === 'string' ? m.sessionId.trim() : '';
     const hubBase = typeof m.hubBase === 'string' ? m.hubBase.trim() : '';
     const origin = typeof m.origin === 'string' ? m.origin.trim() : '';
-    const message = typeof m.message === 'string' ? m.message : '';
+    const loginMessage = typeof m.message === 'string' ? m.message : '';
     const pageOrigin = typeof m.pageOrigin === 'string' ? m.pageOrigin.trim() : '';
-    if (!sessionId || !hubBase || !message || !pageOrigin || pageOrigin !== origin) {
+    if (!sessionId || !hubBase || !loginMessage || !pageOrigin || pageOrigin !== origin) {
       sendResponse({ ok: false, error: 'invalid_site_login' });
       return false;
     }
@@ -346,7 +347,7 @@ export function handleFabricRuntimeMessage (
       sessionId,
       hubBase,
       origin,
-      message,
+      message: loginMessage,
       pageOrigin,
       createdAt: Date.now(),
       tabId: sender.tab?.id
@@ -391,6 +392,11 @@ export function handleFabricRuntimeMessage (
 
   /** Content script: queue a mutual device-link offer for the popup to approve (responder). */
   if (m.type === FABRIC_RUNTIME_DEVICE_LINK_REQUEST) {
+    const queued = validateQueuedDeviceLinkOffer(m);
+    if (!queued.ok) {
+      sendResponse({ ok: false, error: queued.error });
+      return false;
+    }
     const sessionId = typeof m.sessionId === 'string' ? m.sessionId.trim() : '';
     const hubBase = typeof m.hubBase === 'string' ? m.hubBase.trim() : '';
     const origin = typeof m.origin === 'string' ? m.origin.trim() : '';
@@ -400,10 +406,7 @@ export function handleFabricRuntimeMessage (
     const initiator = m.initiator && typeof m.initiator === 'object'
       ? (m.initiator as { id?: string; xpub?: string; pubkeyHex?: string })
       : null;
-    if (
-      !sessionId || !hubBase || !nonce || !pageOrigin || pageOrigin !== origin ||
-      !initiator || typeof initiator.id !== 'string' || typeof initiator.xpub !== 'string'
-    ) {
+    if (!initiator || typeof initiator.id !== 'string' || typeof initiator.xpub !== 'string') {
       sendResponse({ ok: false, error: 'invalid_device_link' });
       return false;
     }
