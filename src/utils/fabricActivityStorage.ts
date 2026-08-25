@@ -13,8 +13,13 @@ async function writeLocal (t: number): Promise<void> {
   await chrome.storage.local.set({ [FABRIC_LAST_ACTIVITY_MS]: t });
 }
 
+/** Reject epoch 0 / negative values — same guard as suite chat `created` stamps. */
+function positiveEpochMs (value: number): number | null {
+  return Number.isFinite(value) && value > 0 ? value : null;
+}
+
 function normalizeActivityTs (ts: number): number {
-  return Number.isFinite(ts) && ts >= 0 ? ts : Date.now();
+  return positiveEpochMs(ts) ?? Date.now();
 }
 
 export async function touchFabricActivity (ts: number = Date.now()): Promise<void> {
@@ -48,7 +53,8 @@ export async function readFabricActivityMs (): Promise<number | null> {
       const v = localStorage.getItem(DEV_LS_KEY);
       if (v) {
         const n = parseInt(v, 10);
-        if (Number.isFinite(n) && n >= 0) return n;
+        const ts = positiveEpochMs(n);
+        if (ts != null) return ts;
       }
     } catch (err: unknown) {
       swallowNonFatal('fabric-activity-read-dev-ls', err);
@@ -59,7 +65,10 @@ export async function readFabricActivityMs (): Promise<number | null> {
     if (chrome.storage.session) {
       const s = await chrome.storage.session.get(FABRIC_LAST_ACTIVITY_MS);
       const v = s[FABRIC_LAST_ACTIVITY_MS];
-      if (typeof v === 'number' && Number.isFinite(v) && v >= 0) return v;
+      if (typeof v === 'number') {
+        const ts = positiveEpochMs(v);
+        if (ts != null) return ts;
+      }
     }
   } catch (err: unknown) {
     swallowNonFatal('fabric-activity-read-session', err);
@@ -67,7 +76,10 @@ export async function readFabricActivityMs (): Promise<number | null> {
   try {
     const l = await chrome.storage.local.get(FABRIC_LAST_ACTIVITY_MS);
     const v = l[FABRIC_LAST_ACTIVITY_MS];
-    if (typeof v === 'number' && Number.isFinite(v) && v >= 0) return v;
+    if (typeof v === 'number') {
+      const ts = positiveEpochMs(v);
+      if (ts != null) return ts;
+    }
   } catch (err: unknown) {
     swallowNonFatal('fabric-activity-read-local', err);
   }

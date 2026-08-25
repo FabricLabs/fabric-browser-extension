@@ -82,9 +82,11 @@ export function validateQueuedDeviceLinkOffer (m: {
  * browsers, and Hub accepts `chrome-extension:` / `moz-extension:` thin-client
  * Origins on allowlisted hubs (`@fabric/http` `deviceLinkHeaders`).
  */
-export function deviceLinkFetchHeaders (opts: { json?: boolean } = {}): Record<string, string> {
+export function deviceLinkFetchHeaders (opts: { json?: boolean; pollSecret?: string } = {}): Record<string, string> {
   const headers: Record<string, string> = { Accept: 'application/json' };
   if (opts.json) headers['Content-Type'] = 'application/json';
+  const secret = String(opts.pollSecret || '').trim();
+  if (secret) headers['X-Fabric-Poll-Secret'] = secret;
   return headers;
 }
 
@@ -148,7 +150,8 @@ export async function fetchPendingDeviceLink (
  */
 export async function cancelDeviceLinkSession (
   hubBase: string,
-  sessionId: string
+  sessionId: string,
+  opts: { pollSecret?: string } = {}
 ): Promise<{ ok: true; cancelled?: boolean; skipped?: boolean; alreadyLinked?: boolean } | { ok: false; error: string }> {
   const base = String(hubBase || '').replace(/\/$/, '');
   const sid = String(sessionId || '').trim();
@@ -156,7 +159,7 @@ export async function cancelDeviceLinkSession (
   try {
     const res = await fetch(`${base}/device-links/${encodeURIComponent(sid)}`, {
       method: 'DELETE',
-      headers: deviceLinkFetchHeaders(),
+      headers: deviceLinkFetchHeaders({ pollSecret: opts.pollSecret }),
       cache: 'no-store'
     });
     const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string; existed?: boolean };

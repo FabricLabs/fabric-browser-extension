@@ -64,7 +64,15 @@ module.exports = (env) => {
         if (n === 'offscreen') return 'background/offscreen.js';
         return 'js/[name].[contenthash].js';
       },
-      publicPath: '/'
+      publicPath: '/',
+      // Drop prior contenthashed popup/vendors chunks. Do not clean: true —
+      // that would wipe assets/icons before CopyPlugin recopies them.
+      clean: {
+        keep: (filename) => {
+          const f = String(filename || '').replace(/\\/g, '/');
+          return !/^js\/(popup|vendors)\.[a-f0-9]+\.js(\.map)?$/.test(f);
+        }
+      }
     },
     optimization: {
       minimize: isProduction,

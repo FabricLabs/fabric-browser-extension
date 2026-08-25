@@ -24,7 +24,15 @@ if (!fs.existsSync(dist)) {
 fs.mkdirSync(zipDir, { recursive: true });
 if (fs.existsSync(zipPath)) fs.unlinkSync(zipPath);
 
-const zipRun = spawnSync('zip', ['-r', zipPath, '.'], { cwd: dist, stdio: 'inherit' });
+const zipRun = spawnSync('zip', [
+  '-r', zipPath, '.',
+  '-x', 'test.html',
+  '-x', 'hub-mesh-bridge.html',
+  '-x', '*.map',
+  '-x', '*/*.map',
+  '-x', '*/*/*.map',
+  '-x', 'icons/chrome-store-icon-128.png'
+], { cwd: dist, stdio: 'inherit' });
 if (zipRun.error || zipRun.status !== 0) {
   const detail = zipRun.error || new Error(`zip exited with status ${zipRun.status}`);
   console.error('Failed to create ZIP archive. Is the zip CLI installed?', detail.message);

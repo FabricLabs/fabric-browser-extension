@@ -7,6 +7,8 @@ Push/PR workflows run **`npm run report:coverage`** (see `.github/workflows/test
 
 Security posture and leftover work: [SECURITY.md](SECURITY.md), [docs/OUTSTANDING.md](docs/OUTSTANDING.md). Never commit `assets.pem` or store zips.
 
+Chrome Web Store listing pack (copy-paste answers, privacy policy, icons, screenshots): [docs/CHROME_WEB_STORE.md](docs/CHROME_WEB_STORE.md). Toolbar and store icons are the Fabric lettermark (serif **f** on royal purple `#4C1D95`) from `@fabric/http` `npm run make:icons`. Render listing graphics with `npm run store:assets`. Build the upload zip with `npm run package`.
+
 ## Features
 Additional extension features and configurations can be accessed in the settings page on the top-right corner of the first home-page
 - Wallet password, also used to encrypt data before being stored

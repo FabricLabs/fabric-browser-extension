@@ -9,7 +9,9 @@ import {
 
 describe('fabricHubAllowlist (Passport)', function () {
   it('allows default HTTPS hubs and loopback', function () {
+    assert.strictEqual(isAllowedFabricHub('https://hub.fabric.pub'), true);
     assert.strictEqual(isAllowedFabricHub('https://relay.goon.vc'), true);
+    assert.strictEqual(isAllowedFabricHub('https://goon.vc'), true);
     assert.strictEqual(isAllowedFabricHub('http://127.0.0.1:8080'), true);
   });
 

@@ -51,7 +51,8 @@ import { FabricBackgroundMeshActions } from './FabricBackgroundMeshActions';
 import {
   DEFAULT_DEVICE_LINK_HUB,
   startDeviceLinkAsInitiator,
-  tickDeviceLinkAsInitiator
+  tickDeviceLinkAsInitiator,
+  cancelDeviceLinkSession
 } from '../utils/fabricDeviceLinkSign';
 import { publishIdentityCrossSign, publishIdentityCrossSignKind } from '../utils/identityCrossSignPublish';
 import { REVOKE_TYPE } from '../utils/identityCrossSign';
@@ -868,6 +869,7 @@ const IdentityManager = () => {
     origin: string;
     nonce: string;
     label: string;
+    pollSecret?: string;
   } | null>(null);
   const [deviceLinkError, setDeviceLinkError] = useState<string | null>(null);
   const deviceLinkPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -923,6 +925,11 @@ const IdentityManager = () => {
       return;
     }
     clearDeviceLinkPoll();
+    if (deviceLinkOffer && deviceLinkOffer.sessionId) {
+      void cancelDeviceLinkSession(deviceLinkOffer.hubBase, deviceLinkOffer.sessionId, {
+        pollSecret: deviceLinkOffer.pollSecret
+      });
+    }
     setDeviceLinkBusy(true);
     setDeviceLinkError(null);
     const hubBase = deviceLinkHubBase();
@@ -944,15 +951,20 @@ const IdentityManager = () => {
       hubBase: started.hubBase,
       origin: started.origin,
       nonce: started.nonce,
-      label: started.label
+      label: started.label,
+      pollSecret: started.pollSecret
     });
     let attempts = 0;
     deviceLinkPollRef.current = setInterval(() => {
       attempts += 1;
       if (attempts > 240) {
         clearDeviceLinkPoll();
+        void cancelDeviceLinkSession(started.hubBase, started.sessionId, {
+          pollSecret: started.pollSecret
+        });
         setDeviceLinkBusy(false);
-        setDeviceLinkError('Timed out waiting for the other device to approve.');
+        setDeviceLinkError('Timed out — scan a fresh QR. Offers last about 10 minutes.');
+        setDeviceLinkOffer(null);
         return;
       }
       void (async () => {
@@ -995,7 +1007,7 @@ const IdentityManager = () => {
         setDeviceLinkBusy(false);
       })();
     }, 1500);
-  }, [selectedIdentity, clearDeviceLinkPoll, deviceLinkHubBase, refreshLinkedDevices]);
+  }, [selectedIdentity, clearDeviceLinkPoll, deviceLinkHubBase, refreshLinkedDevices, deviceLinkOffer]);
 
   const handleRevokeLinkedDevice = useCallback(async (device: LinkedDevice) => {
     const pk = selectedIdentity?.privateKeyHex;
@@ -4320,9 +4332,9 @@ const IdentityManager = () => {
                 <List.Header>Add a device</List.Header>
                 <List.Description>
                   <p>
-                    This Passport identity can start the offer. The other device scans <code>fabric://link</code>
-                    (Android / desktop) or opens the HTTPS landing (another Passport on the hub origin).
-                    Each app keeps its own seed.
+                    Pair GoonCitizen Android or desktop with this Passport identity. They scan
+                    {' '}<code>fabric://link</code> (or open the HTTPS landing). Website sign-in is a
+                    different prompt — use Sign in on the site, not this offer. Each app keeps its own seed.
                   </p>
                   <Button
                     primary
@@ -4367,7 +4379,13 @@ const IdentityManager = () => {
                         size="mini"
                         style={{ marginLeft: '0.35em' }}
                         onClick={() => {
+                          const offer = deviceLinkOffer;
                           clearDeviceLinkPoll();
+                          if (offer) {
+                            void cancelDeviceLinkSession(offer.hubBase, offer.sessionId, {
+                              pollSecret: offer.pollSecret
+                            });
+                          }
                           setDeviceLinkOffer(null);
                           setDeviceLinkBusy(false);
                         }}

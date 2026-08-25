@@ -1,6 +1,6 @@
 {
   "name": "@fabric/passport",
-  "description": "Log in to websites with Fabric",
+  "description": "Sign in to Fabric websites with your own cryptographic identity",
   "version": "0.1.0",
   "main": "src/UIElements/popup/index.tsx",
   "private": true,
@@ -14,6 +14,7 @@
     "bundle": "npm run build:prod && webpack --config webpack.config.js --mode production --output-path dist",
     "package": "npm run bundle && node scripts/zip-dist.cjs",
     "icons:from-avatar": "node scripts/render-passport-icons-from-avatar.cjs",
+    "store:assets": "node scripts/render-chrome-store-assets.cjs",
     "coverage": "c8 npm run test:coverage-suite",
     "coverage:baseline": "npm run coverage && node scripts/coverage-baseline.js",
     "make:coverage": "npm run coverage && c8 report --reporter html",
@@ -24,13 +25,13 @@
     "test:ui:release-gate": "npm run build && node scripts/run-ui-release-gate.cjs",
     "test:all": "npm run test && npm run test:ui",
     "ci": "npm run test:all",
-    "report:install": "rm -rf node_modules && echo \"\\n\" > package-lock.json && echo \"$ npm i --allow-git=all\" > reports/install.log && npm i --allow-git=all >> reports/install.log",
+    "report:install": "rm -rf node_modules && mkdir -p reports && rm -f package-lock.json && echo \"$ npm i --allow-git=all\" > reports/install.log && npm i --allow-git=all >> reports/install.log",
     "report:todo": "grep --exclude-dir=.git --exclude-dir=_book --exclude-dir=assets --exclude-dir=node_modules --exclude-dir=reports --exclude-dir=coverage --exclude-dir=docs -rEI \"TODO|FIXME\" --exclude-dir=dist . > reports/TODO.txt",
     "review:coverage": "npm run make:coverage && http-server -p 8000 coverage",
     "start": "webpack serve --config webpack.config.js",
     "serve:test": "npm run build && node scripts/local-test-server.js",
-    "test:unit": "NODE_ENV=test mocha tests/bech32m.test.ts tests/bip32.test.ts tests/bitcoinReceiveAddress.unit.ts tests/bitcoinWithdraw.unit.ts tests/identityOutbandValue.unit.ts tests/fabricHttp402.unit.ts tests/fabricSiteLoginSign.unit.ts tests/fabricDeviceLinkSign.unit.ts tests/fabricDeviceLinkFlow.unit.ts tests/identityCrossSign.unit.ts tests/identityCrossSignPublish.unit.ts tests/linkedDevices.unit.ts tests/fabricWireNotify.unit.ts tests/arcPublishEvaluate.unit.ts tests/fabricHubAllowlist.unit.ts tests/federationWalletInvite.unit.ts tests/adversarialEnvironment.basics.unit.ts tests/encryptedDatastore.unit.ts",
-    "test:extension": "NODE_ENV=test FABRIC_ACTION_DEBUG_URL=http://127.0.0.1:3044/api/endpoint npx playwright install chromium && npm run build && NODE_ENV=test mocha tests/extension.test.ts",
+    "test:unit": "NODE_ENV=test node ./node_modules/mocha/bin/mocha.js tests/bech32m.test.ts tests/bip32.test.ts tests/bitcoinReceiveAddress.unit.ts tests/bitcoinWithdraw.unit.ts tests/identityOutbandValue.unit.ts tests/fabricHttp402.unit.ts tests/fabricSiteLoginSign.unit.ts tests/fabricDeviceLinkSign.unit.ts tests/fabricDeviceLinkFlow.unit.ts tests/identityCrossSign.unit.ts tests/identityCrossSignPublish.unit.ts tests/linkedDevices.unit.ts tests/passportGooncitizenLink.unit.ts tests/fabricWireNotify.unit.ts tests/arcPublishEvaluate.unit.ts tests/fabricHubAllowlist.unit.ts tests/federationWalletInvite.unit.ts tests/adversarialEnvironment.basics.unit.ts tests/encryptedDatastore.unit.ts tests/fabricActivityStorage.unit.ts tests/chromeStoreListing.unit.ts",
+    "test:extension": "NODE_ENV=test FABRIC_ACTION_DEBUG_URL=http://127.0.0.1:3044/api/endpoint npx playwright install chromium && npm run build && NODE_ENV=test node ./node_modules/mocha/bin/mocha.js tests/extension.test.ts",
     "playwright:install": "playwright install chromium",
     "test:local": "npm run serve:test",
     "test": "npm run test:unit && npm run test:extension"
@@ -123,7 +124,8 @@
     "yamljs": "=0.3.0"
   },
   "engines": {
-    "node": "24.15.0"
+    "node": "24.15.0",
+    "npm": ">=12.0.0"
   },
   "files": [
     "src/**",

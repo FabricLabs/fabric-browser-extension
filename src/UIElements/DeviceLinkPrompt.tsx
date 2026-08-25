@@ -155,8 +155,9 @@ export default function DeviceLinkPrompt (props: Props): React.ReactElement | nu
       <Modal.Header>Link this device</Modal.Header>
       <Modal.Content>
         <p>
-          Any Fabric peer (Passport, Android, or desktop) can create or accept this link.
-          Separate seeds, dual BIP340 Schnorr. Approve only if you started this on the other device.
+          Link this Passport identity to GoonCitizen Android or desktop (separate seeds).
+          After both approve, those apps sync chat over Fabric. This is not website
+          login. Approve only if you started this on the other device.
         </p>
         {needsUnlock || !privateKeyHex ? (
           <Message warning>

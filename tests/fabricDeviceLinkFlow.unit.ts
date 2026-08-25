@@ -271,7 +271,9 @@ describe('device-link flow (Passport client ↔ Hub protocol)', function () {
     });
     assert.strictEqual(offer.ok, true);
     if (!offer.ok) return;
-    const cancelled = await cancelDeviceLinkSession(HUB, offer.sessionId);
+    const cancelled = await cancelDeviceLinkSession(HUB, offer.sessionId, {
+      pollSecret: offer.pollSecret
+    });
     assert.strictEqual(cancelled.ok, true);
     if (cancelled.ok) assert.equal(cancelled.cancelled, true);
     const gone = await fetchPendingDeviceLink(HUB, offer.sessionId);

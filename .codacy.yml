@@ -1,11 +1,8 @@
 # Codacy — generated / vendor / report trees must not gate RSI (0-new-issue cap).
 # https://docs.codacy.com/repositories-configure/codacy-configuration-file/
+# Disable remark-lint / duplication in Codacy Code patterns (`.codacy.yml` cannot toggle tools).
 ---
 engines:
-  remark-lint:
-    enabled: false
-  duplication:
-    enabled: false
   lizard:
     exclude_paths:
       - "src/UIElements/**"

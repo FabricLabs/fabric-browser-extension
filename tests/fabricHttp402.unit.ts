@@ -95,10 +95,15 @@ describe('fabricHttp402 (402 payment headers)', () => {
     assert.ok(decoded);
     assert.strictEqual(decoded?.documentExchange?.offerType, 'FABRIC_DOCUMENT_OFFER');
     assert.strictEqual(decoded?.documentOffer?.purchasePriceSats, 110);
-    // Overlay (`fabric402OverlayDom`) only renders purchasePriceSats. Hub HTTP
-    // strips costBasisSats; if a leaky peer still sends it, ignore it here.
     const shown = `Document price: ${Math.round(Number(decoded?.documentOffer?.purchasePriceSats)).toLocaleString('en-US')} sats`;
     assert.ok(shown.includes('110'));
     assert.ok(!shown.includes('100'));
+    assert.ok(!shown.toLowerCase().includes('cost'));
+    assert.strictEqual(
+      decoded?.documentOffer && 'costBasisSats' in (decoded.documentOffer as object)
+        ? (decoded.documentOffer as { costBasisSats?: number }).costBasisSats
+        : undefined,
+      100
+    );
   });
 });

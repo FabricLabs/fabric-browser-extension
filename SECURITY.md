@@ -2,6 +2,7 @@
 Browser wallet and identity extension for Fabric site login and mesh participation.
 
 **Outstanding queue:** [docs/OUTSTANDING.md](docs/OUTSTANDING.md).
+**Posture, known gaps, and release recommendations:** [AUDIT.md](AUDIT.md).
 
 ## Adversarial environment
 Fabric networks are intended for deployment where **peers, relays, hubs, and operators may be hostile**. Design and review against:
@@ -18,7 +19,7 @@ The extension refuses to sign site-login / device-link completions for non-allow
 ## Outstanding (PR #3 / RSI follow-ups)
 - **Page-world 402 fetch patch** — `installFabric402FetchInterceptor` runs in the isolated content script (login/device-link messaging needs that world). Page `fetch` stays unpatched until a page-world injector lands. Hub/UI 402 keeps using extension UI prompts. Module `src/content/fabric402FetchPatch.ts` exists; the limit is world isolation.
 - **xpub in query strings** — wallet balance / history still use Hub `GET /services/bitcoin/xpub…` (Hub API shape); moving xpub into POST bodies needs coordinated Hub endpoints.
-- ~~**`@fabric/core` / `@fabric/http` pin hygiene**~~ — `package.json` stays on `FabricLabs/fabric#feature/rsi` and `FabricLabs/fabric-http#feature/rsi`. Lockfile SHAs **`f1b5e147d6d48a7689701527a55d1829227529b5`** / **`1b162e355f0c923191f709ac897f1301d995f556`**. Bump with Hub / http; re-pin releases to those SHAs. `report:install` wipes the lockfile then `npm i --allow-git=all`.
+- ~~**`@fabric/core` / `@fabric/http` pin hygiene**~~ — `package.json` stays on `FabricLabs/fabric#feature/rsi` and `FabricLabs/fabric-http#feature/rsi`. Lockfile SHAs **`9938917804e2bf5ba5cf1fab7bf0975129d9063f`** / **`7d7f1c7c918dabe7f2ae59d638b16e1a020d08bd`**. Bump with Hub / http; re-pin releases to those SHAs. `report:install` removes `package-lock.json` then `npm i --allow-git=all`.
 - ~~**Cleartext production hub defaults**~~ — Passport allowlist matches `@fabric/http`: HTTPS-only network hubs; cleartext requires `opts.extra`. Loopback `http://` remains allowed.
 - ~~**Device-link Origin/Referer**~~ — device-link fetch/POST omit client-set Origin/Referer; Hub allowlisted thin-client `chrome-extension:` / `moz-extension:` Origins.
 - **npm audit (prod omit-dev)** — remaining findings include transitive `elliptic` (crypto-browserify via `@fabric/http`), `uuid` (jayson via core), and `@babel/core` sourceMappingURL advisory on some trees. Prefer upstream bumps / careful overrides over `npm audit fix --force`. Re-check after each Fabric pin bump.
@@ -41,7 +42,7 @@ The extension refuses to sign site-login / device-link completions for non-allow
 1. `npm run test:unit` before merging identity / allowlist changes.
 2. Never commit mnemonics, `.pem` signing keys for store packages, or unlocked datastores. Chrome Web Store listing copy and graphics: [`docs/CHROME_WEB_STORE.md`](docs/CHROME_WEB_STORE.md).
 3. Treat every web origin as potentially malicious when requesting signatures.
-4. Prefer `npm ci` / keep `package-lock.json`; `npm run report:install` wipes the lockfile then `npm i --allow-git=all`.
+4. Prefer `npm ci` / keep `package-lock.json`; `npm run report:install` removes `package-lock.json` then `npm i --allow-git=all`.
 
 ## Disclosure
 Canonical monitored contact: **`security@fabric.pub`**. GitHub Security Advisories are the alternate private channel.

@@ -13,7 +13,7 @@ import { deviceLinkFetchHeaders } from './fabricDeviceLinkFetch';
 import type { DeviceLinkPending } from './fabricDeviceLinkFetch';
 
 export type { DeviceLinkPending } from './fabricDeviceLinkFetch';
-export { fetchPendingDeviceLink } from './fabricDeviceLinkFetch';
+export { fetchPendingDeviceLink, cancelDeviceLinkSession } from './fabricDeviceLinkFetch';
 
 const DEVICE_LINK_PREFIX = 'fabric:device-link:1';
 export const DEFAULT_DEVICE_LINK_HUB = 'https://relay.goon.vc';
@@ -56,6 +56,7 @@ function jsonHeaders (): Record<string, string> {
 export type DeviceLinkOffer = {
   sessionId: string;
   nonce: string;
+  pollSecret?: string;
   label: string;
   hubBase: string;
   origin: string;
@@ -108,6 +109,7 @@ export async function startDeviceLinkAsInitiator (opts: {
       error?: string;
       sessionId?: string;
       nonce?: string;
+      pollSecret?: string;
       protocolUrl?: string;
     };
     if (!res.ok || !data.ok || !data.sessionId) {
@@ -119,6 +121,7 @@ export async function startDeviceLinkAsInitiator (opts: {
       ok: true,
       sessionId: data.sessionId,
       nonce: data.nonce || nonce,
+      pollSecret: data.pollSecret,
       label,
       hubBase,
       origin,
@@ -217,7 +220,8 @@ export async function tickDeviceLinkAsInitiator (opts: {
     if (!post.ok || !done.ok) {
       return { ok: false, error: (done && done.error) || `HTTP ${post.status}` };
     }
-    const responder = done.responder || st.responder;
+    // Hub POST …/signatures returns { id, xpub } only; pubkeyHex is on the GET.
+    const responder = Object.assign({}, st.responder || {}, done.responder || {});
     return {
       ok: true,
       status: String(done.status || 'linked'),

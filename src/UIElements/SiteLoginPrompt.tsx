@@ -138,8 +138,9 @@ export default function SiteLoginPrompt (props: Props): React.ReactElement | nul
       <Modal.Header>Sign in to website</Modal.Header>
       <Modal.Content>
         <p>
-          A site is asking Fabric Passport to prove your identity. Approve only if you
-          started this login.
+          A website is asking Fabric Passport to prove this identity. This is
+          site login, not device linking — chat stays on GoonCitizen. Approve only
+          if you started this login.
         </p>
         {needsUnlock || !privateKeyHex ? (
           <Message warning>
