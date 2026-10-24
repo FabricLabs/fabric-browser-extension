@@ -1,6 +1,6 @@
 module.exports = {
   require: ['ts-node/register'],
-  extension: ['ts'],
+  extension: ['ts', 'js'],
   recursive: true,
   timeout: 5000
 };

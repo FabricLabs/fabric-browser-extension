@@ -64,9 +64,9 @@ describe('Chrome Web Store listing pack', function () {
       ...(manifest.content_scripts || []).map((c) => c.matches || []),
       ...(manifest.web_accessible_resources || []).map((r) => r.matches || [])
     );
-    const ported = patterns.filter((p) => /^[a-z]+:\/\/[^/]*:(\d+|\*)/.test(p));
+    const ported = patterns.filter((p) => /^[a-z]+:\/\/(\[[^\]]*\]|[^/:[]*):(\d+|\*)/.test(p));
     assert.deepStrictEqual(ported, [], `match patterns must not specify a port: ${ported.join(', ')}`);
-    for (const loopback of ['http://localhost/*', 'http://127.0.0.1/*']) {
+    for (const loopback of ['http://localhost/*', 'http://127.0.0.1/*', 'http://[::1]/*']) {
       assert.ok(manifest.host_permissions.includes(loopback), `missing ${loopback}`);
       assert.ok(
         (manifest.content_scripts || []).some((c) => (c.matches || []).includes(loopback)),

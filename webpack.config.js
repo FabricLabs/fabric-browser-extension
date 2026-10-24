@@ -25,17 +25,28 @@ const FABRIC_HTTP_ASSETS_ALIASES = Array.from(new Set([
   path.resolve(__dirname, '../fabric-http/assets')
 ].filter((p) => fs.existsSync(p))));
 
-/** Prefer sibling / FABRIC_HTTP checkout so invite JSON helpers stay current. */
-function resolveFabricHttpInviteModule () {
+/** Core tree for `fabric:` site login (same order as `src/utils/loadFabricSiteLogin.js`). */
+function resolveFabricSiteLoginCoreRoot () {
   const roots = [];
-  if (process.env.FABRIC_HTTP) roots.push(path.resolve(process.env.FABRIC_HTTP));
-  roots.push(path.resolve(__dirname, '../fabric-http'));
-  roots.push(path.resolve(__dirname, 'node_modules/@fabric/http'));
+  if (process.env.FABRIC_CORE) roots.push(path.resolve(process.env.FABRIC_CORE));
+  roots.push(path.resolve(__dirname, '../fabric-clean'));
+  roots.push(path.resolve(__dirname, 'node_modules/@fabric/core'));
   for (const root of roots) {
-    const file = path.join(root, 'functions', 'federationContractInvite.js');
-    if (fs.existsSync(file)) return file;
+    if (fs.existsSync(path.join(root, 'functions', 'fabricSiteLogin.js'))) return root;
   }
-  return path.resolve(__dirname, 'node_modules/@fabric/http/functions/federationContractInvite.js');
+  throw new Error('fabric: site login needs @fabric/core with functions/fabricSiteLogin.js (set FABRIC_CORE or clone ../fabric-clean)');
+}
+/** Core tree for named federations (same order as `src/utils/loadFabricFederation.js`). */
+function resolveFabricFederationCoreRoot () {
+  const roots = [];
+  if (process.env.FABRIC_CORE) roots.push(path.resolve(process.env.FABRIC_CORE));
+  roots.push(path.resolve(__dirname, '../fabric-clean'));
+  roots.push(path.resolve(__dirname, 'node_modules/@fabric/core'));
+  for (const root of roots) {
+    const file = path.join(root, 'types', 'federation.js');
+    if (fs.existsSync(file) && fs.readFileSync(file, 'utf8').includes('MESSAGE_TYPES')) return root;
+  }
+  throw new Error('Federations need @fabric/core whose types/federation has the member messages (set FABRIC_CORE or clone ../fabric-clean)');
 }
 const MiniCssExtractPlugin = require('mini-css-extract-plugin');
 const HtmlWebpackPlugin = require('html-webpack-plugin');
@@ -44,7 +55,7 @@ const ProgressBar = require('progress-bar-webpack-plugin');
 const TerserPlugin = require('terser-webpack-plugin');
 
 module.exports = (env) => {
-  const isProduction = env.NODE_ENV === 'production';
+  const isProduction = (env && env.NODE_ENV === 'production') || process.env.NODE_ENV === 'production';
 
   return {
     mode: isProduction ? 'production' : 'development',
@@ -96,7 +107,9 @@ module.exports = (env) => {
           vendor: {
             test: /[\\/]node_modules[\\/]/,
             name: 'vendors',
-            chunks: 'all'
+            // Content scripts and the service worker load as single files; only the popup HTML
+            // includes the vendors chunk.
+            chunks: (chunk) => chunk.name === 'popup'
           }
         }
       }
@@ -109,8 +122,10 @@ module.exports = (env) => {
       fallback: {
         // fabricNativeAccel is stubbed below; keep fs/path from breaking other Node-only probes.
         fs: false,
+        // Core `Service` lazy-requires `Peer` (TCP); never reached in the extension.
+        net: false,
         path: require.resolve('path-browserify'),
-        crypto: require.resolve('crypto-browserify'),
+        crypto: require.resolve('@fabric/http/functions/browserCrypto'),
         stream: require.resolve('stream-browserify'),
         buffer: require.resolve('buffer/'),
         util: require.resolve('util/'),
@@ -118,15 +133,15 @@ module.exports = (env) => {
         process: require.resolve('process/browser')
       },
       alias: {
-        vm: 'vm-browserify',
         'process/browser': require.resolve('process/browser'),
         // Package exports only expose ./constants for `require`; map explicitly for webpack/browser.
         '@fabric/core/constants': path.resolve(__dirname, 'node_modules/@fabric/core/constants.js'),
         '@fabric/core/types/message': path.resolve(__dirname, 'node_modules/@fabric/core/types/message.js'),
         '@fabric/http/assets': path.resolve(__dirname, 'node_modules/@fabric/http/assets'),
-        '@fabric/http/functions/federationContractInvite': resolveFabricHttpInviteModule(),
-        // Browser: skip Node fs/createRequire loader; use the aliased http module directly.
-        [path.resolve(__dirname, 'src/utils/loadFederationContractInvite.js')]: resolveFabricHttpInviteModule()
+        'fabric-site-login-core': resolveFabricSiteLoginCoreRoot(),
+        [path.resolve(__dirname, 'src/utils/loadFabricSiteLogin.js')]: path.resolve(__dirname, 'src/utils/fabricSiteLoginCore.browser.js'),
+        'fabric-federation-core': resolveFabricFederationCoreRoot(),
+        [path.resolve(__dirname, 'src/utils/loadFabricFederation.js')]: path.resolve(__dirname, 'src/utils/fabricFederationCore.browser.js')
       }
     },
     module: {

@@ -9,9 +9,18 @@ const Identity = require('@fabric/core/types/identity');
 const {
   verifyFabricDesktopLoginSignedPayload
 } = require('@fabric/http/functions/fabricSiteLoginVerify');
-import { buildClientSignedLoginBody } from '../src/utils/fabricSiteLoginSign';
+import { buildClientSignedLoginBody, parseHubLoginChallenge } from '../src/utils/fabricSiteLoginSign';
 
 describe('fabricSiteLoginSign', function () {
+  it('reads origin and nonce from a /sessions challenge for its own session only', function () {
+    const nonce = 'ab'.repeat(32);
+    const sessionId = 'cd'.repeat(24);
+    const message = `fabric:hub-login:1:${nonce}:${sessionId}:https://relay.goon.vc`;
+    assert.deepStrictEqual(parseHubLoginChallenge(message, sessionId), { origin: 'https://relay.goon.vc', nonce });
+    assert.strictEqual(parseHubLoginChallenge(message, 'ef'.repeat(24)), null);
+    assert.strictEqual(parseHubLoginChallenge('fabric:hub-login:1:nope', sessionId), null);
+  });
+
   it('builds a Hub-verifiable client login body from HD Key', function () {
     const key = new Key();
     const ident = new Identity(key);

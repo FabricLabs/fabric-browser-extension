@@ -26,16 +26,30 @@ describe('fabricWireNotify', function () {
     assert.strictEqual((parsed!.payload.object as { documentId: string }).documentId, 'doc-1');
   });
 
-  it('parses binary P2P_CHAT_MESSAGE frames (ArrayBuffer)', function () {
-    const chat = {
-      type: 'P2P_CHAT_MESSAGE',
-      object: { content: 'hello mesh', created: Date.now() }
-    };
-    const wire = sign('P2P_CHAT_MESSAGE', JSON.stringify(chat)).toBuffer();
+  it('notifies on raw UTF-8 P2P_CHAT_MESSAGE bodies', function () {
+    const wire = sign('P2P_CHAT_MESSAGE', 'hello').toBuffer();
     const ab = wire.buffer.slice(wire.byteOffset, wire.byteOffset + wire.byteLength);
     const parsed = tryParseNotifiableFabricFrame(ab);
     assert.ok(parsed);
     assert.strictEqual(parsed!.messageType, 'P2P_CHAT_MESSAGE');
+    assert.strictEqual(parsed!.payload.content, 'hello');
+    assert.strictEqual(parsed!.payload.text, 'hello');
+    assert.strictEqual(parsed!.payload.actor, undefined);
+  });
+
+  it('does not treat a JSON chat envelope as the mesh body', function () {
+    const chat = {
+      type: 'P2P_CHAT_MESSAGE',
+      actor: { id: 'user-1' },
+      object: { content: 'hello mesh', created: Date.now() }
+    };
+    const wire = sign('P2P_CHAT_MESSAGE', JSON.stringify(chat)).toBuffer();
+    const parsed = tryParseNotifiableFabricFrame(wire);
+    assert.ok(parsed);
+    assert.strictEqual(parsed!.messageType, 'P2P_CHAT_MESSAGE');
+    assert.strictEqual(parsed!.payload.content, 'hello mesh');
+    assert.strictEqual(parsed!.payload.actor, undefined);
+    assert.strictEqual((parsed!.payload as { type?: string }).type, undefined);
   });
 
   it('unwraps Peer-mesh P2P_RELAY (raw inner Message bytes)', function () {
@@ -48,6 +62,8 @@ describe('fabricWireNotify', function () {
     const parsed = tryParseNotifiableWireMessage(outer);
     assert.ok(parsed);
     assert.strictEqual(parsed!.messageType, 'P2P_CHAT_MESSAGE');
+    assert.strictEqual(parsed!.payload.content, 'via relay');
+    assert.strictEqual(parsed!.payload.actor, undefined);
   });
 
   it('unwraps Hub JSON P2P_RELAY hops envelope', function () {
@@ -64,6 +80,8 @@ describe('fabricWireNotify', function () {
     const parsed = tryParseNotifiableFabricFrame(outer.toBuffer());
     assert.ok(parsed);
     assert.strictEqual(parsed!.messageType, 'P2P_CHAT_MESSAGE');
+    assert.strictEqual(parsed!.payload.content, 'ws hops');
+    assert.strictEqual(parsed!.payload.actor, undefined);
   });
 
   it('still accepts legacy plain JSON string frames', function () {

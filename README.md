@@ -9,6 +9,19 @@ Security posture and leftover work: [SECURITY.md](SECURITY.md), [docs/OUTSTANDIN
 
 Chrome Web Store listing pack (copy-paste answers, privacy policy, icons, screenshots): [docs/CHROME_WEB_STORE.md](docs/CHROME_WEB_STORE.md). Toolbar and store icons are the Fabric lettermark (serif **f** on royal purple `#4C1D95`) from `@fabric/http` `npm run make:icons`. Render listing graphics with `npm run store:assets`. Build the upload zip with `npm run package`.
 
+### Playnet / local publish
+With a local Hub (or production playnet) reachable over HTTP JSON-RPC:
+
+```bash
+npm run package                         # → zip/fabric-passport-v*.zip
+npm run publish:builds -- --dry-run     # Hub Documents catalog
+npm run sync:hub-downloads -- --dry-run # sibling hub.fabric.pub /downloads/extension/
+npm run playnet:publish                 # package + Documents + downloads sync
+npm run playnet:publish -- --production # Documents → https://hub.fabric.pub
+```
+
+`publish:builds` runs Hub `CreateDocument` + `PublishDocument` so peers see the zip on inventory (set `FABRIC_HUB_ADMIN_TOKEN` for efficient `filePath` ingest). `sync:hub-downloads` copies into the sibling Hub static FileBrowser (`FABRIC_HUB_ROOT` / `--hub-root` if not `../hub.fabric.pub`).
+
 ## Features
 Additional extension features and configurations can be accessed in the settings page on the top-right corner of the first home-page
 - Wallet password, also used to encrypt data before being stored
@@ -84,7 +97,7 @@ window.postMessage({
 }, location.origin);
 ```
 
-Passport queues the challenge, the popup approves, and POSTs BIP340 `{ signature, pubkeyHex, identity }` to `/sessions/:id/signatures` (same body as GoonCitizen). Poll `GET /sessions/:id` until `status: 'signed'`.
+Passport queues the challenge, the popup approves, and POSTs a signed `SiteLoginResponse` as `{ fabric: "fabric:…" }` to `/sessions/:id/signatures` (same body as GoonCitizen), bound to the origin and nonce in the server's challenge. Poll `GET /sessions/:id` until `status: 'signed'`.
 
 ### Mutual device-link (separate seeds)
 Hub Identity → **Create link offer** → `fabric://link?…`, or on the Hub page **Approve with Passport**:
@@ -98,6 +111,9 @@ window.postMessage({
 ```
 
 Passport signs as **responder**; the initiator countersigns. Seeds stay per-app. After `status: linked`, Passport publishes `IdentityCrossSign` (mutual BIP340) so the mesh can treat the two pubkeys as one identity cluster. `postMessage` names stay `FABRIC_SITE_LOGIN_*` / `FABRIC_DEVICE_LINK_*`.
+
+### Federations (multisig)
+Wallet → **Federations** makes Passport a member of named federations, the same k-of-n Taproot vaults Hubs run (`@fabric/core` `types/federation`): create one with other Passports and/or the active Hub, join invitations, request a payment, and sign others' requests with this identity's key. Every withdrawal PSBT is rebuilt from the vault and checked against its request id before signing. Passport has no Fabric peer, so the active Hub carries its signed `CONTRACT_MESSAGE` frames (`/services/federations/messages`, relayed to the mesh) and reads the vault (`/services/federations/:id/vault`); the Hub is trusted for delivery only. In a federation without that Hub, the member whose signature completes the threshold finalizes and posts the transaction (`/services/federations/:id/transactions`). Code: `src/services/federations.ts`, `src/UIElements/FederationsPanel.tsx`. GoonCitizen's `FederationContractInvite` is a group invitation, joined in GoonCitizen.
 
 ## Encryption
 Data stored in leveldb is encrypted with the subtleCrypto AES-GCM algorithm. Encryption methods are found in fabric/core/types/subtleCrypto

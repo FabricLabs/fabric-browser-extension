@@ -15,38 +15,49 @@ import type { DeviceLinkPending } from './fabricDeviceLinkFetch';
 export type { DeviceLinkPending } from './fabricDeviceLinkFetch';
 export { fetchPendingDeviceLink, cancelDeviceLinkSession } from './fabricDeviceLinkFetch';
 
-const DEVICE_LINK_PREFIX = 'fabric:device-link:1';
+const DEVICE_LINK_PREFIX = 'fabric:device-link:2';
 export const DEFAULT_DEVICE_LINK_HUB = 'https://relay.goon.vc';
 
+const SESSION_ID_RE = /^[a-f0-9]{48}$/;
+const NONCE_RE = /^[a-f0-9]{64}$/;
+
+function safeDeviceLabel (label: string): string {
+  return String(label || 'device').replace(/:/g, '-').slice(0, 64);
+}
+
+/** Mutual-link message both devices sign; binds the Hub session id (v2, as `@fabric/http`). */
 export function buildDeviceLinkMessage (
+  sessionId: string,
   nonce: string,
   initiatorId: string,
   responderId: string,
   label: string
 ): string {
-  const safeLabel = String(label || 'device').replace(/:/g, '-').slice(0, 64);
-  return `${DEVICE_LINK_PREFIX}:${nonce}:${initiatorId}:${responderId}:${safeLabel}`;
+  const sid = String(sessionId || '').trim().toLowerCase();
+  const n = String(nonce || '').trim().toLowerCase();
+  if (!SESSION_ID_RE.test(sid)) throw new Error('sessionId must be 48 hex chars');
+  if (!NONCE_RE.test(n)) throw new Error('nonce must be 64 hex chars');
+  return `${DEVICE_LINK_PREFIX}:${sid}:${n}:${initiatorId}:${responderId}:${safeDeviceLabel(label)}`;
 }
 
+/** Offer the initiator signs to commit a prepared session (v2). */
 export function buildDeviceLinkOfferMessage (
+  sessionId: string,
   nonce: string,
   initiatorId: string,
   label: string,
   origin: string
 ): string {
-  const safeLabel = String(label || 'device').replace(/:/g, '-').slice(0, 64);
-  return `${DEVICE_LINK_PREFIX}:offer:${nonce}:${initiatorId}:${safeLabel}:${origin}`;
+  const sid = String(sessionId || '').trim().toLowerCase();
+  const n = String(nonce || '').trim().toLowerCase();
+  if (!SESSION_ID_RE.test(sid)) throw new Error('sessionId must be 48 hex chars');
+  if (!NONCE_RE.test(n)) throw new Error('nonce must be 64 hex chars');
+  return `${DEVICE_LINK_PREFIX}:offer:${sid}:${n}:${initiatorId}:${safeDeviceLabel(label)}:${origin}`;
 }
 
 export function httpsLandingUrl (hubBase: string, sessionId: string): string {
   const base = String(hubBase || '').replace(/\/$/, '');
   return `${base}/#device-link=${encodeURIComponent(sessionId)}`;
-}
-
-function randomNonceHex (): string {
-  const u = new Uint8Array(32);
-  crypto.getRandomValues(u);
-  return Array.from(u).map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
 function jsonHeaders (): Record<string, string> {
@@ -86,41 +97,67 @@ export async function startDeviceLinkAsInitiator (opts: {
   }
   const probe = buildClientSignedLoginBody('fabric:device-link:id-probe', opts.privateKeyHex, opts.xpub);
   const initiatorId = probe.identity.id;
-  const nonce = randomNonceHex();
-  const label = String(opts.label || 'Passport').replace(/:/g, '-').slice(0, 64);
-  const offerMessage = buildDeviceLinkOfferMessage(nonce, initiatorId, label, origin);
-  const signed = buildClientSignedLoginBody(offerMessage, opts.privateKeyHex, opts.xpub);
+  const label = safeDeviceLabel(opts.label || 'Passport');
+  type OfferReply = {
+    ok?: boolean;
+    error?: string;
+    sessionId?: string;
+    nonce?: string;
+    pollSecret?: string;
+    offerMessage?: string;
+    protocolUrl?: string;
+  };
   try {
+    // The Hub picks the session id and nonce; Passport signs only an offer it rebuilt itself.
+    const prep = await fetch(`${hubBase}/device-links`, {
+      method: 'POST',
+      headers: jsonHeaders(),
+      body: JSON.stringify({ origin, label, identity: probe.identity }),
+      cache: 'no-store'
+    });
+    const prepared = (await prep.json().catch(() => ({}))) as OfferReply;
+    if (!prep.ok || !prepared.ok) {
+      return { ok: false, error: (prepared && prepared.error) || `HTTP ${prep.status}` };
+    }
+    const sessionId = String(prepared.sessionId || '').toLowerCase();
+    const nonce = String(prepared.nonce || '').toLowerCase();
+    if (!SESSION_ID_RE.test(sessionId) || !NONCE_RE.test(nonce)) {
+      return { ok: false, error: 'hub did not return a device-link session (it may predate session-bound links)' };
+    }
+    const offerMessage = buildDeviceLinkOfferMessage(sessionId, nonce, initiatorId, label, origin);
+    if (prepared.offerMessage && prepared.offerMessage !== offerMessage) {
+      return { ok: false, error: 'hub offer does not match this identity, label, or origin' };
+    }
+    const signed = buildClientSignedLoginBody(offerMessage, opts.privateKeyHex, opts.xpub);
     const res = await fetch(`${hubBase}/device-links`, {
       method: 'POST',
       headers: jsonHeaders(),
       body: JSON.stringify({
         origin,
+        sessionId,
         label,
-        nonce,
         identity: signed.identity,
         pubkeyHex: signed.pubkeyHex,
         signature: signed.signature
       }),
       cache: 'no-store'
     });
-    const data = (await res.json().catch(() => ({}))) as {
-      ok?: boolean;
-      error?: string;
-      sessionId?: string;
-      nonce?: string;
-      pollSecret?: string;
-      protocolUrl?: string;
-    };
-    if (!res.ok || !data.ok || !data.sessionId) {
-      return { ok: false, error: (data && data.error) || `HTTP ${res.status}` };
+    const committed = (await res.json().catch(() => ({}))) as OfferReply;
+    if (!res.ok || !committed.ok) {
+      return { ok: false, error: (committed && committed.error) || `HTTP ${res.status}` };
     }
+    const data = {
+      sessionId,
+      nonce,
+      pollSecret: committed.pollSecret || prepared.pollSecret,
+      protocolUrl: committed.protocolUrl || prepared.protocolUrl
+    };
     const protocolUrl = data.protocolUrl ||
       `fabric://link?sessionId=${encodeURIComponent(data.sessionId)}&hub=${encodeURIComponent(origin)}`;
     return {
       ok: true,
       sessionId: data.sessionId,
-      nonce: data.nonce || nonce,
+      nonce: data.nonce,
       pollSecret: data.pollSecret,
       label,
       hubBase,
@@ -195,7 +232,24 @@ export async function tickDeviceLinkAsInitiator (opts: {
     if (st.status !== 'accepted' || !st.linkMessage) {
       return { ok: true, status: String(st.status || 'unknown'), sessionId: opts.sessionId };
     }
-    const countersigned = buildClientSignedLoginBody(st.linkMessage, opts.privateKeyHex, opts.xpub);
+    const responderId = (st.responder && st.responder.id) || '';
+    const probe = buildClientSignedLoginBody('fabric:device-link:id-probe', opts.privateKeyHex, opts.xpub);
+    let expected = '';
+    try {
+      expected = buildDeviceLinkMessage(
+        opts.sessionId,
+        String(opts.nonce || st.nonce || ''),
+        probe.identity.id,
+        responderId,
+        String(opts.label || st.label || 'device')
+      );
+    } catch (e: unknown) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+    if (!responderId || responderId === probe.identity.id || st.linkMessage !== expected) {
+      return { ok: false, error: 'hub link message does not match this session' };
+    }
+    const countersigned = buildClientSignedLoginBody(expected, opts.privateKeyHex, opts.xpub);
     const post = await fetch(
       `${base}/device-links/${encodeURIComponent(opts.sessionId)}/signatures`,
       {
@@ -254,12 +308,18 @@ export async function completeDeviceLinkAsResponder (
   if (responderId === pending.initiator.id) {
     return { ok: false, error: 'Cannot link a device to itself — use a different Passport identity' };
   }
-  const linkMessage = buildDeviceLinkMessage(
-    pending.nonce,
-    pending.initiator.id,
-    responderId,
-    pending.label || 'device'
-  );
+  let linkMessage: string;
+  try {
+    linkMessage = buildDeviceLinkMessage(
+      pending.sessionId,
+      pending.nonce,
+      pending.initiator.id,
+      responderId,
+      pending.label || 'device'
+    );
+  } catch (e: unknown) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
   const body = buildClientSignedLoginBody(linkMessage, privateKeyHex, xpub);
   const base = String(pending.hubBase || '').replace(/\/$/, '');
   try {

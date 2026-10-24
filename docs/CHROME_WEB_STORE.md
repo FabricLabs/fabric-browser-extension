@@ -4,6 +4,7 @@ Copy-paste pack for [Chrome Web Store Developer Dashboard](https://chrome.google
 Do not upload `*.pem`, `*.crx`, or `zip/*.zip` to git. Chrome signs the item; local packing keys stay off-repo.
 
 **Package:** `npm run package` → `zip/fabric-passport-v0.1.0.zip` (from `dist/`, test harness pages stripped).  
+**Playnet publish (local Hub Documents + sibling `/downloads/extension/`):** `npm run playnet:publish` (or `publish:builds` / `sync:hub-downloads` separately).  
 **Listing graphics:** `npm run store:assets` writes `store/`.  
 **Privacy URL (after Hub deploy):** `https://hub.fabric.pub/passport-privacy.html`  
 Canonical policy: [`docs/privacy-policy.md`](privacy-policy.md) · hosted HTML: [`store/privacy.html`](../store/privacy.html) (copy onto Hub as `assets/passport-privacy.html`).

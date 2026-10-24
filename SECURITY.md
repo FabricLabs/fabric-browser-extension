@@ -14,6 +14,15 @@ Fabric networks are intended for deployment where **peers, relays, hubs, and ope
 
 The extension refuses to sign site-login / device-link completions for non-allowlisted Hub origins. Seed material stays in encrypted extension storage; content scripts are untrusted relative to the background.
 
+## Local-first `fabric:` sign-in
+Pages, Passport, and the desktop apps exchange canonical `fabric:<frame>` strings: a whole signed AMP frame (base64url or hex), checked with `@fabric/core` `decodeFabricUri` (magic, size, body hash, known opcode, BIP340 author). Types: `SITE_LOGIN_REQUEST` 0x4230, `SITE_LOGIN_RESPONSE` 0x4231, `FABRIC_SIGN_REQUEST` 0x4232.
+
+- **Origin comes from the browser.** The content script forwards `FABRIC_MESSAGE` posts; the background binds the request to `sender.origin` / `sender.url`, never to a field the page wrote. A site-signed request that names another origin is refused; an unsigned one is rebuilt with the real origin. Only HTTPS and loopback origins may ask.
+- **The user picks the identity** in the popup: Passport signs directly, or Passport asks a linked desktop.
+- **Desktop signers** (Hub on 8080, GoonCitizen on 3041, or bases the user adds) are loopback only. They answer `GET /services/fabric/identity` and `POST /services/fabric/sign` only to a loopback socket with a loopback Host and **no web-page `Origin`** (none, or an extension origin such as Passport's background; a site's `fetch` always carries its own), spend each nonce once, refuse devices outside their identity cluster, and wait for a native OS dialog — never the web UI, which any script on that origin could drive. A CLI Hub, a hosted relay, and Android have no such dialog and do not mount the routes.
+- **Linking a desktop** uses `POST /services/fabric/link { sessionId }` on the same terms: Passport makes a v2 offer on the desktop's own loopback `/device-links`; the desktop sees only sessions created for its own origin, asks natively, signs as responder, and publishes its half of the `IdentityCrossSign`. Passport countersigns as usual.
+- **Trusted hubs** is the only way to widen where Passport sends data; it never widens which origins may ask for a login.
+
 **Basics coverage:** [`tests/adversarialEnvironment.basics.unit.ts`](tests/adversarialEnvironment.basics.unit.ts). Related: [`tests/fabricHubAllowlist.unit.ts`](tests/fabricHubAllowlist.unit.ts).
 
 ## Outstanding (PR #3 / RSI follow-ups)
@@ -22,11 +31,13 @@ The extension refuses to sign site-login / device-link completions for non-allow
 - ~~**`@fabric/core` / `@fabric/http` pin hygiene**~~ — `package.json` stays on `FabricLabs/fabric#feature/rsi` and `FabricLabs/fabric-http#feature/rsi`. Lockfile SHAs **`9938917804e2bf5ba5cf1fab7bf0975129d9063f`** / **`7d7f1c7c918dabe7f2ae59d638b16e1a020d08bd`**. Bump with Hub / http; re-pin releases to those SHAs. `report:install` removes `package-lock.json` then `npm i --allow-git=all`.
 - ~~**Cleartext production hub defaults**~~ — Passport allowlist matches `@fabric/http`: HTTPS-only network hubs; cleartext requires `opts.extra`. Loopback `http://` remains allowed.
 - ~~**Device-link Origin/Referer**~~ — device-link fetch/POST omit client-set Origin/Referer; Hub allowlisted thin-client `chrome-extension:` / `moz-extension:` Origins.
-- **npm audit (prod omit-dev)** — remaining findings include transitive `elliptic` (crypto-browserify via `@fabric/http`), `uuid` (jayson via core), and `@babel/core` sourceMappingURL advisory on some trees. Prefer upstream bumps / careful overrides over `npm audit fix --force`. Re-check after each Fabric pin bump.
+- **npm audit (prod omit-dev)** — remaining findings include `uuid` (jayson via core), and `@babel/core` sourceMappingURL advisory on some trees. Prefer upstream bumps / careful overrides over `npm audit fix --force`. Re-check after each Fabric pin bump.
 - **Manifest net permissions** — `webRequest` / `declarativeNetRequest` remain declared for identity outband header rules; keep rule IDs and handlers in sync when changing outband behavior.
 - **Large work-in-progress split** — keep identity / mesh / payments / packaging as stacked PRs when review tooling hits file limits.
 
 ## Already addressed (do not re-open without new evidence)
+- ~~Device-link `sessionId` not bound into attest messages~~ — device-link v2 (Hub-chosen `sessionId` + `nonce`, both in the offer and link messages; Passport rebuilds and compares). [AUDIT.md](AUDIT.md) #6.
+- ~~Mesh registration for any page~~ — `FABRIC_HUB_REGISTER_MESH` requires the sending tab's origin to equal the allowlisted hub it registers.
 - ~~Missing `fabric402FetchPatch` module~~ — present under `src/content/`.
 - ~~`deriveReceiveAddress` invalid index~~ — rejects non-integer / negative indexes before derivation.
 - ~~Fabric node UI-test harness hard-coded `:3044`~~ — `fabricNodeListRowRe` / `ensureHarnessFabricNodeActive` derive host:port from `baseURL`.

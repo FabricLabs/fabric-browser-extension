@@ -18,10 +18,11 @@ export type StubSession = {
   origin: string;
   nonce: string;
   label: string;
-  status: 'pending' | 'accepted' | 'linked';
+  status: 'awaiting_offer' | 'pending' | 'accepted' | 'linked';
   initiator: { id: string; xpub: string; pubkeyHex: string };
   responder: { id: string; xpub: string; pubkeyHex: string } | null;
   linkMessage: string | null;
+  offerMessage: string;
 };
 
 type JsonBody = Record<string, unknown>;
@@ -36,6 +37,12 @@ function jsonResponse (status: number, body: JsonBody): Response {
     status,
     json: async () => body
   } as Response;
+}
+
+function randomHex (bytes: number): string {
+  const u = new Uint8Array(bytes);
+  crypto.getRandomValues(u);
+  return Array.from(u).map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
 function parseBody (init?: RequestInit): JsonBody {
@@ -81,42 +88,58 @@ export function installDeviceLinkHubStub (hubOrigin = 'https://relay.goon.vc'): 
         : null;
       const signature = String(body.signature || '');
       const pubkeyHex = String(body.pubkeyHex || '');
-      const nonce = String(body.nonce || '');
       const label = String(body.label || 'device');
-      if (!identity || !identity.xpub || !signature || !pubkeyHex || !nonce) {
-        return jsonResponse(400, { ok: false, error: 'identity.xpub, pubkeyHex, and signature required' });
+      if (!identity || !identity.xpub) {
+        return jsonResponse(400, { ok: false, error: 'identity.xpub required' });
+      }
+      if (body.nonce) {
+        return jsonResponse(400, { ok: false, error: 'client nonce rejected; omit nonce and sign the server offerMessage' });
       }
       const initiatorId = String(identity.id || '');
-      const offerMessage = buildDeviceLinkOfferMessage(nonce, initiatorId, label, hubOrigin);
-      const verified = verifyIdentitySchnorr(offerMessage, signature, pubkeyHex, {
+      if (!signature) {
+        const sessionId = randomHex(24);
+        const nonce = randomHex(32);
+        const offerMessage = buildDeviceLinkOfferMessage(sessionId, nonce, initiatorId, label, hubOrigin);
+        sessions.set(sessionId, {
+          sessionId,
+          origin: hubOrigin,
+          nonce,
+          label,
+          status: 'awaiting_offer',
+          initiator: { id: initiatorId, xpub: String(identity.xpub), pubkeyHex: '' },
+          responder: null,
+          linkMessage: null,
+          offerMessage
+        });
+        return jsonResponse(200, {
+          ok: true,
+          status: 'awaiting_offer',
+          sessionId,
+          nonce,
+          label,
+          offerMessage,
+          initiatorId
+        });
+      }
+      const session = sessions.get(String(body.sessionId || ''));
+      if (!session || session.status !== 'awaiting_offer' || session.initiator.id !== initiatorId) {
+        return jsonResponse(404, { ok: false, error: 'unknown device-link session' });
+      }
+      const verified = verifyIdentitySchnorr(session.offerMessage, signature, pubkeyHex, {
         id: initiatorId,
         xpub: identity.xpub
       });
       if (!verified.ok) {
         return jsonResponse(400, { ok: false, error: verified.error || 'invalid offer signature' });
       }
-      const sessionId = Array.from({ length: 24 }, () =>
-        Math.floor(Math.random() * 16).toString(16)).join('') + Date.now().toString(16);
-      const session: StubSession = {
-        sessionId,
-        origin: hubOrigin,
-        nonce,
-        label,
-        status: 'pending',
-        initiator: {
-          id: initiatorId,
-          xpub: String(identity.xpub),
-          pubkeyHex: pubkeyHex.toLowerCase()
-        },
-        responder: null,
-        linkMessage: null
-      };
-      sessions.set(sessionId, session);
+      session.initiator.pubkeyHex = pubkeyHex.toLowerCase();
+      session.status = 'pending';
       return jsonResponse(200, {
         ok: true,
-        sessionId,
-        nonce,
-        protocolUrl: `fabric://link?sessionId=${encodeURIComponent(sessionId)}&hub=${encodeURIComponent(hubOrigin)}`
+        status: 'pending',
+        sessionId: session.sessionId,
+        nonce: session.nonce,
+        protocolUrl: `fabric://link?sessionId=${encodeURIComponent(session.sessionId)}&hub=${encodeURIComponent(hubOrigin)}`
       });
     }
 
@@ -136,6 +159,7 @@ export function installDeviceLinkHubStub (hubOrigin = 'https://relay.goon.vc'): 
       }
       if (role === 'responder') {
         const linkMessage = buildDeviceLinkMessage(
+          session.sessionId,
           session.nonce,
           session.initiator.id,
           String(identity.id),

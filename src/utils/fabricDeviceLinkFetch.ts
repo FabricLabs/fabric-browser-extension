@@ -24,6 +24,8 @@ export function evaluateDeviceLinkPageRequest (opts: {
   hubRaw: string;
   declaredOrigin: string;
   pageOrigin: string;
+  /** Operator allowlist tokens (exact origins and/or `*.suffix`). */
+  extra?: string[];
 }): { ok: true; hubBase: string; sessionId: string } | { ok: false; error: string } {
   const sessionId = String(opts.sessionId || '').trim();
   const hubRaw = String(opts.hubRaw || '').trim();
@@ -40,7 +42,7 @@ export function evaluateDeviceLinkPageRequest (opts: {
   } catch {
     return { ok: false, error: 'invalid' };
   }
-  const hubGate = assertAllowedFabricHub(hubBase);
+  const hubGate = assertAllowedFabricHub(hubBase, { extra: opts.extra });
   if (!hubGate.ok) return { ok: false, error: 'hub_not_allowed' };
   hubBase = hubGate.hubBase;
   if (opts.declaredOrigin !== opts.pageOrigin || hubOrigin !== opts.pageOrigin) {

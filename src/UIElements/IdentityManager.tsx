@@ -19,13 +19,6 @@
  * @see https://github.com/FabricLabs/hub.fabric.pub — components/IdentityManager.js, functions/fabricBrowserIdentityDev.js
  */
 
-import {
-  INVALID_BECH32_TEST_VECTORS,
-  INVALID_BIP32_TEST_VECTORS,
-  VALID_BECH32_TEST_VECTORS,
-  VALID_BIP32_TEST_VECTORS
-} from '../crypto/vectors';
-
 // Dependencies
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { wordlists, mnemonicToSeedSync, generateMnemonic } from 'bip39';
@@ -39,8 +32,9 @@ import { PASSPORT_EXTENSION_VERSION } from '../constants/extensionVersion';
 import { swallowNonFatal } from '../utils/nonFatal';
 import SiteLoginPrompt from './SiteLoginPrompt';
 import DeviceLinkPrompt from './DeviceLinkPrompt';
-import FederationWalletInviteModal from './FederationWalletInviteModal';
-import MultisigWalletInvitePanel from './MultisigWalletInvitePanel';
+import DesktopSignersPanel from './DesktopSignersPanel';
+import HubAllowlistPanel from './HubAllowlistPanel';
+import FederationsPanel from './FederationsPanel';
 import crypto from 'crypto';
 
 bitcoin.initEccLib(ecc);
@@ -48,12 +42,15 @@ bitcoin.initEccLib(ecc);
 // Semantic UI
 import { Button, Message, Loader, Segment, Form, Input, TextArea, List, Icon, Modal, Popup, Table } from 'semantic-ui-react';
 import { FabricBackgroundMeshActions } from './FabricBackgroundMeshActions';
+import { PageIndexPanel } from './PageIndexPanel';
+import { MarketAgentPanel } from './MarketAgentPanel';
 import {
   DEFAULT_DEVICE_LINK_HUB,
   startDeviceLinkAsInitiator,
   tickDeviceLinkAsInitiator,
   cancelDeviceLinkSession
 } from '../utils/fabricDeviceLinkSign';
+import { normalizeDesktopSignerBase, requestDesktopLink } from '../utils/fabricDesktopSigner';
 import { publishIdentityCrossSign, publishIdentityCrossSignKind } from '../utils/identityCrossSignPublish';
 import { REVOKE_TYPE } from '../utils/identityCrossSign';
 import {
@@ -80,12 +77,6 @@ import {
   type BitcoinStatus
 } from '../fabric/bitcoinService';
 import { requestHubRegtestFaucet } from '../utils/fabricHubFaucet';
-import {
-  parseFederationWalletInvite,
-  PUBKEY_RE,
-  type FederationWalletInvite
-} from '../utils/federationWalletInvite';
-import { FEDERATION_CONTRACT_INVITE } from '../fabric/messageTypes';
 
 const bip32 = BIP32Factory(ecc);
 
@@ -228,123 +219,11 @@ const truncateMiddle = (str: string | undefined, frontLen: number = 5, backLen: 
   return `${str.slice(0, frontLen)}...${str.slice(-backLen)}`;
 };
 
-function formatUnknownError (err: unknown): string {
-  return err instanceof Error ? err.message : 'Unknown error';
-}
-
-// Test bech32m implementation
-const testBech32m = () => {
-  console.log('Testing bech32m implementation...');
-
-  // Test valid vectors
-  for (const vector of VALID_BECH32_TEST_VECTORS) {
-    try {
-      const { prefix, words } = bech32m.decode(vector);
-      const reencoded = bech32m.encode(prefix, words);
-      if (reencoded !== vector.toLowerCase()) {
-        console.error(`Valid test vector failed: ${vector}`);
-        console.error(`Reencoded as: ${reencoded}`);
-        return false;
-      }
-    } catch (error: unknown) {
-      console.error(`Valid test vector failed: ${vector}`);
-      console.error(`Error: ${formatUnknownError(error)}`);
-      return false;
-    }
-  }
-
-  // Test invalid vectors
-  for (const { str, reason } of INVALID_BECH32_TEST_VECTORS) {
-    try {
-      bech32m.decode(str);
-      console.error(`Invalid test vector passed: ${str}`);
-      console.error(`Expected reason: ${reason}`);
-      return false;
-    } catch (_expected: unknown) {
-      // Expected failure
-    }
-  }
-
-  console.log('All bech32m tests passed!');
-  return true;
-};
-
-const testBIP32 = () => {
-  console.log('Testing BIP32 implementation...');
-
-  // Helper function to convert path format
-  const convertPath = (path: string): string => {
-    if (path === 'm') return path;
-    // Convert H to ' for hardened keys
-    return path.replace(/H/g, "'");
-  };
-
-  // Test valid vectors
-  for (const vector of VALID_BIP32_TEST_VECTORS) {
-    try {
-      console.log(`Testing seed: ${vector.seed}`);
-      const seed = Buffer.from(vector.seed, 'hex');
-      const root = bip32.fromSeed(seed);
-
-      for (const chain of vector.chains) {
-        console.log(`Testing path: ${chain.path}`);
-        try {
-          let derived;
-          if (chain.path === 'm') {
-            // For root key, use the root directly
-            derived = root;
-          } else {
-            // Convert path format and derive
-            const convertedPath = convertPath(chain.path);
-            derived = root.derivePath(convertedPath);
-          }
-
-          const xpub = derived.neutered().toBase58();
-          const xprv = derived.toBase58();
-
-          if (xpub !== chain.xpub) {
-            console.error(`Xpub mismatch for path ${chain.path}`);
-            console.error(`Expected: ${chain.xpub}`);
-            console.error(`Got: ${xpub}`);
-            return false;
-          }
-
-          if (xprv !== chain.xprv) {
-            console.error(`Xprv mismatch for path ${chain.path}`);
-            console.error(`Expected: ${chain.xprv}`);
-            console.error(`Got: ${xprv}`);
-            return false;
-          }
-
-          console.log(`✓ Path ${chain.path} passed`);
-        } catch (error: unknown) {
-          console.error(`Failed to derive path ${chain.path}:`, formatUnknownError(error));
-          return false;
-        }
-      }
-    } catch (error: unknown) {
-      console.error(`Failed to process seed ${vector.seed}:`, formatUnknownError(error));
-      return false;
-    }
-  }
-
-  // Test invalid vectors
-  for (const vector of INVALID_BIP32_TEST_VECTORS) {
-    try {
-      bip32.fromBase58(vector);
-      console.error(`Invalid test vector passed: ${vector}`);
-      return false;
-    } catch (_expected: unknown) {
-      console.log(`✓ Invalid vector rejected as expected: ${vector}`);
-    }
-  }
-
-  console.log('All BIP32 tests passed!');
-  return true;
-};
+/** Hub faucets only hand out coins on test networks. */
+const FAUCET_NETWORKS = new Set(['regtest', 'signet']);
 
 type KeyGenerationState = 'initial' | 'warning' | 'generating' | 'complete' | 'xpub_login' | 'xprv_login' | 'logged_in' | 'wallet' | 'peers' | 'password_entry' | 'add_identity' | 'confirmation' | 'no_password_warning' | 'settings' | 'derivation_password_warning' | 'seed_phrase_entry' | 'identity_detail' | 'login_selection' | 'seed_phrase_login' | 'sign_message' | 'restore_identity' | 'verify_message' | 'derivation_password_entry';
-type WalletSubView = 'receive' | 'history' | 'send' | 'faucet' | null;
+type WalletSubView = 'receive' | 'history' | 'send' | null;
 type XpubLoginState = 'input' | 'validating' | 'error';
 type PasswordState = 'input' | 'verifying' | 'error';
 
@@ -425,6 +304,7 @@ const BITCOIN_HOST_PRESETS: ReadonlyArray<{ id: string; label: string; connectio
 ];
 
 const HUB_FABRIC_HUB_BASE = 'https://hub.fabric.pub';
+const RELAY_GOON_HUB_BASE = 'https://relay.goon.vc';
 
 function fabricHubAt (host: string, port: number): string {
   const p = host.includes(':') ? `[${host}]` : host;
@@ -433,6 +313,7 @@ function fabricHubAt (host: string, port: number): string {
 
 const DEFAULT_FABRIC_NODES: FabricNode[] = [
   { id: 'hub-fabric-pub', hubAddress: HUB_FABRIC_HUB_BASE, isActive: true },
+  { id: 'relay-goon-vc', hubAddress: RELAY_GOON_HUB_BASE, isActive: false },
   /** Local `@fabric/hub`: `node scripts/hub.js` (HTTP API + SPA). */
   { id: 'local-hub-http', hubAddress: fabricHubAt('127.0.0.1', 8080), isActive: false },
   /** Local Hub webpack dev server (proxies `/services`, `/settings` → :8080). */
@@ -444,6 +325,7 @@ const DEFAULT_FABRIC_NODES: FabricNode[] = [
 
 const FABRIC_HUB_PRESETS: ReadonlyArray<{ id: string; label: string; hubAddress: string }> = [
   { id: 'hub', label: 'hub.fabric.pub', hubAddress: HUB_FABRIC_HUB_BASE },
+  { id: 'relay', label: 'relay.goon.vc', hubAddress: RELAY_GOON_HUB_BASE },
   { id: 'local-8080', label: '127.0.0.1:8080 (local Hub)', hubAddress: fabricHubAt('127.0.0.1', 8080) },
   { id: 'local-3000', label: '127.0.0.1:3000 (webpack dev)', hubAddress: fabricHubAt('127.0.0.1', 3000) },
   { id: 'local', label: '127.0.0.1:3003', hubAddress: fabricHubAt('127.0.0.1', 3003) },
@@ -830,10 +712,7 @@ const IdentityManager = () => {
     nodeAddress?: string | null;
   }>>([]);
   const [arcNotificationsBusy, setArcNotificationsBusy] = useState(false);
-  const [walletInviteReview, setWalletInviteReview] = useState<{
-    invite: FederationWalletInvite;
-    replyPeerId: string | null;
-  } | null>(null);
+  const [federationsPending, setFederationsPending] = useState(0);
 
   const [walletBalance, setWalletBalance] = useState<WalletBalance | null>(null);
   const [walletBalanceLoading, setWalletBalanceLoading] = useState(false);
@@ -917,7 +796,7 @@ const IdentityManager = () => {
     }
   }, []);
 
-  const handleStartDeviceLink = useCallback(async () => {
+  const handleStartDeviceLink = useCallback(async (hubOverride?: string) => {
     const pk = selectedIdentity?.privateKeyHex;
     const xp = selectedIdentity?.xpub;
     if (!pk || !xp) {
@@ -932,7 +811,7 @@ const IdentityManager = () => {
     }
     setDeviceLinkBusy(true);
     setDeviceLinkError(null);
-    const hubBase = deviceLinkHubBase();
+    const hubBase = hubOverride || deviceLinkHubBase();
     const started = await startDeviceLinkAsInitiator({
       privateKeyHex: pk,
       xpub: xp,
@@ -954,6 +833,11 @@ const IdentityManager = () => {
       label: started.label,
       pollSecret: started.pollSecret
     });
+    if (hubOverride && normalizeDesktopSignerBase(hubOverride)) {
+      void requestDesktopLink({ base: hubOverride, sessionId: started.sessionId }).then((asked) => {
+        if (!asked.ok) setDeviceLinkError(`Desktop app did not link: ${asked.error}`);
+      });
+    }
     let attempts = 0;
     deviceLinkPollRef.current = setInterval(() => {
       attempts += 1;
@@ -1159,9 +1043,6 @@ const IdentityManager = () => {
   }, [storageHydrated, settings.autoLockTimer, bumpUserActivity]);
 
   useEffect(() => {
-    testBIP32();
-    testBech32m();
-
     const initializeStorage = async () => {
       try {
         let savedState;
@@ -1604,35 +1485,37 @@ const IdentityManager = () => {
     setSelectedIdentity(prev => prev ? { ...prev, isCurrent: true } : null);
   };
 
-  const handleUnlockSigning = () => {
-    if (!selectedIdentity?.id) return;
-    const blob = walletCryptos[selectedIdentity.id];
-    if (!blob) {
-      setSignUnlockError('No encrypted signing key on this device for this identity.');
-      return;
-    }
+  /** @returns error message, or null when the identity is now unlocked. */
+  const unlockIdentity = (identity: Identity | null | undefined, password: string): string | null => {
+    if (!identity?.id) return 'No identity selected.';
+    const blob = walletCryptos[identity.id];
+    if (!blob) return 'No encrypted signing key on this device for this identity.';
     try {
-      const xprv = decryptAccountXprv(blob, signUnlockPassword);
+      const xprv = decryptAccountXprv(blob, password);
       const node = bip32.fromBase58(xprv);
-      if (!node.privateKey) {
-        throw new Error('Missing private key');
-      }
+      if (!node.privateKey) throw new Error('Missing private key');
       const pk = Buffer.from(node.privateKey).toString('hex');
-      const id = selectedIdentity.id;
+      const id = identity.id;
       setIdentities(prev =>
         prev.map(row => (row.id === id && row.hasPrivateKey ? { ...row, privateKeyHex: pk } : row))
       );
       setSelectedIdentity(prev =>
         prev?.id === id && prev.hasPrivateKey ? { ...prev, privateKeyHex: pk } : prev
       );
-      setSignUnlockError(null);
-      setSignUnlockPassword('');
       setShowAutoLockBanner(false);
       bumpUserActivity();
+      return null;
     } catch (err: unknown) {
       void err;
-      setSignUnlockError('Wrong password or unreadable wallet data.');
+      return 'Wrong password or unreadable wallet data.';
     }
+  };
+
+  const handleUnlockSigning = () => {
+    if (!selectedIdentity?.id) return;
+    const error = unlockIdentity(selectedIdentity, signUnlockPassword);
+    setSignUnlockError(error);
+    if (!error) setSignUnlockPassword('');
   };
 
   const copyWithNotice = (text: string, label: string) => {
@@ -2676,12 +2559,6 @@ const IdentityManager = () => {
     setFaucetMsg(null);
     if (view === 'receive') deriveCurrentReceiveAddr();
     if (view === 'history') void refreshWalletTxs();
-    if (view === 'faucet') {
-      const cur = identities.find(id => id.isCurrent);
-      const net = btcStatus?.network || 'regtest';
-      const a = cur?.xpub ? deriveReceiveAddress(cur.xpub, net, receiveAddrIdx) : null;
-      setFaucetAddr(prev => (prev.trim() ? prev : (a || '')));
-    }
     void refreshWalletBalance();
     setState('wallet');
   };
@@ -2692,6 +2569,19 @@ const IdentityManager = () => {
     border: '1px solid rgba(255,255,255,0.12)',
     color: 'rgba(255,255,255,0.92)'
   };
+
+  /** Labelled tabs share a ~340px row in the 400px popup; Semantic's padding and `flex: 1 0 auto` overflow it. */
+  const walletTabButtonStyle: React.CSSProperties = {
+    flex: '1 1 0',
+    minWidth: 0,
+    paddingLeft: '0.4em',
+    paddingRight: '0.4em',
+    whiteSpace: 'nowrap'
+  };
+
+  const faucetNetwork = btcStatus?.available && btcStatus.network && FAUCET_NETWORKS.has(btcStatus.network.toLowerCase())
+    ? btcStatus.network.toLowerCase()
+    : null;
 
   /** Identity card stays a light Semantic Segment; icons must be dark, not inverted-white. */
   const cardActionBtnStyle: React.CSSProperties = {
@@ -2704,7 +2594,6 @@ const IdentityManager = () => {
   };
 
   const renderIdentityCardActionBar = () => {
-    const pendingMultisig = arcNotifications.filter((r) => r.messageType === FEDERATION_CONTRACT_INVITE).length;
     const peerOk = !!(nodeSigninResult && nodeSigninResult.ok);
     const actions: Array<{
       key: string;
@@ -2732,19 +2621,19 @@ const IdentityManager = () => {
         tip: 'Transaction history',
         onClick: () => openWalletPage('history')
       },
-      {
+      ...(faucetNetwork ? [{
         key: 'faucet',
         icon: 'tint',
-        tip: 'Regtest faucet',
-        onClick: () => openWalletPage('faucet')
-      },
+        tip: `${faucetNetwork} faucet`,
+        onClick: () => openWalletPage(null)
+      }] : []),
       {
         key: 'wallet',
         icon: 'bitcoin',
-        tip: pendingMultisig
-          ? `Wallet · ${pendingMultisig} multisig invite${pendingMultisig === 1 ? '' : 's'}`
-          : 'Wallet (balance, multisig)',
-        badge: pendingMultisig || undefined,
+        tip: federationsPending
+          ? `Wallet · ${federationsPending} federation item${federationsPending === 1 ? '' : 's'} to answer`
+          : 'Wallet (balance, federations)',
+        badge: federationsPending || undefined,
         color: '#f7931a',
         onClick: () => openWalletPage(null)
       },
@@ -2839,10 +2728,9 @@ const IdentityManager = () => {
     const activeNode = settings.fabricNodes.find(n => n.isActive);
     const hubBase = activeNode ? activeNode.hubAddress.replace(/\/+$/, '') : null;
     const currentId = identities.find(id => id.isCurrent);
-    const inviterPubkey = currentId && PUBKEY_RE.test(currentId.publicKeyHex)
-      ? currentId.publicKeyHex
+    const faucetReceiveAddr = faucetNetwork && currentId?.xpub
+      ? deriveReceiveAddress(currentId.xpub, faucetNetwork, receiveAddrIdx)
       : null;
-    const walletInvites = arcNotifications.filter((r) => r.messageType === FEDERATION_CONTRACT_INVITE);
 
     return (
       <div className="fade-in" style={{ width: '100%' }}>
@@ -2889,6 +2777,7 @@ const IdentityManager = () => {
             <Button
               inverted
               color={walletView === 'receive' ? 'blue' : 'grey'}
+              style={walletTabButtonStyle}
               onClick={() => {
                 if (walletView === 'receive') {
                   setWalletView(null);
@@ -2903,6 +2792,7 @@ const IdentityManager = () => {
             <Button
               inverted
               color={walletView === 'history' ? 'blue' : 'grey'}
+              style={walletTabButtonStyle}
               onClick={() => {
                 if (walletView === 'history') {
                   setWalletView(null);
@@ -2917,26 +2807,10 @@ const IdentityManager = () => {
             <Button
               inverted
               color={walletView === 'send' ? 'blue' : 'grey'}
+              style={walletTabButtonStyle}
               onClick={() => { setWalletView(walletView === 'send' ? null : 'send'); setSendError(null); }}
             >
               <Icon name="send" /> Send
-            </Button>
-            <Button
-              inverted
-              color={walletView === 'faucet' ? 'blue' : 'grey'}
-              onClick={() => {
-                const next = walletView === 'faucet' ? null : 'faucet';
-                if (next === 'faucet') {
-                  setFaucetMsg(null);
-                  const cur = identities.find(id => id.isCurrent);
-                  const net = btcStatus?.network || 'regtest';
-                  const a = cur?.xpub ? deriveReceiveAddress(cur.xpub, net, receiveAddrIdx) : null;
-                  setFaucetAddr(prev => (prev.trim() ? prev : (a || '')));
-                }
-                setWalletView(next);
-              }}
-            >
-              <Icon name="tint" /> Faucet
             </Button>
           </Button.Group>
 
@@ -3051,152 +2925,96 @@ const IdentityManager = () => {
             </div>
           )}
 
-          {walletView === 'faucet' && (
-            <div style={{ marginTop: '0.75em' }}>
-              <p style={{ color: 'rgba(255,255,255,0.65)', fontSize: '0.82em', marginBottom: '0.5em' }}>
-                Request regtest coins from the Hub wallet on your active Fabric authority (
-                <code style={{ wordBreak: 'break-all' }}>{getActiveFabricBase() || '—'}</code>
-                ). Same contract as Fabric Hub:{' '}
-                <code style={{ fontSize: '0.78em' }}>POST /services/bitcoin/faucet</code>.
-              </p>
-              {btcStatus?.network && btcStatus.network !== 'regtest' ? (
-                <Message warning size="small" style={{ marginBottom: '0.5em' }}>
-                  <p style={{ margin: 0 }}>
-                    Faucet is only supported on <strong>regtest</strong>. This node reports <strong>{btcStatus.network}</strong> — requests may be rejected.
-                  </p>
-                </Message>
-              ) : null}
-              <p style={{ fontSize: '0.78em', color: 'rgba(255,255,255,0.45)', margin: '0 0 0.5em' }}>
-                Public operator faucet (same playnet style):{' '}
-                <a href="https://hub.faucet.pub/" target="_blank" rel="noopener noreferrer">hub.faucet.pub</a>
-                {' · '}
-                <a href="https://hub.fabric.pub/services/bitcoin/faucet" target="_blank" rel="noopener noreferrer">hub.fabric.pub</a>
-              </p>
-              <Form inverted>
-                <Form.Field>
-                  <label style={{ color: 'rgba(255,255,255,0.7)', fontSize: '0.85em' }}>Regtest address</label>
-                  <Input
-                    placeholder="bcrt1…"
-                    value={faucetAddr}
-                    onChange={e => setFaucetAddr(e.target.value)}
-                    fluid
-                    size="small"
-                  />
-                </Form.Field>
-                <Form.Field>
-                  <label style={{ color: 'rgba(255,255,255,0.7)', fontSize: '0.85em' }}>Amount (sats, max 1,000,000)</label>
-                  <Input
-                    type="number"
-                    min={1}
-                    max={1_000_000}
-                    value={faucetAmountSats}
-                    onChange={e => setFaucetAmountSats(e.target.value)}
-                    fluid
-                    size="small"
-                  />
-                </Form.Field>
-                <Button.Group size="small" fluid>
-                  <Button
-                    inverted
-                    color="grey"
-                    type="button"
-                    disabled={!receiveAddr}
-                    onClick={() => {
-                      if (receiveAddr) setFaucetAddr(receiveAddr);
-                    }}
-                  >
-                    Use receive address
-                  </Button>
-                  <Button
-                    primary
-                    type="button"
-                    loading={faucetLoading}
-                    disabled={!getActiveFabricBase() || !faucetAddr.trim()}
-                    onClick={() => { void handleFaucetRequest(); }}
-                  >
-                    Request from hub faucet
-                  </Button>
-                </Button.Group>
-              </Form>
-              {faucetMsg ? (
-                <Message
-                  style={{ marginTop: '0.75em' }}
-                  positive={faucetMsg.type === 'ok'}
-                  negative={faucetMsg.type === 'err'}
-                  size="small"
-                  onDismiss={() => setFaucetMsg(null)}
-                >
-                  <Message.Header>{faucetMsg.type === 'ok' ? 'Faucet' : 'Faucet failed'}</Message.Header>
-                  <p style={{ margin: '0.35em 0 0', wordBreak: 'break-word' }}>{faucetMsg.text}</p>
-                  {faucetMsg.txid ? (
-                    <p style={{ margin: '0.35em 0 0', fontFamily: 'monospace', fontSize: '0.82em' }}>
-                      txid: {faucetMsg.txid}
-                    </p>
-                  ) : null}
-                </Message>
-              ) : null}
-            </div>
-          )}
         </Segment>
 
-        {walletInvites.length > 0 ? (
-          <Segment inverted style={{ marginTop: '1em', background: 'rgba(40,80,40,0.35)', border: '1px solid rgba(80,180,80,0.45)', color: 'rgba(255,255,255,0.92)' }}>
+        {faucetNetwork ? (
+          <Segment inverted style={{ ...darkPanelStyle, marginTop: '1em' }}>
             <h4 style={{ margin: '0 0 0.5em', color: 'white', fontSize: '0.95em' }}>
-              <Icon name='bitcoin' style={{ marginRight: '0.35em' }} />
-              Multisig wallet invitations
+              <Icon name="tint" style={{ marginRight: '0.35em' }} />
+              Faucet <span style={{ color: 'rgba(255,255,255,0.55)', fontWeight: 'normal' }}>· {faucetNetwork}</span>
             </h4>
-            <List divided inverted relaxed size='small'>
-              {walletInvites.map((row) => (
-                <List.Item key={row.key}>
-                  <List.Content floated='right'>
-                    <Button
-                      size='mini'
-                      primary
-                      onClick={() => {
-                        const invite = parseFederationWalletInvite(row.payload || {});
-                        if (!invite) return;
-                        setWalletInviteReview({
-                          invite,
-                          replyPeerId: row.nodeAddress || invite.inviterHubId || null
-                        });
-                      }}
-                    >
-                      Review
-                    </Button>
-                  </List.Content>
-                  <List.Content>
-                    <List.Header style={{ color: 'rgba(255,255,255,0.95)', fontSize: '0.85em' }}>
-                      {row.label}
-                      {row.receivedAt ? (
-                        <span style={{ fontWeight: 400, color: 'rgba(255,255,255,0.45)', marginLeft: '0.5em', fontSize: '0.85em' }}>
-                          {timeAgo(new Date(row.receivedAt).toISOString())}
-                        </span>
-                      ) : null}
-                    </List.Header>
-                    <List.Description style={{ color: 'rgba(255,255,255,0.6)', fontSize: '0.78em' }}>
-                      {row.summary}
-                    </List.Description>
-                  </List.Content>
-                </List.Item>
-              ))}
-            </List>
+            <p style={{ color: 'rgba(255,255,255,0.65)', fontSize: '0.82em', marginBottom: '0.5em' }}>
+              Request {faucetNetwork} coins from the Hub wallet on your active Fabric authority (
+              <code style={{ wordBreak: 'break-all' }}>{hubBase || '—'}</code>
+              ). Same contract as Fabric Hub:{' '}
+              <code style={{ fontSize: '0.78em' }}>POST /services/bitcoin/faucet</code>.
+            </p>
+            <p style={{ fontSize: '0.78em', color: 'rgba(255,255,255,0.45)', margin: '0 0 0.5em' }}>
+              Public operator faucet (same playnet style):{' '}
+              <a href="https://hub.faucet.pub/" target="_blank" rel="noopener noreferrer">hub.faucet.pub</a>
+              {' · '}
+              <a href="https://hub.fabric.pub/services/bitcoin/faucet" target="_blank" rel="noopener noreferrer">hub.fabric.pub</a>
+            </p>
+            <Form inverted>
+              <Form.Field>
+                <label style={{ color: 'rgba(255,255,255,0.7)', fontSize: '0.85em' }}>Address</label>
+                <Input
+                  placeholder={faucetNetwork === 'signet' ? 'tb1…' : 'bcrt1…'}
+                  value={faucetAddr}
+                  onChange={e => setFaucetAddr(e.target.value)}
+                  fluid
+                  size="small"
+                />
+              </Form.Field>
+              <Form.Field>
+                <label style={{ color: 'rgba(255,255,255,0.7)', fontSize: '0.85em' }}>Amount (sats, max 1,000,000)</label>
+                <Input
+                  type="number"
+                  min={1}
+                  max={1_000_000}
+                  value={faucetAmountSats}
+                  onChange={e => setFaucetAmountSats(e.target.value)}
+                  fluid
+                  size="small"
+                />
+              </Form.Field>
+              <Button.Group size="small" fluid>
+                <Button
+                  inverted
+                  color="grey"
+                  type="button"
+                  disabled={!faucetReceiveAddr}
+                  onClick={() => {
+                    if (faucetReceiveAddr) setFaucetAddr(faucetReceiveAddr);
+                  }}
+                >
+                  Use receive address
+                </Button>
+                <Button
+                  primary
+                  type="button"
+                  loading={faucetLoading}
+                  disabled={!hubBase || !faucetAddr.trim()}
+                  onClick={() => { void handleFaucetRequest(); }}
+                >
+                  Request coins
+                </Button>
+              </Button.Group>
+            </Form>
+            {faucetMsg ? (
+              <Message
+                style={{ marginTop: '0.75em' }}
+                positive={faucetMsg.type === 'ok'}
+                negative={faucetMsg.type === 'err'}
+                size="small"
+                onDismiss={() => setFaucetMsg(null)}
+              >
+                <Message.Header>{faucetMsg.type === 'ok' ? 'Faucet' : 'Faucet failed'}</Message.Header>
+                <p style={{ margin: '0.35em 0 0', wordBreak: 'break-word' }}>{faucetMsg.text}</p>
+                {faucetMsg.txid ? (
+                  <p style={{ margin: '0.35em 0 0', fontFamily: 'monospace', fontSize: '0.82em' }}>
+                    txid: {faucetMsg.txid}
+                  </p>
+                ) : null}
+              </Message>
+            ) : null}
           </Segment>
         ) : null}
 
-        <MultisigWalletInvitePanel
+        <FederationsPanel
           hubBase={hubBase}
-          inviterPubkey={inviterPubkey}
-          inviterHubId={nodeSigninResult && nodeSigninResult.ok ? (nodeSigninResult.fabricPeerId || null) : null}
-        />
-
-        <FederationWalletInviteModal
-          open={!!walletInviteReview}
-          invite={walletInviteReview ? walletInviteReview.invite : null}
-          hubBase={hubBase}
-          responderPubkey={inviterPubkey}
-          replyPeerId={walletInviteReview ? walletInviteReview.replyPeerId : null}
-          onClose={() => setWalletInviteReview(null)}
-          onResolved={() => void refreshArcNotifications()}
+          privateKeyHex={(currentId && currentId.privateKeyHex) || null}
+          onPendingChange={setFederationsPending}
         />
 
         <Button.Group vertical fluid style={{ marginTop: '1em' }}>
@@ -3212,8 +3030,7 @@ const IdentityManager = () => {
   };
 
   const renderPeersPage = () => {
-    const otherArc = arcNotifications.filter((r) => r.messageType !== FEDERATION_CONTRACT_INVITE);
-    const pendingMultisig = arcNotifications.filter((r) => r.messageType === FEDERATION_CONTRACT_INVITE).length;
+    const otherArc = arcNotifications;
 
     return (
       <div className="fade-in" style={{ width: '100%' }}>
@@ -3268,15 +3085,15 @@ const IdentityManager = () => {
           </Button>
           <p style={{ fontSize: '0.8em', color: 'rgba(255,255,255,0.55)', marginTop: '0.5em', marginBottom: 0 }}>
             Connects to your active Fabric node, verifies its identity, and registers this wallet for notifications
-            (multisig wallet invitations, group proposals, chat, delegation signatures).
+            (group invitations, group proposals, chat, delegation signatures).
             Manage hub URLs under Settings.
           </p>
         </Segment>
 
-        {pendingMultisig > 0 ? (
+        {federationsPending > 0 ? (
           <Message info size="small" style={{ marginTop: '1em' }}>
             <p style={{ margin: 0 }}>
-              {pendingMultisig} multisig wallet invitation{pendingMultisig === 1 ? '' : 's'} waiting —{' '}
+              {federationsPending} federation invitation{federationsPending === 1 ? '' : 's'} or payment{federationsPending === 1 ? '' : 's'} waiting —{' '}
               <a
                 href="#wallet"
                 style={{ cursor: 'pointer' }}
@@ -3298,7 +3115,7 @@ const IdentityManager = () => {
             Application contracts
           </h4>
           <p style={{ fontSize: '0.78em', color: 'rgba(255,255,255,0.5)', marginTop: 0 }}>
-            ARC traffic from the mesh (group proposals, missions, chat-related notices). Multisig invites live on the Wallet page.
+            ARC traffic from the mesh (group invitations, proposals, missions, chat-related notices). Federations live on the Wallet page.
           </p>
           {otherArc.length === 0 ? (
             <p style={{ fontSize: '0.8em', color: 'rgba(255,255,255,0.4)', marginBottom: 0 }}>
@@ -4286,6 +4103,18 @@ const IdentityManager = () => {
           {renderFabricNodeList()}
           {renderFabricTestModal()}
 
+          <h4 style={{ marginTop: '2em' }}>Page index</h4>
+          <p style={{ marginBottom: '0.75em', color: 'rgba(255,255,255,0.85)' }}>
+            Pages this Passport has captured as Fabric blob trees. Peers locate chunks by Tree root and blob hash only; titles and URLs never leave this device.
+          </p>
+          <PageIndexPanel />
+
+          <h4 style={{ marginTop: '2em' }}>Budget agent</h4>
+          <p style={{ marginBottom: '0.75em', color: 'rgba(255,255,255,0.85)' }}>
+            Set a sats budget and let Passport plan the cheapest / nearest / most reliable provider per blob. Paid blobs wait for a funder; free blobs are requested at once.
+          </p>
+          <MarketAgentPanel />
+
           <h4 style={{ marginTop: '2em' }}>Security &amp; privacy</h4>
           <List divided relaxed>
             <List.Item>
@@ -4329,6 +4158,26 @@ const IdentityManager = () => {
             </List.Item>
             <List.Item>
               <List.Content>
+                <List.Header>Desktop apps on this computer</List.Header>
+                <List.Description>
+                  <DesktopSignersPanel
+                    pubkey={selectedIdentity?.publicKeyHex || null}
+                    disabled={deviceLinkBusy || !selectedIdentity?.privateKeyHex}
+                    onLink={(base) => void handleStartDeviceLink(base)}
+                  />
+                </List.Description>
+              </List.Content>
+            </List.Item>
+            <List.Item>
+              <List.Content>
+                <List.Header>Trusted hubs</List.Header>
+                <List.Description>
+                  <HubAllowlistPanel />
+                </List.Description>
+              </List.Content>
+            </List.Item>
+            <List.Item>
+              <List.Content>
                 <List.Header>Add a device</List.Header>
                 <List.Description>
                   <p>
@@ -4366,6 +4215,14 @@ const IdentityManager = () => {
                           try { void navigator.clipboard.writeText(deviceLinkOffer.protocolUrl); } catch (_) {}
                         }}
                         content="Copy fabric://link"
+                      />
+                      <Button
+                        size="mini"
+                        style={{ marginLeft: '0.35em' }}
+                        onClick={() => {
+                          try { void chrome.tabs.create({ url: deviceLinkOffer.protocolUrl }); } catch (_) {}
+                        }}
+                        content="Open in desktop app"
                       />
                       <Button
                         size="mini"
@@ -4564,7 +4421,7 @@ const IdentityManager = () => {
     }
     const address = faucetAddr.trim();
     if (!address) {
-      setFaucetMsg({ type: 'err', text: 'Enter a regtest receive address (e.g. bcrt1…).' });
+      setFaucetMsg({ type: 'err', text: 'Enter a receive address.' });
       return;
     }
     const raw = parseInt(faucetAmountSats, 10);
@@ -4597,6 +4454,16 @@ const IdentityManager = () => {
     const addr = deriveReceiveAddress(cur.xpub, net, receiveAddrIdx);
     setReceiveAddr(addr);
   }, [identities, btcStatus, receiveAddrIdx]);
+
+  const faucetAutoAddrRef = useRef<string | null>(null);
+  useEffect(() => {
+    const cur = identities.find(id => id.isCurrent);
+    const auto = faucetNetwork && cur?.xpub ? deriveReceiveAddress(cur.xpub, faucetNetwork, receiveAddrIdx) : null;
+    const prevAuto = faucetAutoAddrRef.current;
+    faucetAutoAddrRef.current = auto;
+    if (!auto) return;
+    setFaucetAddr(prev => (!prev.trim() || prev === prevAuto ? auto : prev));
+  }, [faucetNetwork, identities, receiveAddrIdx]);
 
   const refreshArcNotifications = useCallback(async () => {
     if (typeof chrome === 'undefined' || !chrome.runtime || !chrome.runtime.sendMessage) {
@@ -4643,6 +4510,10 @@ const IdentityManager = () => {
   }, [state, refreshArcNotifications]);
 
   const currentIdentityId = identities.find(i => i.isCurrent)?.id ?? null;
+  const siteLoginIdentity: Identity | null = selectedIdentity
+    ?? identities.find(i => i.isCurrent)
+    ?? identities.find(i => i.hasPrivateKey)
+    ?? null;
   useEffect(() => {
     setWalletTxs([]);
   }, [currentIdentityId]);
@@ -4924,13 +4795,13 @@ const IdentityManager = () => {
       )}
 
       <SiteLoginPrompt
-        privateKeyHex={selectedIdentity?.privateKeyHex || null}
-        xpub={selectedIdentity?.xpub || null}
+        privateKeyHex={siteLoginIdentity?.privateKeyHex || null}
+        xpub={siteLoginIdentity?.xpub || null}
+        onUnlock={(password) => unlockIdentity(siteLoginIdentity, password)}
         needsUnlock={
-          !!selectedIdentity?.hasPrivateKey &&
-          !selectedIdentity?.privateKeyHex &&
-          !!selectedIdentity?.id &&
-          !!walletCryptos[selectedIdentity.id]
+          !!siteLoginIdentity?.hasPrivateKey &&
+          !siteLoginIdentity?.privateKeyHex &&
+          !!walletCryptos[siteLoginIdentity.id]
         }
       />
       <DeviceLinkPrompt

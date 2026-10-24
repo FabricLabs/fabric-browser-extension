@@ -1,8 +1,8 @@
 'use strict';
 
 /**
- * BIP340 Schnorr client-signed site-login / device-link bodies — same construction
- * as Hub `verifyFabricDesktopLoginSignedPayload` / `verifyIdentitySchnorr`.
+ * BIP340 Schnorr client-signed device-link bodies — same construction as Hub
+ * `verifyIdentitySchnorr` — and the `fabric:` `/sessions` site-login POST.
  *
  * Prefer HD material (`Key` / mnemonic / xprv) so signing uses Fabric
  * `Identity.fabricKey`. Leaf `{ privateKeyHex, xpub }` (Passport session) is
@@ -14,7 +14,8 @@ import { Buffer } from 'buffer';
 // CommonJS Fabric helpers (webpack + mocha both resolve these).
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const {
-  buildFabricIdentitySignedPayload
+  buildFabricIdentitySignedPayload,
+  parseDesktopLoginMessage
 } = require('@fabric/http/functions/fabricSiteLoginVerify');
 
 export type SiteLoginIdentity = {
@@ -68,12 +69,26 @@ export function buildClientSignedLoginBody (
 }
 
 /**
- * POST the client signature to `{hub}/sessions/:id/signatures`.
+ * Origin and nonce of a `/sessions` challenge (`fabric:hub-login:1:…`), or null
+ * when it is malformed or names another session.
  */
-export async function postClientSignedLogin (
+export function parseHubLoginChallenge (
+  message: string,
+  sessionId: string
+): { origin: string; nonce: string } | null {
+  const parsed = parseDesktopLoginMessage(message);
+  if (!parsed || String(parsed.sessionId).toLowerCase() !== String(sessionId || '').toLowerCase()) return null;
+  return { origin: String(parsed.origin), nonce: String(parsed.nonce) };
+}
+
+/**
+ * POST a desktop- or Passport-signed `fabric:` `SiteLoginResponse` to
+ * `{hub}/sessions/:id/signatures` (bound to the session's origin and nonce).
+ */
+export async function postFabricSiteLogin (
   hubBase: string,
   sessionId: string,
-  body: SiteLoginSignatureBody
+  uri: string
 ): Promise<{ ok: true; data: Record<string, unknown> } | { ok: false; error: string }> {
   const base = String(hubBase || '').replace(/\/$/, '');
   let origin: string;
@@ -92,7 +107,7 @@ export async function postClientSignedLogin (
         Origin: origin,
         Referer: `${origin}/`
       },
-      body: JSON.stringify(body),
+      body: JSON.stringify({ fabric: uri }),
       cache: 'no-store'
     });
     const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;

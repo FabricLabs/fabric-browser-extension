@@ -14,6 +14,7 @@
   },
   "permissions": [
     "storage",
+    "unlimitedStorage",
     "tabs",
     "notifications",
     "offscreen",
@@ -24,13 +25,18 @@
   "host_permissions": [
     "http://localhost/*",
     "http://127.0.0.1/*",
+    "http://[::1]/*",
     "https://*/*"
+  ],
+  "optional_host_permissions": [
+    "http://*/*"
   ],
   "content_scripts": [
     {
       "matches": [
         "http://localhost/*",
         "http://127.0.0.1/*",
+        "http://[::1]/*",
         "https://*/*"
       ],
       "js": [

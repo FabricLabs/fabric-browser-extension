@@ -482,6 +482,23 @@ export function meshPublishFabricWire (wireBase64: string, originalType = 'fabri
   return sent > 0 || !!localPeerId;
 }
 
+/**
+ * Flood a `P2P_INVENTORY_REQUEST` (existing wire type) selecting on a Tree
+ * root so nearby peers answer with per-blob offers the page index ingests.
+ */
+export function meshPublishInventoryRequest (body: { offerBtc?: boolean; merkleRootHex?: string; blobHashHex?: string; maxSats?: number }): boolean {
+  try {
+    const msg = Message.fromVector(['P2P_INVENTORY_REQUEST', JSON.stringify(body)]);
+    const buf = msg.toBuffer() as Uint8Array;
+    let b64 = '';
+    for (let i = 0; i < buf.length; i++) b64 += String.fromCharCode(buf[i]);
+    return meshPublishFabricWire(btoa(b64), 'P2P_INVENTORY_REQUEST');
+  } catch (err: unknown) {
+    swallowNonFatal('mesh-inventory-request', err);
+    return false;
+  }
+}
+
 export function meshStatus (): { peerId: string | null; peers: number; hubAddress: string | null } {
   return {
     peerId: localPeerId,

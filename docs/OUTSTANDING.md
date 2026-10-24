@@ -1,9 +1,9 @@
 # Outstanding (security-first)
 Living queue for this repo. Detail and closed items live in [SECURITY.md](../SECURITY.md); posture, known gaps, and pre-listing recommendations live in [AUDIT.md](../AUDIT.md). Suite march: [@fabric/core `docs/PRODUCTION_MARCH.md`](https://github.com/FabricLabs/fabric/blob/feature/rsi/docs/PRODUCTION_MARCH.md).
 
-**Last reviewed:** 2026-08-25 — suite quick-win pass. `npm run test:unit` **94 passing**; `npm run build` clean. Added [AUDIT.md](../AUDIT.md) (this repo was the only one of the five without one). Removed 108 invalid ported match patterns from the manifest (Web Store validator blocker — see Closed).
+**Last reviewed:** 2026-08-31 — CI still red on tip `aa584ae` (`Cannot find module '../contracts/hasRole'` from packaged `@fabric/http`). Staged lockfile bump to core **`1c3f8d08c`** / http **`bbdb72a`** (same packaging fix as Hub [#16](https://github.com/FabricLabs/hub.fabric.pub/pull/16)) + Actions `@v7`. `npm run test:unit` was **94 passing** on the prior audit cut.
 
-**Prior review:** 2026-08-20 (`feature/rsi`; core lockfile `9938917`, http lockfile `7d7f1c7`; next core pin [@fabric/core #186](https://github.com/FabricLabs/fabric/pull/186) HEAD **`9c6ade0`**). Device-link `cancelDeviceLinkSession` fetch rejection is `ok: false` (aligned with http [#69](https://github.com/FabricLabs/fabric-http/pull/69) CodeRabbit). Hub copy `assets/passport-privacy.html` is in the Hub tree — production URL still needs deploy ([crash scan](https://relay.goon.vc/downstream.agents.md) does not cover this).
+**Prior review:** 2026-08-25 — suite quick-win pass; [AUDIT.md](../AUDIT.md) added; invalid ported match patterns removed. Wave 2 lock was core **`88f766c28`** / http **`ca27d14`** (the pin that broke CI).
 
 ## Blockers before store / shared-host pairing claims
 1. **`https://*/*` host breadth — owner decision required.** `host_permissions`
@@ -34,13 +34,16 @@ Living queue for this repo. Detail and closed items live in [SECURITY.md](../SEC
   / 4 moderate / 5 low**, all transitive; for a wallet, a reachable `elliptic`
   advisory should be treated as release-blocking rather than noise.
 - [ ] Move xpub off Hub `GET /services/bitcoin/xpub…` query strings (needs Hub POST endpoints).
-- [ ] Pin `@fabric/core` after [#186](https://github.com/FabricLabs/fabric/pull/186) lands (handshake-bus + gossip catalog; HEAD **`9c6ade0`**). Live Hub still **`f63a33f`**.
+- [x] Pin `@fabric/core` to [#186](https://github.com/FabricLabs/fabric/pull/186) tip **`88f766c28`**. Live Hub still **`f63a33f`** until operator redeploy.
 - [ ] Keep `src/utils/identityCrossSign.ts` lockstep with `@fabric/core/functions/identityCrossSign` (TS re-export; webpack must not pull Hub Node).
 - [ ] Keep `src/utils/fabricHubAllowlist.ts` lockstep with `@fabric/http/functions/fabricHubAllowlist`.
-- [ ] Bind device-link `sessionId` into attest messages when http/Hub land that protocol bump.
+- [x] Bind device-link `sessionId` into attest messages — device-link v2 with `@fabric/http`; GoonCitizen moved in the same cut. [AUDIT.md](../AUDIT.md) #6.
+- [ ] Ship the v2 device-link and `fabric:` site-login changes together with the `@fabric/core` / `@fabric/http` / Hub / GoonCitizen pins that carry them — an older Hub answers the v1 one-step offer and Passport now refuses it.
 - [ ] Open a `feature/rsi` PR against FabricLabs when this cut is pushed — **[PR #3](https://github.com/FabricLabs/fabric-browser-extension/pull/3) is `eric/develop`**, not this work.
 
 ## Closed / in this cut
+- **Local-first `fabric:` sign-in.** Pages post a `fabric:` `SiteLoginRequest`; Passport binds it to the origin Chrome reports and answers as Passport or as a linked desktop (Hub / GoonCitizen `POST /services/fabric/sign`, native approval on the desktop). Popup: `SiteLoginPrompt` identity picker, **Desktop apps** panel (discover, link with `POST /services/fabric/link`), **Trusted hubs** panel. `tests/fabricSiteMessage.unit.ts`. See [SECURITY.md](../SECURITY.md#local-first-fabric-sign-in).
+- **Allowlist + manifest.** `https://hub.goon.vc` in the default allowlist; `http://[::1]/*` alongside the other loopback twins; `optional_host_permissions: ["http://*/*"]` for LAN hubs the user trusts (granted per host on Save). `FABRIC_HUB_REGISTER_MESH` requires sender origin === hub.
 - **Auto-lock activity timestamps reject epoch 0.** `touchFabricActivity` /
   `readFabricActivityMs` require a positive epoch ms (same guard as suite chat
   `created` stamps) so `0` / negative stored values do not bypass idle lock.
@@ -71,7 +74,7 @@ Living queue for this repo. Detail and closed items live in [SECURITY.md](../SEC
 - chrome-extension / moz-extension Origins accepted by Hub http thin-client gate on allowlisted hubs.
 - HTTPS-only default hub allowlist; phishing origins refused in `tests/adversarialEnvironment.basics.unit.ts`.
 - Unit coverage for the full device-link HTTP flow (offer → accept → countersign → cross-sign → revoke), ARC publish/withdrawal evaluation, and Bitcoin `sendrawtransaction` / faucet failure modes.
-- IdentityCrossSign TS helper re-exports `@fabric/core` (lockfile `9938917`: `_normPubkey` rejects colon-smashed / non-hex keys; unknown `kind` rejected; truncated identity-id hex throws; `fabricIdentityAccountPath` exported). Device-link HTTP omits client-set Origin/Referer (Hub accepts `chrome-extension:` / `moz-extension:` on allowlisted hubs). May CodeRabbit notes on PR #3 (`eric/develop`) — invalid derive index, balance NaN, 402 `ln` trim, activity timestamps, harness `:3044`, exact 32-byte master key (`tests/encryptedDatastore.unit.ts`) — are already on **this** `feature/rsi` tip. CI uses `.nvmrc` **24.15.0** (was hardcoded Node 22).
+- IdentityCrossSign TS helper re-exports `@fabric/core` (lockfile **`88f766c28`**: `_normPubkey` rejects colon-smashed / non-hex keys; unknown `kind` rejected; truncated identity-id hex throws; `fabricIdentityAccountPath` exported). Device-link HTTP omits client-set Origin/Referer (Hub accepts `chrome-extension:` / `moz-extension:` on allowlisted hubs). May CodeRabbit notes on PR #3 (`eric/develop`) — invalid derive index, balance NaN, 402 `ln` trim, activity timestamps, harness `:3044`, exact 32-byte master key (`tests/encryptedDatastore.unit.ts`) — are already on **this** `feature/rsi` tip. CI uses `.nvmrc` **24.15.0** (was hardcoded Node 22).
 
 ## PRs
-No human review comments on PR #3. Do not merge or retarget that branch as the RSI deploy. April–May CodeRabbit “quick wins” on `eric/develop` are already on `feature/rsi` (see Closed). **Tests and coverage** on GitHub PR #3 (`eric/develop` @ `51ea3c3`, 2026-08-12) fails: Playwright headless-shell cannot discover the MV3 service worker (`Could not find chrome-extension:// service worker`). This tree stages headed Chromium + `xvfb-run` + `PLAYWRIGHT_CHROMIUM_USE_HEADLESS_SHELL=0`. Codacy ACTION_REQUIRED on that PR; `.codacy.yml` excludes generated trees (Hub-style). Pin core **`9938917`** / http **`7d7f1c7`** (next core [#186](https://github.com/FabricLabs/fabric/pull/186) HEAD **`9c6ade0`**). Do not retarget [#3](https://github.com/FabricLabs/fabric-browser-extension/pull/3). Keep `report:install` lockfile wipe (suite RSI convention; script now `rm -f` instead of writing a blank line).
+No human review comments on PR #3. Do not merge or retarget that branch as the RSI deploy. April–May CodeRabbit “quick wins” on `eric/develop` are already on `feature/rsi` (see Closed). **Tests and coverage** on GitHub PR #3 (`eric/develop` @ `51ea3c3`, 2026-08-12) fails: Playwright headless-shell cannot discover the MV3 service worker (`Could not find chrome-extension:// service worker`). This tree stages headed Chromium + `xvfb-run` + `PLAYWRIGHT_CHROMIUM_USE_HEADLESS_SHELL=0`. Codacy ACTION_REQUIRED on that PR; `.codacy.yml` excludes generated trees (Hub-style). Pin core **`88f766c28`** / http **`ca27d14`**. Do not retarget [#3](https://github.com/FabricLabs/fabric-browser-extension/pull/3). Keep `report:install` lockfile wipe (suite RSI convention; script now `rm -f` instead of writing a blank line).
