@@ -1,7 +1,7 @@
 /**
  * Legacy web page index — Passport keeps an on-demand local archive of pages
  * the user chooses to capture, split into AMP-sized blobs (same 24 KiB chunking
- * and Tree merkle root as `@fabric/core/functions/documentBlobManifest`), plus a
+ * and Tree merkle root as core `Document`), plus a
  * chunk index of which peers advertise those blobs.
  *
  * - Blob bytes + page rows live in IndexedDB (`unlimitedStorage`).
@@ -64,8 +64,16 @@ function hexToBytes (hex: string): Uint8Array {
   return out;
 }
 
-function reversed (bytes: Uint8Array): Uint8Array {
-  return Uint8Array.from(bytes).reverse();
+function base64ToBytes (s: string): Uint8Array | null {
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(s)) return null;
+  try {
+    const bin = atob(s);
+    const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+  } catch (_) {
+    return null;
+  }
 }
 
 function subtle (): SubtleCrypto {
@@ -79,35 +87,78 @@ export async function sha256 (bytes: Uint8Array): Promise<Uint8Array> {
   return new Uint8Array(await subtle().digest('SHA-256', copy));
 }
 
-async function sha256d (bytes: Uint8Array): Promise<Uint8Array> {
-  return sha256(await sha256(bytes));
+const DOCUMENT_TREE_LEAF = 0x00;
+const DOCUMENT_TREE_NODE = 0x01;
+const DOCUMENT_TREE_ROOT = 0x02;
+const DOCUMENT_TREE_IV_BYTES = 12;
+
+export interface DocumentLeafInput {
+  blobHashHex: string;
+  paymentHashHex?: string | null;
+  iv?: string | null;
+}
+
+function hex32 (value: unknown, name: string): Uint8Array {
+  const s = String(value || '').trim().toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(s)) throw new Error(`${name} must be 64 hex chars`);
+  return hexToBytes(s);
+}
+
+function concat (parts: Uint8Array[]): Uint8Array {
+  const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+  let at = 0;
+  for (const p of parts) {
+    out.set(p, at);
+    at += p.length;
+  }
+  return out;
 }
 
 /**
- * Bitcoin-style merkle root over 32-byte leaves (odd-leaf duplication,
- * byte-reversed pair hashing) — identical to core `Tree` / `merkletreejs`
- * `isBitcoinTree`. Empty input → SHA-256 of nothing, as in core.
+ * Leaf for one blob: `H(0x00 || blobHash || paymentHash || iv)`, as core
+ * `Document.leafHex`. Unsealed blobs use 32 / 12 zero bytes for the payment
+ * hash / IV.
  */
-export async function merkleRootHexFromBlobHashes (blobHashHexes: string[]): Promise<string> {
-  if (!blobHashHexes.length) return bytesToHex(await sha256(new Uint8Array(0)));
-  let level = blobHashHexes.map((h) => hexToBytes(h.toLowerCase()));
-  while (level.length > 1) {
-    if (level.length % 2 === 1) level.push(level[level.length - 1]);
-    const next: Uint8Array[] = [];
-    for (let i = 0; i < level.length; i += 2) {
-      const l = reversed(level[i]);
-      const r = reversed(level[i + 1]);
-      const combined = new Uint8Array(64);
-      combined.set(l, 0);
-      combined.set(r, 32);
-      next.push(reversed(await sha256d(combined)));
-    }
-    level = next;
+export async function documentLeafHex (blob: DocumentLeafInput): Promise<string> {
+  const blobHash = hex32(blob.blobHashHex, 'blobHashHex');
+  const pay = blob.paymentHashHex ? hex32(blob.paymentHashHex, 'paymentHashHex') : new Uint8Array(32);
+  let iv: Uint8Array = new Uint8Array(DOCUMENT_TREE_IV_BYTES);
+  if (blob.iv != null && blob.iv !== '') {
+    const bytes = base64ToBytes(String(blob.iv).trim());
+    if (!bytes || bytes.length !== DOCUMENT_TREE_IV_BYTES) throw new Error('iv must be 12 bytes');
+    iv = bytes;
   }
-  return bytesToHex(level[0]);
+  return bytesToHex(await sha256(concat([Uint8Array.of(DOCUMENT_TREE_LEAF), blobHash, pay, iv])));
 }
 
-/** Split bytes into AMP-sized blobs and commit them (core `splitBlobs` shape). */
+/**
+ * Document root for blob leaves in index order — identical to core
+ * `Document.rootHex`: odd last nodes are promoted, and the root commits
+ * the blob count.
+ */
+export async function documentMerkleRootHex (blobs: DocumentLeafInput[]): Promise<string> {
+  if (!blobs.length) throw new Error('document must have at least one blob');
+  let nodes: Uint8Array[] = await Promise.all(blobs.map(async (b) => hexToBytes(await documentLeafHex(b))));
+  while (nodes.length > 1) {
+    const next: Uint8Array[] = [];
+    for (let i = 0; i < nodes.length; i += 2) {
+      next.push(i + 1 < nodes.length
+        ? await sha256(concat([Uint8Array.of(DOCUMENT_TREE_NODE), nodes[i], nodes[i + 1]]))
+        : nodes[i]);
+    }
+    nodes = next;
+  }
+  const count = new Uint8Array(4);
+  new DataView(count.buffer).setUint32(0, blobs.length >>> 0, false);
+  return bytesToHex(await sha256(concat([Uint8Array.of(DOCUMENT_TREE_ROOT), count, nodes[0]])));
+}
+
+/** Unsealed document root over blob hashes (core `Document.rootHexFromBlobHashes`). */
+export async function merkleRootHexFromBlobHashes (blobHashHexes: string[]): Promise<string> {
+  return documentMerkleRootHex(blobHashHexes.map((blobHashHex) => ({ blobHashHex })));
+}
+
+/** Split bytes into AMP-sized blobs and commit them (core `Document.split` shape). */
 export async function buildPageBlobTree (
   content: Uint8Array,
   chunkBytes: number = PAGE_BLOB_CHUNK_BYTES

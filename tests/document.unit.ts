@@ -6,7 +6,7 @@ import { FabricDocument, SEAL_SCHEME, MANIFEST_TYPE } from '../src/types/documen
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const sealedExchange = require('@fabric/core/functions/documentSealedExchange');
 // eslint-disable-next-line @typescript-eslint/no-var-requires
-const { merkleRootHexFromBlobHashes } = require('@fabric/core/functions/documentBlobManifest');
+const CoreDocument = require('@fabric/core/types/document');
 
 describe('Passport FabricDocument (core mirror)', function () {
   this.timeout(10000);
@@ -25,7 +25,7 @@ describe('Passport FabricDocument (core mirror)', function () {
       assert.strictEqual(createHash('sha256').update(Buffer.from(doc.bytesFor(leaf.index) as Uint8Array)).digest('hex'), leaf.blobHashHex);
     }
     assert.strictEqual(keys.size, 3);
-    assert.strictEqual(doc.merkleRootHex, merkleRootHexFromBlobHashes(doc.record.blobs.map((b) => b.blobHashHex)));
+    assert.strictEqual(doc.merkleRootHex, CoreDocument.rootHex(doc.record.blobs));
   });
 
   it('core opens Passport-sealed blobs and Passport opens core-sealed blobs', async () => {
@@ -43,7 +43,7 @@ describe('Passport FabricDocument (core mirror)', function () {
     const coreSealed = sealedExchange.sealPlaintext(Buffer.from('from core'));
     const record = {
       documentId: null,
-      merkleRootHex: merkleRootHexFromBlobHashes([coreSealed.contentSha256]),
+      merkleRootHex: CoreDocument.rootHex([{ blobHashHex: coreSealed.contentSha256, paymentHashHex: sealedExchange.paymentHashHexFromKey(coreSealed.key), iv: coreSealed.encryption.iv }]),
       blobTotal: 1,
       chunkBytes: 1024,
       sealed: true,

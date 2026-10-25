@@ -6,8 +6,8 @@ npm warn ERESOLVE overriding peer dependency
 npm warn ERESOLVE overriding peer dependency
 npm warn ERESOLVE overriding peer dependency
 npm warn ERESOLVE overriding peer dependency
-npm warn deprecated path-dirname@1.0.2: Package no longer supported. Contact Support at https://www.npmjs.com/support for more info.
 npm warn deprecated inflight@1.0.6: This module is not supported, and leaks memory. Do not use it. Check out lru-cache if you want a good and tested way to coalesce async requests by a key value, which is much more comprehensive and powerful.
+npm warn deprecated path-dirname@1.0.2: Package no longer supported. Contact Support at https://www.npmjs.com/support for more info.
 npm warn deprecated clone-buffer@1.0.0: Package no longer supported. Contact Support at https://www.npmjs.com/support for more info.
 npm warn deprecated default-resolution@2.0.0: Package no longer supported. Contact Support at https://www.npmjs.com/support for more info.
 npm warn deprecated source-map-url@0.4.1: See https://github.com/lydell/source-map-url#deprecated
@@ -30,15 +30,13 @@ npm warn deprecated fsevents@1.2.13: Upgrade to fsevents v2 to mitigate potentia
 npm warn deprecated gulp-util@3.0.8: gulp-util is deprecated - replace it, following the guidelines at https://medium.com/gulpjs/gulp-util-ca3b1f9f9ac5
 npm warn deprecated uuid@8.3.2: uuid@10 and below is no longer supported.  For ESM codebases, update to uuid@latest.  For CommonJS codebases, use uuid@11 (but be aware this version will likely be deprecated in 2028).
 npm warn deprecated glob@10.5.0: Old versions of glob are not supported, and contain widely publicized security vulnerabilities, which have been fixed in the current version. Please update. Support for old versions may be purchased (at exorbitant rates) by contacting i@izs.me
-npm warn deprecated glob@10.5.0: Old versions of glob are not supported, and contain widely publicized security vulnerabilities, which have been fixed in the current version. Please update. Support for old versions may be purchased (at exorbitant rates) by contacting i@izs.me
-npm warn deprecated glob@10.5.0: Old versions of glob are not supported, and contain widely publicized security vulnerabilities, which have been fixed in the current version. Please update. Support for old versions may be purchased (at exorbitant rates) by contacting i@izs.me
 
-added 1680 packages, and audited 1681 packages in 1m
+added 1626 packages, and audited 1627 packages in 56s
 
-192 packages are looking for funding
+194 packages are looking for funding
   run `npm fund` for details
 
-38 vulnerabilities (2 low, 15 moderate, 21 high)
+36 vulnerabilities (1 low, 14 moderate, 21 high)
 
 To address issues that do not require attention, run:
   npm audit fix
@@ -47,7 +45,7 @@ To address all issues (including breaking changes), run:
   npm audit fix --force
 
 Run `npm audit` for details.
-npm warn install-scripts 11 packages had install scripts blocked because they are not covered by allowScripts:
+npm warn install-scripts 10 packages had install scripts blocked because they are not covered by allowScripts:
 npm warn install-scripts   @fabric/core@0.1.0 (install: node scripts/install-native.js)
 npm warn install-scripts   sharp@0.33.5 (install: node install/check)
 npm warn install-scripts   zeromq@6.8.0 (install: node ./script/install.js)
@@ -56,7 +54,6 @@ npm warn install-scripts   fsevents@1.2.13 (install: node install.js)
 npm warn install-scripts   classic-level@3.0.0 (install: node-gyp-build)
 npm warn install-scripts   fsevents@2.3.2 (install: node-gyp rebuild)
 npm warn install-scripts   es5-ext@0.10.64 (postinstall:  node -e "try{require('./_postinstall')}catch(e){}" || exit 0)
-npm warn install-scripts   fsevents@2.3.3 (install: node-gyp rebuild)
 npm warn install-scripts   fsevents@2.3.3 (install: node-gyp rebuild)
 npm warn install-scripts   fsevents@2.3.3 (install: node-gyp rebuild)
 npm warn install-scripts

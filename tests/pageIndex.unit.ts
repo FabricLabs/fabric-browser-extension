@@ -11,29 +11,16 @@ import { DocumentOfferBook, TELEMETRY_TYPE } from '../src/types/offerBook';
 import { tryParseNotifiableWireMessage } from '../src/fabric/fabricWireNotify';
 import { INVENTORY_RESPONSE } from '../src/fabric/messageTypes';
 
-// Reference implementation of core `Tree` (merkletreejs isBitcoinTree + Hash256).
-function refRoot (leaves: string[]): string {
-  const sha = (b: Buffer) => createHash('sha256').update(b).digest();
-  const rev = (b: Buffer) => Buffer.from(b).reverse();
-  if (!leaves.length) return sha(Buffer.alloc(0)).toString('hex');
-  let lvl: Buffer[] = leaves.map((h) => Buffer.from(h, 'hex'));
-  while (lvl.length > 1) {
-    if (lvl.length % 2) lvl.push(lvl[lvl.length - 1]);
-    const next: Buffer[] = [];
-    for (let i = 0; i < lvl.length; i += 2) {
-      next.push(rev(sha(sha(Buffer.concat([rev(lvl[i]), rev(lvl[i + 1])])))));
-    }
-    lvl = next;
-  }
-  return lvl[0].toString('hex');
-}
+// Core reference (sibling checkout or installed @fabric/core).
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const CoreDocument = require('@fabric/core/types/document');
 
 describe('pageIndex (legacy web page chunk index)', () => {
-  it('merkle root matches the core Tree algorithm for 1..5 leaves', async () => {
+  it('merkle root matches the core document tree for 1..5 leaves', async () => {
     for (const n of [1, 2, 3, 4, 5]) {
       const leaves: string[] = [];
       for (let i = 0; i < n; i++) leaves.push(createHash('sha256').update('leaf' + i).digest('hex'));
-      assert.strictEqual(await merkleRootHexFromBlobHashes(leaves), refRoot(leaves));
+      assert.strictEqual(await merkleRootHexFromBlobHashes(leaves), CoreDocument.rootHexFromBlobHashes(leaves));
     }
   });
 
@@ -45,7 +32,7 @@ describe('pageIndex (legacy web page chunk index)', () => {
     assert.strictEqual(tree.blobs[2].size, 17);
     assert.strictEqual(tree.blobs[0].blobHashHex, createHash('sha256').update(chunks[0]).digest('hex'));
     assert.strictEqual(tree.contentSha256, createHash('sha256').update(content).digest('hex'));
-    assert.strictEqual(tree.merkleRootHex, refRoot(tree.blobs.map((b) => b.blobHashHex)));
+    assert.strictEqual(tree.merkleRootHex, CoreDocument.rootHexFromBlobHashes(tree.blobs.map((b) => b.blobHashHex)));
   });
 
   it('captures a page, reads it back, and lists hash-only inventory items', async () => {

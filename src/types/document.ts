@@ -9,7 +9,7 @@
  * separately sealed manifest blob (`encodeManifest`).
  */
 
-import { sha256, merkleRootHexFromBlobHashes, PAGE_BLOB_CHUNK_BYTES } from '../services/pageIndex';
+import { sha256, documentMerkleRootHex, PAGE_BLOB_CHUNK_BYTES } from '../services/pageIndex';
 
 export const SEAL_SCHEME = 'aes-256-gcm-content-v1';
 export const GCM_TAG_BYTES = 16;
@@ -174,7 +174,7 @@ export class FabricDocument {
       doc.ciphertexts.set(i, sealed.ciphertext);
       doc.plaintexts.set(i, new Uint8Array(slice));
     }
-    doc.record.merkleRootHex = await merkleRootHexFromBlobHashes(blobs.map((b) => b.blobHashHex));
+    doc.record.merkleRootHex = await documentMerkleRootHex(blobs);
     return doc;
   }
 
