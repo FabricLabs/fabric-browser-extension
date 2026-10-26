@@ -5,28 +5,40 @@ import assert from 'assert';
 const Key = require('@fabric/core/types/key');
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const Identity = require('@fabric/core/types/identity');
+import { buildClientSignedBody, fabricSigningIdentity, parseHubLoginChallenge } from '../src/utils/fabricSiteLoginSign';
 // eslint-disable-next-line @typescript-eslint/no-var-requires
-const {
-  verifyFabricDesktopLoginSignedPayload
-} = require('@fabric/http/functions/fabricSiteLoginVerify');
-import { buildClientSignedLoginBody } from '../src/utils/fabricSiteLoginSign';
+const { verifyIdentitySchnorr } = require('@fabric/http/functions/fabricSiteLoginVerify');
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const SIGNING_TAGS = require('@fabric/core/functions/signingTags');
 
 describe('fabricSiteLoginSign', function () {
-  it('builds a Hub-verifiable client login body from HD Key', function () {
+  it('reads origin and nonce from a /sessions challenge for its own session only', function () {
+    const nonce = 'ab'.repeat(32);
+    const sessionId = 'cd'.repeat(24);
+    const message = `fabric:hub-login:1:${nonce}:${sessionId}:https://relay.goon.vc`;
+    assert.deepStrictEqual(parseHubLoginChallenge(message, sessionId), { origin: 'https://relay.goon.vc', nonce });
+    assert.strictEqual(parseHubLoginChallenge(message, 'ef'.repeat(24)), null);
+    assert.strictEqual(parseHubLoginChallenge('fabric:hub-login:1:nope', sessionId), null);
+  });
+
+  it('signs under the given tag and verifies only under it', function () {
     const key = new Key();
     const ident = new Identity(key);
-    const message = 'fabric:hub-login:1:' + 'ab'.repeat(32) + ':' + 'cd'.repeat(24) + ':https://relay.goon.vc';
-    const body = buildClientSignedLoginBody(message, { xprv: key.xprv });
+    const message = 'fabric:device-link:3:link:example';
+    const body = buildClientSignedBody(message, SIGNING_TAGS.DEVICE_LINK, { xprv: key.xprv });
     assert.match(body.signature, /^[a-f0-9]{128}$/i);
     assert.strictEqual(body.pubkeyHex, ident.fabricKey.pubkey);
-    assert.ok(body.identity.id.startsWith('id1'));
     assert.strictEqual(body.identity.xpub, ident.fabricKey.xpub);
     assert.strictEqual(String(body.identity.id), String(ident.id));
-    const verified = verifyFabricDesktopLoginSignedPayload({
-      ...body,
-      message
-    }, { sessionId: 'cd'.repeat(24), origin: 'https://relay.goon.vc' });
-    assert.strictEqual(verified.ok, true);
+    const ok = verifyIdentitySchnorr(message, body.signature, body.pubkeyHex, body.identity, SIGNING_TAGS.DEVICE_LINK);
+    assert.strictEqual(ok.ok, true);
+    const other = verifyIdentitySchnorr(message, body.signature, body.pubkeyHex, body.identity, SIGNING_TAGS.DEVICE_LINK_OFFER);
+    assert.strictEqual(other.ok, false);
+  });
+
+  it('refuses to sign without a tag', function () {
+    const key = new Key();
+    assert.throws(() => buildClientSignedBody('x', '', { xprv: key.xprv }), /tag/);
   });
 
   it('accepts Passport leaf privateKeyHex + fabric-path xpub', function () {
@@ -36,15 +48,11 @@ describe('fabricSiteLoginSign', function () {
     const priv = Buffer.isBuffer(fabric.private)
       ? fabric.private.toString('hex')
       : String(fabric.private);
-    const message = 'fabric:hub-login:1:' + '11'.repeat(32) + ':' + '22'.repeat(24) + ':https://hub.fabric.pub';
-    const body = buildClientSignedLoginBody(message, priv, fabric.xpub);
-    assert.strictEqual(body.pubkeyHex, fabric.pubkey);
+    const own = fabricSigningIdentity(priv, fabric.xpub);
+    assert.strictEqual(own.id, String(ident.id));
+    assert.strictEqual(own.pubkeyHex, fabric.pubkey);
+    assert.strictEqual(own.xpub, fabric.xpub);
+    const body = buildClientSignedBody('m', SIGNING_TAGS.DEVICE_LINK_OFFER, priv, fabric.xpub);
     assert.strictEqual(body.identity.id, String(ident.id));
-    assert.strictEqual(body.identity.xpub, fabric.xpub);
-    const verified = verifyFabricDesktopLoginSignedPayload({
-      ...body,
-      message
-    }, { sessionId: '22'.repeat(24), origin: 'https://hub.fabric.pub' });
-    assert.strictEqual(verified.ok, true);
   });
 });

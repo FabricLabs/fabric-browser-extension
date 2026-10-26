@@ -3,6 +3,8 @@
 ## Project Overview
 The Fabric Browser Extension is a cryptocurrency wallet and identity management system that enables users to log in to Fabric applications securely. It's built as a browser extension using modern web technologies and cryptographic libraries.
 
+**Do not fork** core `Key` / `Identity` in `src/types/`. Suite `types/` + `services/` map: `@fabric/core` `docs/TYPES_AND_SERVICES.md` (local `~/fabric-clean`).
+
 ## Core Features
 - Identity Management
   - Create and manage multiple identities

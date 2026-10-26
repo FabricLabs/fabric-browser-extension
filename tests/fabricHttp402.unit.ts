@@ -69,4 +69,37 @@ describe('fabricHttp402 (402 payment headers)', () => {
     );
     assert.strictEqual(u, fromL402);
   });
+
+  it('decodes a Hub document-offer listing with its listed price and cost basis', () => {
+    const payload = {
+      v: 1,
+      scheme: 'fabric-http-document-payment',
+      documentExchange: {
+        offerType: 'FABRIC_DOCUMENT_OFFER',
+        responseType: 'FABRIC_DOCUMENT_OFFER_RESPONSE',
+        inventoryWireOpcodes: {
+          request: 'P2P_INVENTORY_REQUEST',
+          response: 'P2P_INVENTORY_RESPONSE'
+        }
+      },
+      documentOffer: {
+        documentId: 'ab'.repeat(32),
+        purchasePriceSats: 110,
+        costBasisSats: 100,
+        network: 'regtest'
+      }
+    };
+    const decoded = decodeFabricPaymentRequestHeader(
+      Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url')
+    );
+    assert.ok(decoded);
+    assert.strictEqual(decoded?.documentExchange?.offerType, 'FABRIC_DOCUMENT_OFFER');
+    assert.strictEqual(decoded?.documentOffer?.purchasePriceSats, 110);
+    assert.strictEqual(
+      decoded?.documentOffer && 'costBasisSats' in (decoded.documentOffer as object)
+        ? (decoded.documentOffer as { costBasisSats?: number }).costBasisSats
+        : undefined,
+      100
+    );
+  });
 });

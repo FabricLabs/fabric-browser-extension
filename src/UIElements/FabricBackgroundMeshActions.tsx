@@ -65,7 +65,7 @@ export function FabricBackgroundMeshActions (props: { fabricNodes: FabricNodeRow
         </Message>
       )}
       <p style={{ marginTop: '0.5em', fontSize: '0.82em', color: 'rgba(255,255,255,0.65)' }}>
-        Any Fabric application can also call <code style={{ fontSize: '0.9em' }}>postMessage</code> to register its node for background mesh. See <code style={{ fontSize: '0.9em' }}>hub-mesh-bridge.html</code> in extension assets.
+        Any Fabric application can also call <code style={{ fontSize: '0.9em' }}>postMessage</code> to register its node for background mesh.
       </p>
     </div>
   );

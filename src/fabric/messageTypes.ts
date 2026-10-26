@@ -70,7 +70,7 @@ export interface FabricMessageTypeDescriptor {
 export const NOTIFICATION_WORTHY_TYPES: readonly FabricMessageTypeDescriptor[] = [
   {
     type: FEDERATION_CONTRACT_INVITE,
-    label: 'Multisig wallet invitation',
+    label: 'Group invitation (GoonCitizen)',
     notificationPriority: 'high',
     icon: 'users',
     arc: true
@@ -131,7 +131,7 @@ export const NOTIFICATION_WORTHY_TYPES: readonly FabricMessageTypeDescriptor[] =
   },
   {
     type: FEDERATION_CONTRACT_INVITE_RESPONSE,
-    label: 'Multisig invite response',
+    label: 'Group invitation response',
     notificationPriority: 'normal',
     icon: 'reply',
     arc: true
@@ -271,16 +271,10 @@ export function summarizeNotifiablePayload (
   }
 
   if (messageType === FEDERATION_CONTRACT_INVITE) {
-    try {
-      // Lazy require so unit tests without webpack still resolve when linked.
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
-      const { summarizeMultisigWalletInvite } = require('../utils/federationWalletInvite');
-      return summarizeMultisigWalletInvite(payload, node);
-    } catch (_) {
-      const name = typeof payload.groupName === 'string' ? payload.groupName
-        : (typeof payload.name === 'string' ? payload.name : 'shared wallet');
-      return `${node}: multisig invite · ${name}`;
-    }
+    // GoonCitizen group join invite; joined in GoonCitizen, not a Passport multisig.
+    const name = typeof payload.groupName === 'string' ? payload.groupName
+      : (typeof payload.name === 'string' ? payload.name : 'a group');
+    return `${node}: invites you to ${name} (open GoonCitizen to join)`;
   }
 
   if (messageType === MISSION_BROADCAST) {

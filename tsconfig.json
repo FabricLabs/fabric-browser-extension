@@ -16,7 +16,7 @@
     "noEmit": true,
     "jsx": "react-jsx",
     "downlevelIteration": true,
-    "types": ["mocha", "node"]
+    "types": ["mocha", "node", "chrome"]
   },
   "include": ["src", "tests"]
 }

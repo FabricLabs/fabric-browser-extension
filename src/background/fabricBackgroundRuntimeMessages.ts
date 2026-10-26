@@ -5,14 +5,26 @@
  * Split out from fabricBackground.ts to keep registration/setup separate from handler complexity.
  */
 
-import { FABRIC_MESH_HUB_REGISTRATION_KEY, FABRIC_STATE_STORAGE_KEY } from '../constants/fabricExtension';
+import { FABRIC_MESH_HUB_REGISTRATION_KEY } from '../constants/fabricExtension';
 import {
   FABRIC_PENDING_SITE_LOGIN_KEY,
+  FABRIC_RUNTIME_DESKTOP_SIGN,
+  FABRIC_RUNTIME_FABRIC_MESSAGE,
   FABRIC_RUNTIME_SITE_LOGIN_CLEAR,
   FABRIC_RUNTIME_SITE_LOGIN_COMPLETE,
   FABRIC_RUNTIME_SITE_LOGIN_GET,
   FABRIC_RUNTIME_SITE_LOGIN_REQUEST
 } from '../constants/siteLogin';
+import {
+  completeWithDesktop,
+  checkSenderFrame,
+  queueFabricMessage,
+  queueHubLogin,
+  readPendingSiteLogin,
+  siteLoginPromptOpen,
+  writePendingSiteLogin,
+  type PendingSiteLoginRow
+} from './fabricSiteLoginRuntime';
 import {
   FABRIC_PENDING_DEVICE_LINK_KEY,
   FABRIC_RUNTIME_DEVICE_LINK_CLEAR,
@@ -20,7 +32,9 @@ import {
   FABRIC_RUNTIME_DEVICE_LINK_GET,
   FABRIC_RUNTIME_DEVICE_LINK_REQUEST
 } from '../constants/deviceLink';
-import { findMessageTypeDescriptor, summarizeNotifiablePayload, type NotificationPriority } from '../fabric/messageTypes';
+import { findMessageTypeDescriptor, summarizeNotifiablePayload, INVENTORY_RESPONSE, type NotificationPriority } from '../fabric/messageTypes';
+import { getPageIndex } from '../services/pageIndex';
+import { getMarketAgent, configureMarketAgent, tickMarketAgent, persistMarketAgent } from '../services/marketRuntime';
 import { fabricDsGet, fabricDsSet, fabricDsRemove, fabricDsListPrefix, setDatastoreMasterKeyFromBytes } from './encryptedDatastore';
 import {
   getFabricTrafficSnapshot,
@@ -29,16 +43,13 @@ import {
 } from './identityOutband';
 import { attemptPayBolt11ViaActiveFabricNode } from './passportBolt11Pay';
 import { swallowNonFatal } from '../utils/nonFatal';
-
-type PendingSiteLoginRow = {
-  sessionId: string;
-  hubBase: string;
-  origin: string;
-  message: string;
-  pageOrigin: string;
-  createdAt: number;
-  tabId?: number;
-};
+import { validateQueuedDeviceLinkOffer } from '../utils/fabricDeviceLinkFetch';
+import {
+  assertAllowedFabricHub,
+  loadFabricHubGateOptions,
+  FABRIC_RUNTIME_HUB_GATE_OPTIONS
+} from '../utils/fabricHubAllowlist';
+import { originOfSender } from '../utils/fabricSiteMessage';
 
 type PendingDeviceLinkRow = {
   sessionId: string;
@@ -75,7 +86,7 @@ function showFabricNotification (title: string, message: string): void {
 export function handleFabricRuntimeMessage (
   message: unknown,
   sender: chrome.runtime.MessageSender,
-  sendResponse: (response?: unknown) => void,
+  sendResponse: (_response?: unknown) => void,
   deps: FabricRuntimeMessageDeps
 ): boolean | undefined {
   if (!message || typeof message !== 'object') return undefined;
@@ -137,6 +148,79 @@ export function handleFabricRuntimeMessage (
     return true;
   }
 
+  if (m.type === 'FABRIC_PAGE_INDEX_LIST') {
+    // Hash-only page index rows (root, leaves, provider counts) for the popup.
+    const limit = typeof m.limit === 'number' ? m.limit : 50;
+    void (async () => {
+      const index = getPageIndex();
+      const pages = (await index.listPages()).slice(0, limit);
+      const items = [];
+      for (const page of pages) {
+        const locations = await index.locatePage({ url: page.url, merkleRootHex: page.merkleRootHex });
+        items.push({
+          url: page.url,
+          title: page.title || null,
+          merkleRootHex: page.merkleRootHex,
+          blobTotal: page.blobTotal,
+          size: page.size,
+          providers: locations.reduce((n, l) => n + (l.providers ? l.providers.length : 0), 0),
+          blobs: page.blobs.map((b) => ({ index: b.index, blobHashHex: b.blobHashHex, size: b.size }))
+        });
+      }
+      sendResponse({ ok: true, items });
+    })().catch((e) => sendResponse({ ok: false, error: String(e) }));
+    return true;
+  }
+
+  if (m.type === 'FABRIC_MARKET_STATUS') {
+    void getMarketAgent()
+      .then((agent) => sendResponse({ ok: true, status: agent.status() }))
+      .catch((e) => sendResponse({ ok: false, error: String(e) }));
+    return true;
+  }
+
+  if (m.type === 'FABRIC_MARKET_CONFIGURE') {
+    const patch = (m.settings && typeof m.settings === 'object') ? m.settings as Record<string, number> : {};
+    void configureMarketAgent(patch)
+      .then((agent) => sendResponse({ ok: true, status: agent.status() }))
+      .catch((e) => sendResponse({ ok: false, error: String(e) }));
+    return true;
+  }
+
+  if (m.type === 'FABRIC_MARKET_WANT') {
+    void getMarketAgent()
+      .then(async (agent) => {
+        const want = agent.want(String(m.merkleRootHex || ''), {
+          documentId: typeof m.documentId === 'string' ? m.documentId : undefined,
+          blobTotal: typeof m.blobTotal === 'number' ? m.blobTotal : undefined,
+          maxSats: typeof m.maxSats === 'number' ? m.maxSats : undefined
+        });
+        const tick = agent.tick();
+        await persistMarketAgent();
+        sendResponse({ ok: true, want, tick, status: agent.status() });
+      })
+      .catch((e) => sendResponse({ ok: false, error: String(e) }));
+    return true;
+  }
+
+  if (m.type === 'FABRIC_MARKET_FORGET') {
+    void getMarketAgent()
+      .then(async (agent) => {
+        const removed = agent.forget(String(m.merkleRootHex || ''));
+        await persistMarketAgent();
+        sendResponse({ ok: true, removed, status: agent.status() });
+      })
+      .catch((e) => sendResponse({ ok: false, error: String(e) }));
+    return true;
+  }
+
+  if (m.type === 'FABRIC_MARKET_TICK') {
+    void tickMarketAgent()
+      .then(async (tick) => sendResponse({ ok: true, tick, status: (await getMarketAgent()).status() }))
+      .catch((e) => sendResponse({ ok: false, error: String(e) }));
+    return true;
+  }
+
   if (m.type === 'FABRIC_LIST_ARC_NOTIFICATIONS') {
     const limit = typeof m.limit === 'number' ? m.limit : 30;
     void fabricDsListPrefix('notification:', limit)
@@ -171,13 +255,13 @@ export function handleFabricRuntimeMessage (
   if (m.type === 'FABRIC_DS_SET_MASTER_KEY' && m.rawKeyB64 && typeof m.rawKeyB64 === 'string') {
     try {
       const bin = atob(m.rawKeyB64);
-      if (bin.length < 32) {
-        sendResponse({ error: 'Master key must be at least 32 bytes (base64 decodes to 32+ octets).' });
+      if (bin.length !== 32) {
+        sendResponse({ error: 'Master key must be 32 bytes (base64 decodes to exactly 32 octets).' });
         return true;
       }
       const buf = new ArrayBuffer(32);
       const v = new Uint8Array(buf);
-      for (let i = 0; i < 32 && i < bin.length; i++) v[i] = bin.charCodeAt(i);
+      for (let i = 0; i < 32; i++) v[i] = bin.charCodeAt(i);
       void setDatastoreMasterKeyFromBytes(buf).then(() => sendResponse({ ok: true }));
     } catch (e: unknown) {
       sendResponse({ error: String(e) });
@@ -227,20 +311,28 @@ export function handleFabricRuntimeMessage (
       sendResponse({ ok: false, error: 'invalid_hub_address' });
       return false;
     }
-    if (m.pageOrigin !== expectedOrigin) {
+    const senderOrigin = sender.tab ? originOfSender(sender) : m.pageOrigin;
+    if (m.pageOrigin !== expectedOrigin || senderOrigin !== expectedOrigin) {
       sendResponse({ ok: false, error: 'origin_mismatch' });
       return false;
     }
-    void chrome.storage.local.set({
-      [FABRIC_MESH_HUB_REGISTRATION_KEY]: {
-        hubAddress,
-        pageOrigin: m.pageOrigin,
-        registeredAt: Date.now(),
-        source: 'hub_page'
+    void loadFabricHubGateOptions().then((gateOptions) => {
+      const gate = assertAllowedFabricHub(expectedOrigin, gateOptions);
+      if (!gate.ok) {
+        sendResponse({ ok: false, error: 'hub_not_allowed' });
+        return;
       }
-    }, () => {
-      void syncMeshFromStorage().then(() => sendResponse({ ok: true }));
-    });
+      void chrome.storage.local.set({
+        [FABRIC_MESH_HUB_REGISTRATION_KEY]: {
+          hubAddress,
+          pageOrigin: expectedOrigin,
+          registeredAt: Date.now(),
+          source: 'hub_page'
+        }
+      }, () => {
+        void syncMeshFromStorage().then(() => sendResponse({ ok: true }));
+      });
+    }).catch((e: unknown) => sendResponse({ ok: false, error: String(e) }));
     return true;
   }
 
@@ -279,6 +371,16 @@ export function handleFabricRuntimeMessage (
   }
 
   if (m.type === 'FABRIC_NODE_MESSAGE' && typeof m.messageType === 'string' && m.payload && typeof m.payload === 'object') {
+    if (m.messageType === INVENTORY_RESPONSE) {
+      // Peer chunk listings feed the local page/chunk index; never a notification.
+      const payload = m.payload as Record<string, unknown>;
+      void getPageIndex().ingestInventoryResponse({
+        origin: typeof m.nodeAddress === 'string' ? m.nodeAddress : undefined,
+        payload,
+        signerPubkeyHex: typeof payload.signerPubkeyHex === 'string' ? payload.signerPubkeyHex : null
+      }).catch((err: unknown) => swallowNonFatal('page-index-inventory', err));
+      return false;
+    }
     const descriptor = findMessageTypeDescriptor(m.messageType);
     if (descriptor && descriptor.notificationPriority !== 'silent') {
       const node = typeof m.nodeAddress === 'string' ? m.nodeAddress : 'a Fabric node';
@@ -331,43 +433,49 @@ export function handleFabricRuntimeMessage (
     return false;
   }
 
-  /** Content script: queue a client-signed site login for the popup to approve. */
-  if (m.type === FABRIC_RUNTIME_SITE_LOGIN_REQUEST) {
-    const sessionId = typeof m.sessionId === 'string' ? m.sessionId.trim() : '';
-    const hubBase = typeof m.hubBase === 'string' ? m.hubBase.trim() : '';
-    const origin = typeof m.origin === 'string' ? m.origin.trim() : '';
-    const message = typeof m.message === 'string' ? m.message : '';
-    const pageOrigin = typeof m.pageOrigin === 'string' ? m.pageOrigin.trim() : '';
-    if (!sessionId || !hubBase || !message || !pageOrigin || pageOrigin !== origin) {
-      sendResponse({ ok: false, error: 'invalid_site_login' });
+  /** Content script: queue a site login (legacy `/sessions` challenge or a page `fabric:` request) for the popup. */
+  if ((m.type === FABRIC_RUNTIME_SITE_LOGIN_REQUEST || m.type === FABRIC_RUNTIME_FABRIC_MESSAGE) && sender.tab) {
+    const frame = checkSenderFrame(sender);
+    if (!frame.ok) {
+      sendResponse({ ok: false, error: frame.error });
       return false;
     }
-    const row: PendingSiteLoginRow = {
-      sessionId,
-      hubBase,
-      origin,
-      message,
-      pageOrigin,
-      createdAt: Date.now(),
-      tabId: sender.tab?.id
-    };
-    const persist = chrome.storage.session
-      ? chrome.storage.session.set({ [FABRIC_PENDING_SITE_LOGIN_KEY]: row })
-      : chrome.storage.local.set({ [FABRIC_PENDING_SITE_LOGIN_KEY]: row });
-    void Promise.resolve(persist).then(() => {
-      showFabricNotification('Fabric Passport', `Sign-in request from ${origin}`);
-      // Best-effort: focus the extension action so the user opens the popup.
-      try {
-        if (chrome.action?.openPopup) {
-          void chrome.action.openPopup().catch((err: unknown) => swallowNonFatal('site-login-open-popup', err));
-        }
-      } catch (err: unknown) {
-        swallowNonFatal('site-login-open-popup', err);
+    const queued = m.type === FABRIC_RUNTIME_FABRIC_MESSAGE
+      ? queueFabricMessage(m, sender)
+      : queueHubLogin(m, sender);
+    if (!queued.ok) {
+      sendResponse({ ok: false, error: queued.error });
+      return false;
+    }
+    const row: PendingSiteLoginRow = queued.row;
+    void readPendingSiteLogin().then((current) => {
+      if (siteLoginPromptOpen(current)) {
+        sendResponse({ ok: false, error: 'busy' });
+        return;
       }
-      sendResponse({ ok: true });
+      return writePendingSiteLogin(row).then(() => {
+        showFabricNotification('Fabric Passport', `Sign-in request from ${row.origin}`);
+        // Best-effort: focus the extension action so the user opens the popup.
+        try {
+          if (chrome.action?.openPopup) {
+            void chrome.action.openPopup().catch((err: unknown) => swallowNonFatal('site-login-open-popup', err));
+          }
+        } catch (err: unknown) {
+          swallowNonFatal('site-login-open-popup', err);
+        }
+        sendResponse({ ok: true });
+      });
     }).catch((e: unknown) => {
       sendResponse({ ok: false, error: String(e) });
     });
+    return true;
+  }
+
+  /** Popup: a linked desktop app signs the pending login; delivered from here so closing the popup is fine. */
+  if (m.type === FABRIC_RUNTIME_DESKTOP_SIGN && !sender.tab) {
+    void completeWithDesktop(m)
+      .then((out) => sendResponse(out))
+      .catch((e: unknown) => sendResponse({ ok: false, error: String(e instanceof Error ? e.message : e) }));
     return true;
   }
 
@@ -389,8 +497,28 @@ export function handleFabricRuntimeMessage (
     return true;
   }
 
+  /** Content script: which loopback Hub (the active node) the page gates may allow. */
+  if (m.type === FABRIC_RUNTIME_HUB_GATE_OPTIONS) {
+    void loadFabricHubGateOptions().then((gate) => sendResponse({ activeHub: gate.activeHub || null }));
+    return true;
+  }
+
   /** Content script: queue a mutual device-link offer for the popup to approve (responder). */
   if (m.type === FABRIC_RUNTIME_DEVICE_LINK_REQUEST) {
+    const frame = checkSenderFrame(sender);
+    if (!frame.ok) {
+      sendResponse({ ok: false, error: frame.error });
+      return false;
+    }
+    if (originOfSender(sender) !== (typeof m.pageOrigin === 'string' ? m.pageOrigin.trim() : '')) {
+      sendResponse({ ok: false, error: 'origin_mismatch' });
+      return false;
+    }
+    const queued = validateQueuedDeviceLinkOffer(m);
+    if (!queued.ok) {
+      sendResponse({ ok: false, error: queued.error });
+      return false;
+    }
     const sessionId = typeof m.sessionId === 'string' ? m.sessionId.trim() : '';
     const hubBase = typeof m.hubBase === 'string' ? m.hubBase.trim() : '';
     const origin = typeof m.origin === 'string' ? m.origin.trim() : '';
@@ -400,10 +528,7 @@ export function handleFabricRuntimeMessage (
     const initiator = m.initiator && typeof m.initiator === 'object'
       ? (m.initiator as { id?: string; xpub?: string; pubkeyHex?: string })
       : null;
-    if (
-      !sessionId || !hubBase || !nonce || !pageOrigin || pageOrigin !== origin ||
-      !initiator || typeof initiator.id !== 'string' || typeof initiator.xpub !== 'string'
-    ) {
+    if (!initiator || typeof initiator.id !== 'string' || typeof initiator.xpub !== 'string') {
       sendResponse({ ok: false, error: 'invalid_device_link' });
       return false;
     }

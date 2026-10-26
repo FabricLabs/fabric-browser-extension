@@ -15,6 +15,7 @@ import {
   BITCOIN_BLOCK,
   CONTRACT_MESSAGE,
   CONTRACT_PUBLISH,
+  INVENTORY_RESPONSE,
   P2P_CHAT_MESSAGE,
   P2P_CONTRACT_MESSAGE,
   P2P_CONTRACT_PUBLISH,
@@ -57,6 +58,61 @@ function parseJsonObject (raw: string): Record<string, unknown> | null {
     }
   } catch (err: unknown) {
     swallowNonFatal('fabric-wire-notify-json', err);
+  }
+  return null;
+}
+
+function chatTextFromPayload (payload: Record<string, unknown>): string {
+  if (typeof payload.text === 'string' && payload.text.trim()) return payload.text.trim();
+  if (typeof payload.content === 'string' && payload.content.trim()) return payload.content.trim();
+  const object = payload.object;
+  if (object && typeof object === 'object' && !Array.isArray(object)) {
+    const obj = object as { content?: unknown; body?: unknown };
+    if (typeof obj.content === 'string' && obj.content.trim()) return obj.content.trim();
+    if (typeof obj.body === 'string' && obj.body.trim()) return obj.body.trim();
+  }
+  return '';
+}
+
+function isChatEnvelope (obj: Record<string, unknown>): boolean {
+  if (obj.type === P2P_CHAT_MESSAGE || obj.type === 'CHAT_MESSAGE' || obj.type === 'ChatMessage') {
+    return true;
+  }
+  return !!(obj.actor && obj.object);
+}
+
+/**
+ * Mesh shoutbox body is raw UTF-8. A JSON `{ actor, object }` envelope is not
+ * that contract: older frames still notify, using only the inner text.
+ */
+function notifyShoutboxBody (body: string): NotifiableFabricResult | null {
+  const raw = String(body || '').trim();
+  if (!raw) return null;
+  const nested = tryParseNotifiableMessage(body);
+  if (
+    nested &&
+    nested.messageType !== P2P_CHAT_MESSAGE &&
+    nested.messageType !== 'CHAT_MESSAGE' &&
+    nested.messageType !== 'ChatMessage'
+  ) {
+    return nested;
+  }
+  if (nested && isChatEnvelope(nested.payload)) {
+    const text = chatTextFromPayload(nested.payload);
+    if (!text) return null;
+    return { messageType: P2P_CHAT_MESSAGE, payload: { content: text, text } };
+  }
+  if (!raw.startsWith('{') && !raw.startsWith('[')) {
+    return { messageType: P2P_CHAT_MESSAGE, payload: { content: raw, text: raw } };
+  }
+  const chat = parseJsonObject(body);
+  if (!chat) {
+    return { messageType: P2P_CHAT_MESSAGE, payload: { content: raw, text: raw } };
+  }
+  if (isChatEnvelope(chat)) {
+    const text = chatTextFromPayload(chat);
+    if (!text) return null;
+    return { messageType: P2P_CHAT_MESSAGE, payload: { content: text, text } };
   }
   return null;
 }
@@ -109,12 +165,13 @@ export function tryParseNotifiableWireMessage (
       }
     }
     if (typeof original === 'string') {
-      const fromJson = tryParseNotifiableMessage(original);
-      if (fromJson) return fromJson;
-      if (originalType === P2P_CHAT_MESSAGE || originalType === 'CHAT_MESSAGE' || originalType === 'ChatMessage') {
-        const chat = parseJsonObject(original);
-        if (chat) return { messageType: P2P_CHAT_MESSAGE, payload: chat };
+      const chatType = originalType === P2P_CHAT_MESSAGE || originalType === 'CHAT_MESSAGE' || originalType === 'ChatMessage';
+      if (chatType || !originalType) {
+        const shout = notifyShoutboxBody(original);
+        if (shout) return shout;
       }
+      const fromJson = tryParseNotifiableMessage(original);
+      if (fromJson && fromJson.messageType !== P2P_CHAT_MESSAGE) return fromJson;
       if (
         originalType === CONTRACT_MESSAGE ||
         originalType === P2P_CONTRACT_MESSAGE ||
@@ -147,11 +204,15 @@ export function tryParseNotifiableWireMessage (
 
   if (type === 'P2P_CHAT_MESSAGE' || type === 'CHAT_MESSAGE' || type === 'ChatMessage') {
     if (typeof message.body !== 'string') return null;
-    const nested = tryParseNotifiableMessage(message.body);
-    if (nested) return nested;
-    const chat = parseJsonObject(message.body);
-    if (chat) return { messageType: P2P_CHAT_MESSAGE, payload: chat };
-    return null;
+    return notifyShoutboxBody(message.body);
+  }
+
+  if (type === 'P2P_INVENTORY_RESPONSE' || type === INVENTORY_RESPONSE) {
+    // Body is `{ kind, items, created }` (no `type` field) — surface it so the
+    // page index can fold peer chunk listings (silent: never a notification).
+    const obj = typeof message.body === 'string' ? parseJsonObject(message.body) : null;
+    if (!obj) return null;
+    return { messageType: INVENTORY_RESPONSE, payload: { ...obj, type: INVENTORY_RESPONSE } };
   }
 
   if (type === 'P2P_FILE_SEND') {

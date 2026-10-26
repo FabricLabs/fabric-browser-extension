@@ -22,29 +22,45 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Checkout branch
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Install Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
-          node-version: '22'
+          node-version-file: '.nvmrc'
           cache: npm
           cache-dependency-path: package-lock.json
 
       - name: Cache Playwright browsers
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.cache/ms-playwright
           key: ${{ runner.os }}-playwright-${{ hashFiles('package-lock.json') }}
 
+      # Node 26.12.1 bundles npm 11; package.json engines and .npmrc allow-git need npm 12.
+      - name: Install npm 12
+        run: npm install -g npm@12.2.1
+
       - name: Install dependencies
         run: npm ci
 
+      - name: Install xvfb and Playwright OS deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb
+          npx playwright install --with-deps chromium
+
       - name: Run tests (with coverage for Codecov)
-        run: npm run report:coverage
+        # Headed Chromium so MV3 `--load-extension` starts a service worker.
+        # Playwright `headless: true` uses chromium-headless-shell, which cannot.
+        env:
+          PLAYWRIGHT_CHROMIUM_USE_HEADLESS_SHELL: '0'
+        run: xvfb-run --auto-servernum npm run report:coverage
 
       - name: Send coverage report
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@v5
         with:
           directory: ./reports/
         continue-on-error: true

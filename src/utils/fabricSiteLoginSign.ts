@@ -1,8 +1,9 @@
 'use strict';
 
 /**
- * BIP340 Schnorr client-signed site-login / device-link bodies — same construction
- * as Hub `verifyFabricDesktopLoginSignedPayload` / `verifyIdentitySchnorr`.
+ * BIP340 Schnorr client-signed bodies — same construction as Hub
+ * `verifyIdentitySchnorr`, always over a purpose tag — and the `fabric:`
+ * `/sessions` site-login POST.
  *
  * Prefer HD material (`Key` / mnemonic / xprv) so signing uses Fabric
  * `Identity.fabricKey`. Leaf `{ privateKeyHex, xpub }` (Passport session) is
@@ -14,7 +15,9 @@ import { Buffer } from 'buffer';
 // CommonJS Fabric helpers (webpack + mocha both resolve these).
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const {
-  buildFabricIdentitySignedPayload
+  buildFabricIdentitySignedPayload,
+  parseDesktopLoginMessage,
+  resolveFabricSigningIdentity
 } = require('@fabric/http/functions/fabricSiteLoginVerify');
 
 export type SiteLoginIdentity = {
@@ -34,29 +37,48 @@ export type FabricSignInput =
   | { privateKeyHex: string; xpub: string }
   | { private: string; xpub?: string };
 
+export type FabricSigningIdentity = {
+  id: string;
+  xpub: string;
+  pubkeyHex: string;
+};
+
+function toSignInput (privateKeyHexOrInput: string | FabricSignInput, xpub?: string): FabricSignInput {
+  if (typeof privateKeyHexOrInput !== 'string') return privateKeyHexOrInput;
+  if (typeof xpub !== 'string' || !xpub.startsWith('xpub')) {
+    throw new Error('xpub required for a Fabric identity');
+  }
+  return { privateKeyHex: privateKeyHexOrInput, xpub };
+}
+
+/** Fabric id, xpub, and compressed pubkey of the signing key, without signing anything. */
+export function fabricSigningIdentity (
+  privateKeyHexOrInput: string | FabricSignInput,
+  xpub?: string
+): FabricSigningIdentity {
+  const resolved = resolveFabricSigningIdentity(toSignInput(privateKeyHexOrInput, xpub));
+  const key = resolved.fabricKey;
+  const pubkeyHex = String(key.pubkey || '').toLowerCase();
+  if (!/^[a-f0-9]{66}$/.test(pubkeyHex)) throw new Error('Could not derive Fabric public key');
+  return { id: String(resolved.identityId), xpub: String(key.xpub || ''), pubkeyHex };
+}
+
 /**
- * Build a Hub-verifiable client signature body.
+ * Sign `message` under the purpose `tag` (a `@fabric/core/functions/signingTags`
+ * value) and return a Hub-verifiable body.
  *
  * Overloads:
- * - `(message, privateKeyHex, xpub)` — Passport session leaf (already at Fabric path)
- * - `(message, { mnemonic|xprv|privateKeyHex+xpub })` — preferred structured input
+ * - `(message, tag, privateKeyHex, xpub)` — Passport session leaf (already at Fabric path)
+ * - `(message, tag, { mnemonic|xprv|privateKeyHex+xpub })` — preferred structured input
  */
-export function buildClientSignedLoginBody (
+export function buildClientSignedBody (
   message: string,
+  tag: string,
   privateKeyHexOrInput: string | FabricSignInput,
   xpub?: string
 ): SiteLoginSignatureBody {
-  let input: FabricSignInput;
-  if (typeof privateKeyHexOrInput === 'string') {
-    if (typeof xpub !== 'string' || !xpub.startsWith('xpub')) {
-      throw new Error('xpub required for site login identity');
-    }
-    input = { privateKeyHex: privateKeyHexOrInput, xpub };
-  } else {
-    input = privateKeyHexOrInput;
-  }
-
-  const payload = buildFabricIdentitySignedPayload(input, message);
+  if (typeof tag !== 'string' || !tag) throw new Error('signing tag required');
+  const payload = buildFabricIdentitySignedPayload(toSignInput(privateKeyHexOrInput, xpub), message, tag);
   return {
     signature: payload.signature,
     pubkeyHex: payload.pubkeyHex,
@@ -68,12 +90,26 @@ export function buildClientSignedLoginBody (
 }
 
 /**
- * POST the client signature to `{hub}/sessions/:id/signatures`.
+ * Origin and nonce of a `/sessions` challenge (`fabric:hub-login:1:…`), or null
+ * when it is malformed or names another session.
  */
-export async function postClientSignedLogin (
+export function parseHubLoginChallenge (
+  message: string,
+  sessionId: string
+): { origin: string; nonce: string } | null {
+  const parsed = parseDesktopLoginMessage(message);
+  if (!parsed || String(parsed.sessionId).toLowerCase() !== String(sessionId || '').toLowerCase()) return null;
+  return { origin: String(parsed.origin), nonce: String(parsed.nonce) };
+}
+
+/**
+ * POST a desktop- or Passport-signed `fabric:` `SiteLoginResponse` to
+ * `{hub}/sessions/:id/signatures` (bound to the session's origin and nonce).
+ */
+export async function postFabricSiteLogin (
   hubBase: string,
   sessionId: string,
-  body: SiteLoginSignatureBody
+  uri: string
 ): Promise<{ ok: true; data: Record<string, unknown> } | { ok: false; error: string }> {
   const base = String(hubBase || '').replace(/\/$/, '');
   let origin: string;
@@ -92,7 +128,7 @@ export async function postClientSignedLogin (
         Origin: origin,
         Referer: `${origin}/`
       },
-      body: JSON.stringify(body),
+      body: JSON.stringify({ fabric: uri }),
       cache: 'no-store'
     });
     const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;

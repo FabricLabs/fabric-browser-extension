@@ -5,7 +5,8 @@ import {
   stopMeshSignaling,
   meshEnsurePeerConnection,
   meshDropPeerConnection,
-  meshPublishFabricWire
+  meshPublishFabricWire,
+  meshPublishInventoryRequest
 } from './fabricMeshOffscreen';
 
 const port = chrome.runtime.connect({ name: 'fabric-mesh-runtime' });
@@ -34,5 +35,8 @@ port.onMessage.addListener((msg: unknown) => {
       typeof m.originalType === 'string' ? m.originalType : 'fabric-message'
     );
     port.postMessage({ type: 'PUBLISH_WIRE_RESULT', ok });
+  }
+  if (m.type === 'PUBLISH_INVENTORY_REQUEST' && m.body && typeof m.body === 'object') {
+    meshPublishInventoryRequest(m.body as Record<string, never>);
   }
 });

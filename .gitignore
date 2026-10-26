@@ -28,3 +28,11 @@ playwright-report
 assets/Rk0JjG7brARcVivg.mp4
 assets/d923053338d4296650282ac88ad822cf-593455159.jpg
 assets/vector-image-pixellated-eye-ideal-beauty-technology-science-applications-115170863-1729691464.jpg
+
+# Chrome Web Store packing (Chrome signs the uploaded zip; never commit keys)
+*.pem
+*.crx
+assets.zip
+assets.crx
+assets.pem
+zip/*.zip

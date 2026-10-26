@@ -222,11 +222,15 @@ export async function fetchWalletBalance (
     const bal = data?.balanceSats ?? data?.balance_sats ?? 0;
     const conf = data?.confirmedSats ?? data?.confirmed_sats ?? bal;
     const unconf = data?.unconfirmedSats ?? data?.unconfirmed_sats ?? 0;
+    const toSats = (v: unknown, fallback = 0): number => {
+      const n = Number(v);
+      return Number.isFinite(n) ? n : fallback;
+    };
 
     return {
-      balanceSats: Number(bal),
-      confirmedSats: Number(conf),
-      unconfirmedSats: Number(unconf),
+      balanceSats: toSats(bal),
+      confirmedSats: toSats(conf, toSats(bal)),
+      unconfirmedSats: toSats(unconf),
       network: status.network,
       height: status.height,
       updatedAt: Date.now()

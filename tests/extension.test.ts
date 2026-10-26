@@ -63,7 +63,9 @@ async function launchExtensionContext (userDataDir: string): Promise<BrowserCont
     });
   }
 
-  const headless = !!process.env.CI;
+  // MV3 `--load-extension` needs full Chromium. Playwright `headless: true`
+  // on CI uses chromium-headless-shell, which never starts the service worker.
+  const headless = false;
   const base: LaunchPersistentContextOptions = {
     headless,
     env: chromiumIsolatedEnv(userDataDir),

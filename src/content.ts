@@ -6,6 +6,10 @@ import {
   FABRIC_HUB_UNREGISTER_MESH
 } from './fabric/hubMeshBridge';
 import {
+  FABRIC_MESSAGE,
+  FABRIC_MESSAGE_PAGE_RESULT,
+  FABRIC_MESSAGE_RESULT,
+  FABRIC_RUNTIME_FABRIC_MESSAGE,
   FABRIC_RUNTIME_SITE_LOGIN_REQUEST,
   FABRIC_SITE_LOGIN_REQUEST,
   FABRIC_SITE_LOGIN_RESULT,
@@ -16,10 +20,13 @@ import {
   FABRIC_DEVICE_LINK_RESULT,
   FABRIC_RUNTIME_DEVICE_LINK_REQUEST
 } from './constants/deviceLink';
-import { fetchPendingDeviceLink } from './utils/fabricDeviceLinkFetch';
+import { evaluateDeviceLinkPageRequest, fetchPendingDeviceLink } from './utils/fabricDeviceLinkFetch';
+import {
+  assertAllowedFabricHub,
+  requestFabricHubGateOptions
+} from './utils/fabricHubAllowlist';
 import { installFabric402FetchInterceptor } from './content/fabric402FetchPatch';
 import { swallowNonFatal } from './utils/nonFatal';
-import { assertAllowedFabricHub } from './utils/fabricHubAllowlist';
 
 declare global {
   interface Window {
@@ -97,44 +104,69 @@ window.addEventListener('message', (event: MessageEvent) => {
     swallowNonFatal('site-login-hub-url', err);
     return;
   }
-  const hubGate = assertAllowedFabricHub(hubBase);
-  if (!hubGate.ok) {
-    window.postMessage({
-      source: 'fabric-passport',
-      type: FABRIC_SITE_LOGIN_RESULT,
-      ok: false,
-      error: 'hub_not_allowed'
-    }, event.origin);
-    return;
-  }
-  hubBase = hubGate.hubBase;
-  if (declaredOrigin !== event.origin || hubOrigin !== event.origin) {
-    window.postMessage({
-      source: 'fabric-passport',
-      type: FABRIC_SITE_LOGIN_RESULT,
-      ok: false,
-      error: 'origin_mismatch'
-    }, event.origin);
-    return;
-  }
 
-  void chrome.runtime.sendMessage({
-    type: FABRIC_RUNTIME_SITE_LOGIN_REQUEST,
-    sessionId,
-    hubBase,
-    origin: declaredOrigin,
-    message,
-    pageOrigin: event.origin
-  }).then((res) => {
-    if (res && res.ok === false) {
+  void requestFabricHubGateOptions().then((gate) => {
+    const hubGate = assertAllowedFabricHub(hubBase, gate);
+    if (!hubGate.ok) {
       window.postMessage({
         source: 'fabric-passport',
         type: FABRIC_SITE_LOGIN_RESULT,
         ok: false,
-        error: typeof res.error === 'string' ? res.error : 'passport_rejected'
+        error: 'hub_not_allowed'
       }, event.origin);
+      return;
     }
+    hubBase = hubGate.hubBase;
+    if (declaredOrigin !== event.origin || hubOrigin !== event.origin) {
+      window.postMessage({
+        source: 'fabric-passport',
+        type: FABRIC_SITE_LOGIN_RESULT,
+        ok: false,
+        error: 'origin_mismatch'
+      }, event.origin);
+      return;
+    }
+
+    return chrome.runtime.sendMessage({
+      type: FABRIC_RUNTIME_SITE_LOGIN_REQUEST,
+      sessionId,
+      hubBase,
+      origin: declaredOrigin,
+      message,
+      pageOrigin: event.origin
+    }).then((res) => {
+      if (res && res.ok === false) {
+        window.postMessage({
+          source: 'fabric-passport',
+          type: FABRIC_SITE_LOGIN_RESULT,
+          ok: false,
+          error: typeof res.error === 'string' ? res.error : 'passport_rejected'
+        }, event.origin);
+      }
+    });
   }).catch((err: unknown) => swallowNonFatal('site-login-runtime', err));
+});
+
+/**
+ * Site pages hand Passport a `fabric:` `SiteLoginRequest`. The background reads it
+ * against the origin the browser reports for this frame — never one the page names.
+ */
+window.addEventListener('message', (event: MessageEvent) => {
+  const data = event.data;
+  if (!data || data.source !== FABRIC_SITE_POSTMESSAGE_SOURCE || data.type !== FABRIC_MESSAGE) return;
+  if (event.source !== window || event.origin !== window.location.origin) return;
+  const id = typeof data.id === 'string' ? data.id.slice(0, 128) : '';
+  const reply = (payload: Record<string, unknown>) => {
+    window.postMessage({ source: 'fabric-passport', type: FABRIC_MESSAGE_RESULT, id, ...payload }, event.origin);
+  };
+  const message = typeof data.message === 'string' ? data.message.trim() : '';
+  if (!/^fabric:/i.test(message) || message.length > 48 * 1024) {
+    reply({ ok: false, error: 'invalid_fabric_message' });
+    return;
+  }
+  chrome.runtime.sendMessage({ type: FABRIC_RUNTIME_FABRIC_MESSAGE, id, message }).then((res) => {
+    if (res && res.ok === false) reply({ ok: false, error: typeof res.error === 'string' ? res.error : 'passport_rejected' });
+  }).catch((err: unknown) => swallowNonFatal('fabric-message-runtime', err));
 });
 
 /** Hub (or site) asks Passport to accept a mutual device-link offer as responder. */
@@ -150,75 +182,63 @@ window.addEventListener('message', (event: MessageEvent) => {
   const declaredOrigin = typeof data.origin === 'string' ? data.origin.trim() : event.origin;
   if (!sessionId || !hubRaw) return;
 
-  let hubBase: string;
-  let hubOrigin: string;
-  try {
-    const u = new URL(hubRaw);
-    if (u.protocol !== 'http:' && u.protocol !== 'https:') return;
-    hubBase = `${u.protocol}//${u.host}`;
-    hubOrigin = u.origin;
-  } catch (err: unknown) {
-    swallowNonFatal('device-link-hub-url', err);
-    return;
-  }
-  const hubGate = assertAllowedFabricHub(hubBase);
-  if (!hubGate.ok) {
-    window.postMessage({
-      source: 'fabric-passport',
-      type: FABRIC_DEVICE_LINK_RESULT,
-      ok: false,
-      error: 'hub_not_allowed'
-    }, event.origin);
-    return;
-  }
-  hubBase = hubGate.hubBase;
-  if (declaredOrigin !== event.origin || hubOrigin !== event.origin) {
-    window.postMessage({
-      source: 'fabric-passport',
-      type: FABRIC_DEVICE_LINK_RESULT,
-      ok: false,
-      error: 'origin_mismatch'
-    }, event.origin);
-    return;
-  }
+  void requestFabricHubGateOptions().then((gate) => {
+    const pageGate = evaluateDeviceLinkPageRequest({
+      sessionId,
+      hubRaw,
+      declaredOrigin,
+      pageOrigin: event.origin,
+      ...gate
+    });
+    if (!pageGate.ok) {
+      window.postMessage({
+        source: 'fabric-passport',
+        type: FABRIC_DEVICE_LINK_RESULT,
+        ok: false,
+        error: pageGate.error
+      }, event.origin);
+      return;
+    }
+    const hubBase = pageGate.hubBase;
 
-  void fetchPendingDeviceLink(hubBase, sessionId).then((pending) => {
-    if (!pending.ok) {
-      window.postMessage({
-        source: 'fabric-passport',
-        type: FABRIC_DEVICE_LINK_RESULT,
-        ok: false,
-        error: pending.error
-      }, event.origin);
-      return;
-    }
-    if (pending.status !== 'pending') {
-      window.postMessage({
-        source: 'fabric-passport',
-        type: FABRIC_DEVICE_LINK_RESULT,
-        ok: false,
-        error: `device_link_${pending.status || 'unavailable'}`
-      }, event.origin);
-      return;
-    }
-    return chrome.runtime.sendMessage({
-      type: FABRIC_RUNTIME_DEVICE_LINK_REQUEST,
-      sessionId: pending.sessionId,
-      hubBase: pending.hubBase,
-      origin: pending.origin,
-      nonce: pending.nonce,
-      label: pending.label,
-      initiator: pending.initiator,
-      pageOrigin: event.origin
-    }).then((res) => {
-      if (res && res.ok === false) {
+    return fetchPendingDeviceLink(hubBase, sessionId).then((pending) => {
+      if (!pending.ok) {
         window.postMessage({
           source: 'fabric-passport',
           type: FABRIC_DEVICE_LINK_RESULT,
           ok: false,
-          error: typeof res.error === 'string' ? res.error : 'passport_rejected'
+          error: pending.error
         }, event.origin);
+        return;
       }
+      if (pending.status !== 'pending') {
+        window.postMessage({
+          source: 'fabric-passport',
+          type: FABRIC_DEVICE_LINK_RESULT,
+          ok: false,
+          error: `device_link_${pending.status || 'unavailable'}`
+        }, event.origin);
+        return;
+      }
+      return chrome.runtime.sendMessage({
+        type: FABRIC_RUNTIME_DEVICE_LINK_REQUEST,
+        sessionId: pending.sessionId,
+        hubBase: pending.hubBase,
+        origin: pending.origin,
+        nonce: pending.nonce,
+        label: pending.label,
+        initiator: pending.initiator,
+        pageOrigin: event.origin
+      }).then((res) => {
+        if (res && res.ok === false) {
+          window.postMessage({
+            source: 'fabric-passport',
+            type: FABRIC_DEVICE_LINK_RESULT,
+            ok: false,
+            error: typeof res.error === 'string' ? res.error : 'passport_rejected'
+          }, event.origin);
+        }
+      });
     });
   }).catch((err: unknown) => swallowNonFatal('device-link-runtime', err));
 });
@@ -234,7 +254,21 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'EXTENSION_ID' && typeof message.id === 'string') {
     window.fabricExtension.id = message.id;
   }
+  if (message.type === FABRIC_MESSAGE_PAGE_RESULT) {
+    if (message.origin !== window.location.origin) return undefined;
+    window.postMessage({
+      source: 'fabric-passport',
+      type: FABRIC_MESSAGE_RESULT,
+      id: typeof message.id === 'string' ? message.id : '',
+      ok: !!message.ok,
+      error: message.error,
+      message: typeof message.message === 'string' ? message.message : undefined,
+      signer: message.signer
+    }, window.location.origin);
+    return undefined;
+  }
   if (message.type === 'FABRIC_SITE_LOGIN_PAGE_RESULT') {
+    if (typeof message.origin === 'string' && message.origin !== window.location.origin) return undefined;
     window.postMessage({
       source: 'fabric-passport',
       type: FABRIC_SITE_LOGIN_RESULT,

@@ -1,38 +1,59 @@
 # Security (Fabric Passport / browser extension)
 Browser wallet and identity extension for Fabric site login and mesh participation.
 
+**Outstanding queue:** [docs/OUTSTANDING.md](docs/OUTSTANDING.md).
+**Posture, known gaps, and release recommendations:** [AUDIT.md](AUDIT.md).
+
 ## Adversarial environment
 Fabric networks are intended for deployment where **peers, relays, hubs, and operators may be hostile**. Design and review against:
 
-- Untrusted TCP / WebSocket / WebRTC neighbors (forgery, replay, amplification, pin hijack)
+- Untrusted TCP (Transmission Control Protocol) / WebSocket / WebRTC neighbors (forgery, replay, amplification, pin hijack)
 - Phishing of identity flows (`fabric://login`, device-link) toward attacker-controlled hubs
 - Public observability of unsigned or plaintext application traffic unless an explicit seal is used
 - No reliance on an “honest majority” of random internet peers for key custody
 
-The extension MUST refuse to sign site-login / device-link completions for non-allowlisted Hub origins. Seed material stays in encrypted extension storage; content scripts are untrusted relative to the background.
+The extension refuses to sign site-login / device-link completions for non-allowlisted Hub origins. Seed material stays in encrypted extension storage; content scripts are untrusted relative to the background.
+
+## Local-first `fabric:` sign-in
+Pages, Passport, and the desktop apps exchange canonical `fabric:<frame>` strings: a whole signed AMP frame (base64url or hex), checked with `@fabric/core` `decodeFabricUri` (magic, size, body hash, known opcode, BIP340 author). Types: `SITE_LOGIN_REQUEST` 0x4230, `SITE_LOGIN_RESPONSE` 0x4231, `FABRIC_SIGN_REQUEST` 0x4232.
+
+- **Origin comes from the browser.** The content script forwards `FABRIC_MESSAGE` posts; the background binds the request to `sender.origin` / `sender.url`, never to a field the page wrote. A site-signed request that names another origin is refused; an unsigned one is rebuilt with the real origin. Only HTTPS and loopback origins may ask.
+- **The user picks the identity** in the popup: Passport signs directly, or Passport asks a linked desktop.
+- **Desktop signers** (Hub on 8080, GoonCitizen on 3041, or bases the user adds) are loopback only. They answer `GET /services/fabric/identity` and `POST /services/fabric/sign` only to a loopback socket with a loopback Host and **no web-page `Origin`** (none, or an extension origin such as Passport's background; a site's `fetch` always carries its own), spend each nonce once, refuse devices outside their identity cluster, and wait for a native OS dialog — never the web UI, which any script on that origin could drive. A CLI Hub, a hosted relay, and Android have no such dialog and do not mount the routes.
+- **Linking a desktop** uses `POST /services/fabric/link { sessionId }` on the same terms: Passport makes a v2 offer on the desktop's own loopback `/device-links`; the desktop sees only sessions created for its own origin, asks natively, signs as responder, and publishes its half of the `IdentityCrossSign`. Passport countersigns as usual.
+- **Trusted hubs** is the only way to widen where Passport sends data; it never widens which origins may ask for a login.
 
 **Basics coverage:** [`tests/adversarialEnvironment.basics.unit.ts`](tests/adversarialEnvironment.basics.unit.ts). Related: [`tests/fabricHubAllowlist.unit.ts`](tests/fabricHubAllowlist.unit.ts).
 
 ## Outstanding (PR #3 / RSI follow-ups)
-- **Page-world 402 fetch patch** — `installFabric402FetchInterceptor` runs in the isolated content script today (login/device-link messaging needs that world). Page `fetch` is not patched until a MAIN-world injector (or dual `content_scripts` entry) lands; keep Hub/UI 402 flows working via extension UI prompts in the meantime. Module `src/content/fabric402FetchPatch.ts` exists; limitation is world isolation, not a missing file.
+- **Page-world 402 fetch patch** — `installFabric402FetchInterceptor` runs in the isolated content script (login/device-link messaging needs that world). Page `fetch` stays unpatched until a page-world injector lands. Hub/UI 402 keeps using extension UI prompts. Module `src/content/fabric402FetchPatch.ts` exists; the limit is world isolation.
 - **xpub in query strings** — wallet balance / history still use Hub `GET /services/bitcoin/xpub…` (Hub API shape); moving xpub into POST bodies needs coordinated Hub endpoints.
-- ~~**`@fabric/core` / `@fabric/http` pin hygiene**~~ — `package.json` / lockfile pin `2e2aec81…` (core) + `365f0b49…` (http), aligned with Hub RSI after `npm run report:install` from `feature/rsi`. Bump deliberately with Hub / http; do not leave moving branch tips in releases. `report:install` keeps `package-lock.json`.
-- **npm audit (prod omit-dev)** — remaining **high** findings are transitive `valibot` (via `bip32` 5.0.0-rc); prefer an upstream `bip32` bump or a careful override rather than `npm audit fix --force` (also proposes webpack moves). Re-check after each Fabric pin bump.
+- ~~**`@fabric/core` / `@fabric/http` pin hygiene**~~ — `package.json` tracks `FabricLabs/fabric#feature/locks` and `FabricLabs/fabric-http#feature/fomantic`. Lockfile SHAs **`984b874ba14771bc491588460c7168e3ebae5410`** / **`b87b1b00b0bc4f9cf5f173d0fd8f6d24339c140e`** (same pair in [docs/OUTSTANDING.md](docs/OUTSTANDING.md)). Bump with Hub / http; re-pin releases to those SHAs. `report:install` removes `package-lock.json` then `npm i --allow-git=all`.
+- ~~**Cleartext production hub defaults**~~ — Passport allowlist matches `@fabric/http`: HTTPS-only network hubs; cleartext requires `opts.extra`. Loopback `http://` remains allowed.
+- ~~**Device-link Origin/Referer**~~ — device-link fetch/POST omit client-set Origin/Referer; Hub allowlisted thin-client `chrome-extension:` / `moz-extension:` Origins.
+- **npm audit (prod omit-dev)** — remaining findings include `uuid` (jayson via core), and `@babel/core` sourceMappingURL advisory on some trees. Prefer upstream bumps / careful overrides over `npm audit fix --force`. Re-check after each Fabric pin bump.
 - **Manifest net permissions** — `webRequest` / `declarativeNetRequest` remain declared for identity outband header rules; keep rule IDs and handlers in sync when changing outband behavior.
-- **Large WIP split** — keep identity / mesh / payments / packaging as stacked PRs when review tooling hits file limits.
+- **Large work-in-progress split** — keep identity / mesh / payments / packaging as stacked PRs when review tooling hits file limits.
 
 ## Already addressed (do not re-open without new evidence)
+- ~~Device-link `sessionId` not bound into attest messages~~ — device-link v2 (Hub-chosen `sessionId` + `nonce`, both in the offer and link messages; Passport rebuilds and compares). [AUDIT.md](AUDIT.md) #6.
+- ~~Mesh registration for any page~~ — `FABRIC_HUB_REGISTER_MESH` requires the sending tab's origin to equal the allowlisted hub it registers.
 - ~~Missing `fabric402FetchPatch` module~~ — present under `src/content/`.
 - ~~`deriveReceiveAddress` invalid index~~ — rejects non-integer / negative indexes before derivation.
 - ~~Fabric node UI-test harness hard-coded `:3044`~~ — `fabricNodeListRowRe` / `ensureHarnessFabricNodeActive` derive host:port from `baseURL`.
 - ~~`zip-dist` version / exec failures~~ — semver gate + `spawnSync` error handling.
-- ~~`shell.nix` GNU `ls --color`~~ — probes GNU vs BSD before aliasing.
+- ~~`shell.nix` `ls --color`~~ — probes GNU coreutils vs BSD before aliasing.
+- ~~Local test server readiness~~ — 2xx-only probe; spawn waits for `/api/endpoint`; stop awaits real `exit`.
+- ~~Trusted-origin merge races~~ — serialized `mergeTrustedNodeOrigin` queue.
+- ~~BOLT11 / bitcoin fetch hangs~~ — AbortController timeouts on node RPC and bitcoin HTTP helpers.
+- ~~Wallet balance NaN~~ — finite guards on sats parse + `formatBtc` / `formatSats`.
+- ~~Activity timestamp domain~~ — finite non-negative only on write/read.
 
 ## Process
 1. `npm run test:unit` before merging identity / allowlist changes.
-2. Never commit mnemonics, `.pem` signing keys for store packages, or unlocked datastores.
+2. Never commit mnemonics, `.pem` signing keys for store packages, or unlocked datastores. Chrome Web Store listing copy and graphics: [`docs/CHROME_WEB_STORE.md`](docs/CHROME_WEB_STORE.md).
 3. Treat every web origin as potentially malicious when requesting signatures.
-4. Prefer `npm ci` / keep `package-lock.json`; `npm run report:install` removes `node_modules` only.
+4. Prefer `npm ci` / keep `package-lock.json`; `npm run report:install` removes `package-lock.json` then `npm i --allow-git=all`.
 
 ## Disclosure
-Report issues via the repository issue tracker / maintainer contact in README.
+Canonical monitored contact: **`security@fabric.pub`**. GitHub Security Advisories are the alternate private channel.

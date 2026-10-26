@@ -4,6 +4,7 @@ import { FABRIC_MESH_HUB_REGISTRATION_KEY, FABRIC_STATE_STORAGE_KEY } from '../c
 import { handleFabricRuntimeMessage } from './fabricBackgroundRuntimeMessages';
 import { initIdentityOutband } from './identityOutband';
 import { swallowNonFatal } from '../utils/nonFatal';
+import { setMarketMeshPoster, tickMarketAgent } from '../services/marketRuntime';
 
 declare const __FABRIC_ACTION_DEBUG_URL__: string;
 const FABRIC_ACTION_DEBUG_URL =
@@ -117,6 +118,7 @@ function registerMeshPort (port: chrome.runtime.Port): void {
 }
 
 export function registerFabricBackground (): void {
+  setMarketMeshPoster(postToMesh);
   const sw = globalThis as unknown as ExtensionServiceWorkerGlobal;
 
   sw.addEventListener('install', () => {
@@ -171,6 +173,7 @@ export function registerFabricBackground (): void {
     if (alarm.name !== ALARM_MESH_KEEPALIVE) return;
     postToMesh({ type: 'PING' });
     void syncMeshFromStorage();
+    tickMarketAgent().catch((err: unknown) => swallowNonFatal('market-agent-tick', err));
   });
 
   void syncMeshFromStorage();

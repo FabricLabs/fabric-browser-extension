@@ -41,7 +41,8 @@ export function decodeFabricPaymentRequestHeader (encoded: string | null | undef
   const raw = encoded.trim();
   if (!raw || raw.length > MAX_PAYMENT_REQUEST_HEADER_CHARS) return null;
   try {
-    const json = Buffer.from(raw, 'base64url').toString('utf8');
+    // The browser `buffer` polyfill has no `base64url` encoding.
+    const json = Buffer.from(raw.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8');
     const o = JSON.parse(json);
     return o && typeof o === 'object' && !Array.isArray(o) ? (o as FabricPaymentRequestPayload) : null;
   } catch (err: unknown) {
