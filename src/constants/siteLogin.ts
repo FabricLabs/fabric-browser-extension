@@ -3,40 +3,33 @@
 /** Page → content script `postMessage` source (must match page origin). */
 export const FABRIC_SITE_POSTMESSAGE_SOURCE = 'fabric-site';
 
-/** Page asks Passport to complete a client-signed Fabric login session. */
-export const FABRIC_SITE_LOGIN_REQUEST = 'FABRIC_SITE_LOGIN_REQUEST';
+/** Page → Passport: `{ source: 'fabric-site', type, challenge: 'fabric:…' }` with a transferred `MessagePort`. */
+export const PASSPORT_CHALLENGE = 'PASSPORT_CHALLENGE';
 
-/** Passport → page result after approve/reject/error. */
-export const FABRIC_SITE_LOGIN_RESULT = 'FABRIC_SITE_LOGIN_RESULT';
+/** Passport → page, on that port only: `{ type, ok: true, assertion }` or `{ type, ok: false, error }`. */
+export const PASSPORT_ASSERTION = 'PASSPORT_ASSERTION';
 
-/** chrome.storage.session key for a pending site-login challenge. */
-export const FABRIC_PENDING_SITE_LOGIN_KEY = 'fabric_pending_site_login';
+/** `data-fabric-passport` value pages look for (protocol version, not the extension id). */
+export const PASSPORT_MARKER_VERSION = '2';
 
-/** Runtime message: content script → background. */
-export const FABRIC_RUNTIME_SITE_LOGIN_REQUEST = 'FABRIC_SITE_LOGIN_REQUEST';
+/** chrome.storage.session key: pending sign-ins, one per tab and frame. */
+export const FABRIC_PENDING_PASSPORT_KEY = 'fabric_pending_passport';
 
-/** Runtime message: popup ↔ background for pending login. */
-export const FABRIC_RUNTIME_SITE_LOGIN_GET = 'FABRIC_SITE_LOGIN_GET';
-export const FABRIC_RUNTIME_SITE_LOGIN_CLEAR = 'FABRIC_SITE_LOGIN_CLEAR';
-export const FABRIC_RUNTIME_SITE_LOGIN_COMPLETE = 'FABRIC_SITE_LOGIN_COMPLETE';
+/** chrome.storage.session key: challenge nonces already queued (replay guard). */
+export const FABRIC_PASSPORT_SEEN_NONCES_KEY = 'fabric_passport_seen_nonces';
 
-/** Page → Passport: `{ source: 'fabric-site', type, id, message: 'fabric:…' }` carrying a `SiteLoginRequest`. */
-export const FABRIC_MESSAGE = 'FABRIC_MESSAGE';
+/** Runtime message: content script → background with a page challenge. */
+export const FABRIC_RUNTIME_PASSPORT_CHALLENGE = 'FABRIC_RUNTIME_PASSPORT_CHALLENGE';
 
-/** Passport → page: `{ source: 'fabric-passport', type, id, ok, message?: 'fabric:…', error? }`. */
-export const FABRIC_MESSAGE_RESULT = 'FABRIC_MESSAGE_RESULT';
+/** Runtime messages: popup ↔ background for the pending sign-ins. */
+export const FABRIC_RUNTIME_PASSPORT_LIST = 'FABRIC_RUNTIME_PASSPORT_LIST';
+export const FABRIC_RUNTIME_PASSPORT_ANSWER = 'FABRIC_RUNTIME_PASSPORT_ANSWER';
 
-/** Runtime message: content script → background with a page `fabric:` string. */
-export const FABRIC_RUNTIME_FABRIC_MESSAGE = 'FABRIC_RUNTIME_FABRIC_MESSAGE';
-
-/** Runtime message: popup → background, ask a linked desktop app to sign the pending login. */
+/** Runtime message: popup → background, ask a linked desktop app to answer a pending sign-in. */
 export const FABRIC_RUNTIME_DESKTOP_SIGN = 'FABRIC_RUNTIME_DESKTOP_SIGN';
 
-/** Runtime message: background → content script, deliver a `fabric:` result to the page. */
-export const FABRIC_MESSAGE_PAGE_RESULT = 'FABRIC_MESSAGE_PAGE_RESULT';
+/** Runtime message: background → content script, deliver the answer to the page's port. */
+export const FABRIC_PASSPORT_PAGE_RESULT = 'FABRIC_PASSPORT_PAGE_RESULT';
 
 /** chrome.storage.local key: loopback base URLs of desktop signers (Hub, GoonCitizen). */
 export const FABRIC_DESKTOP_SIGNERS_KEY = 'fabric.desktop.signers';
-
-/** Runtime message: background/popup → content script, legacy `/sessions` login result. */
-export const FABRIC_SITE_LOGIN_PAGE_RESULT = 'FABRIC_SITE_LOGIN_PAGE_RESULT';

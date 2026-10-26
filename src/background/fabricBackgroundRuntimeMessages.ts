@@ -7,23 +7,17 @@
 
 import { FABRIC_MESH_HUB_REGISTRATION_KEY } from '../constants/fabricExtension';
 import {
-  FABRIC_PENDING_SITE_LOGIN_KEY,
   FABRIC_RUNTIME_DESKTOP_SIGN,
-  FABRIC_RUNTIME_FABRIC_MESSAGE,
-  FABRIC_RUNTIME_SITE_LOGIN_CLEAR,
-  FABRIC_RUNTIME_SITE_LOGIN_COMPLETE,
-  FABRIC_RUNTIME_SITE_LOGIN_GET,
-  FABRIC_RUNTIME_SITE_LOGIN_REQUEST
+  FABRIC_RUNTIME_PASSPORT_ANSWER,
+  FABRIC_RUNTIME_PASSPORT_CHALLENGE,
+  FABRIC_RUNTIME_PASSPORT_LIST
 } from '../constants/siteLogin';
 import {
-  completeWithDesktop,
+  answerPassport,
   checkSenderFrame,
-  queueFabricMessage,
-  queueHubLogin,
-  readPendingSiteLogin,
-  siteLoginPromptOpen,
-  writePendingSiteLogin,
-  type PendingSiteLoginRow
+  completeWithDesktop,
+  queuePassportChallenge,
+  readPendingPassport
 } from './fabricSiteLoginRuntime';
 import {
   FABRIC_PENDING_DEVICE_LINK_KEY,
@@ -65,6 +59,30 @@ type PendingDeviceLinkRow = {
 
 const NOTIFY_ID_MESH = 'fabric-mesh-line';
 
+/**
+ * The only messages a content script (any web page's frame) may send. Settings,
+ * the encrypted datastore, pending prompts, and everything else answer
+ * extension pages only.
+ */
+export const CONTENT_SCRIPT_MESSAGES: ReadonlySet<string> = new Set([
+  'CONTENT_SCRIPT_LOADED',
+  'FABRIC_HUB_REGISTER_MESH',
+  'FABRIC_HUB_UNREGISTER_MESH',
+  'FABRIC_PAY_BOLT11_FROM_PASSPORT',
+  FABRIC_RUNTIME_PASSPORT_CHALLENGE,
+  FABRIC_RUNTIME_HUB_GATE_OPTIONS,
+  FABRIC_RUNTIME_DEVICE_LINK_REQUEST
+]);
+
+/** True for this extension's own pages (popup, options, offscreen), even when opened in a tab. */
+export function isExtensionPage (sender: chrome.runtime.MessageSender): boolean {
+  if (!sender || sender.id !== chrome.runtime.id) return false;
+  const own = chrome.runtime.getURL('');
+  const from = typeof sender.url === 'string' ? sender.url : '';
+  if (from) return from.startsWith(own);
+  return !sender.tab;
+}
+
 export interface FabricRuntimeMessageDeps {
   fabricActionDebugUrl: string;
   syncMeshFromStorage: () => Promise<void>;
@@ -94,6 +112,8 @@ export function handleFabricRuntimeMessage (
   if (sender.id != null && sender.id !== selfId) return undefined;
   const m = message as Record<string, unknown>;
   const { fabricActionDebugUrl, syncMeshFromStorage } = deps;
+  const fromExtension = isExtensionPage(sender);
+  if (!fromExtension && !(typeof m.type === 'string' && CONTENT_SCRIPT_MESSAGES.has(m.type))) return undefined;
 
   if (m.type === 'CONTENT_SCRIPT_LOADED') {
     const tabId = sender.tab?.id;
@@ -433,67 +453,49 @@ export function handleFabricRuntimeMessage (
     return false;
   }
 
-  /** Content script: queue a site login (legacy `/sessions` challenge or a page `fabric:` request) for the popup. */
-  if ((m.type === FABRIC_RUNTIME_SITE_LOGIN_REQUEST || m.type === FABRIC_RUNTIME_FABRIC_MESSAGE) && sender.tab) {
-    const frame = checkSenderFrame(sender);
-    if (!frame.ok) {
-      sendResponse({ ok: false, error: frame.error });
-      return false;
-    }
-    const queued = m.type === FABRIC_RUNTIME_FABRIC_MESSAGE
-      ? queueFabricMessage(m, sender)
-      : queueHubLogin(m, sender);
-    if (!queued.ok) {
-      sendResponse({ ok: false, error: queued.error });
-      return false;
-    }
-    const row: PendingSiteLoginRow = queued.row;
-    void readPendingSiteLogin().then((current) => {
-      if (siteLoginPromptOpen(current)) {
-        sendResponse({ ok: false, error: 'busy' });
+  /** Content script: queue a page's PASSPORT_CHALLENGE for the popup. */
+  if (m.type === FABRIC_RUNTIME_PASSPORT_CHALLENGE && !fromExtension && sender.tab) {
+    void queuePassportChallenge(m, sender).then((queued) => {
+      if (!queued.ok) {
+        sendResponse(queued);
         return;
       }
-      return writePendingSiteLogin(row).then(() => {
-        showFabricNotification('Fabric Passport', `Sign-in request from ${row.origin}`);
-        // Best-effort: focus the extension action so the user opens the popup.
-        try {
-          if (chrome.action?.openPopup) {
-            void chrome.action.openPopup().catch((err: unknown) => swallowNonFatal('site-login-open-popup', err));
-          }
-        } catch (err: unknown) {
-          swallowNonFatal('site-login-open-popup', err);
+      showFabricNotification('Fabric Passport', `Sign-in request from ${queued.row.origin}`);
+      try {
+        if (chrome.action?.openPopup) {
+          void chrome.action.openPopup().catch((err: unknown) => swallowNonFatal('passport-open-popup', err));
         }
-        sendResponse({ ok: true });
-      });
+      } catch (err: unknown) {
+        swallowNonFatal('passport-open-popup', err);
+      }
+      sendResponse({ ok: true });
     }).catch((e: unknown) => {
-      sendResponse({ ok: false, error: String(e) });
+      sendResponse({ ok: false, error: String(e instanceof Error ? e.message : e) });
     });
     return true;
   }
 
-  /** Popup: a linked desktop app signs the pending login; delivered from here so closing the popup is fine. */
-  if (m.type === FABRIC_RUNTIME_DESKTOP_SIGN && !sender.tab) {
-    void completeWithDesktop(m)
+  /** Popup: the sign-ins waiting for an answer. */
+  if (m.type === FABRIC_RUNTIME_PASSPORT_LIST && fromExtension) {
+    void readPendingPassport()
+      .then((pending) => sendResponse({ ok: true, pending }))
+      .catch((e: unknown) => sendResponse({ ok: false, error: String(e instanceof Error ? e.message : e), pending: [] }));
+    return true;
+  }
+
+  /** Popup: an assertion it signed, or a refusal; verified and delivered from here. */
+  if (m.type === FABRIC_RUNTIME_PASSPORT_ANSWER && fromExtension) {
+    void answerPassport(m)
       .then((out) => sendResponse(out))
       .catch((e: unknown) => sendResponse({ ok: false, error: String(e instanceof Error ? e.message : e) }));
     return true;
   }
 
-  if (m.type === FABRIC_RUNTIME_SITE_LOGIN_GET) {
-    const store = chrome.storage.session || chrome.storage.local;
-    void store.get(FABRIC_PENDING_SITE_LOGIN_KEY, (got) => {
-      const pending = got[FABRIC_PENDING_SITE_LOGIN_KEY] as PendingSiteLoginRow | undefined;
-      sendResponse({
-        pending: pending || null,
-        tabId: pending && typeof pending.tabId === 'number' ? pending.tabId : undefined
-      });
-    });
-    return true;
-  }
-
-  if (m.type === FABRIC_RUNTIME_SITE_LOGIN_CLEAR || m.type === FABRIC_RUNTIME_SITE_LOGIN_COMPLETE) {
-    const store = chrome.storage.session || chrome.storage.local;
-    void store.remove(FABRIC_PENDING_SITE_LOGIN_KEY, () => sendResponse({ ok: true }));
+  /** Popup: a pinned desktop app answers the pending sign-in; delivered from here so closing the popup is fine. */
+  if (m.type === FABRIC_RUNTIME_DESKTOP_SIGN && fromExtension) {
+    void completeWithDesktop(m)
+      .then((out) => sendResponse(out))
+      .catch((e: unknown) => sendResponse({ ok: false, error: String(e instanceof Error ? e.message : e) }));
     return true;
   }
 
@@ -504,7 +506,7 @@ export function handleFabricRuntimeMessage (
   }
 
   /** Content script: queue a mutual device-link offer for the popup to approve (responder). */
-  if (m.type === FABRIC_RUNTIME_DEVICE_LINK_REQUEST) {
+  if (m.type === FABRIC_RUNTIME_DEVICE_LINK_REQUEST && !fromExtension && sender.tab) {
     const frame = checkSenderFrame(sender);
     if (!frame.ok) {
       sendResponse({ ok: false, error: frame.error });

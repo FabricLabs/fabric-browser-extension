@@ -8,20 +8,21 @@ Browser wallet and identity extension for Fabric site login and mesh participati
 Fabric networks are intended for deployment where **peers, relays, hubs, and operators may be hostile**. Design and review against:
 
 - Untrusted TCP (Transmission Control Protocol) / WebSocket / WebRTC neighbors (forgery, replay, amplification, pin hijack)
-- Phishing of identity flows (`fabric://login`, device-link) toward attacker-controlled hubs
+- Phishing of identity flows (sign-in, device-link) toward attacker-controlled sites and hubs
 - Public observability of unsigned or plaintext application traffic unless an explicit seal is used
 - No reliance on an “honest majority” of random internet peers for key custody
 
-The extension refuses to sign site-login / device-link completions for non-allowlisted Hub origins. Seed material stays in encrypted extension storage; content scripts are untrusted relative to the background.
+The extension refuses device-link completions for non-allowlisted Hub origins. Passport keeps only the master xprv, sealed under the lock password; while unlocked it sits in `chrome.storage.session` (trusted contexts only) and is cleared on lock. Content scripts are untrusted relative to the background.
 
-## Local-first `fabric:` sign-in
-Pages, Passport, and the desktop apps exchange canonical `fabric:<frame>` strings: a whole signed AMP frame (base64url or hex), checked with `@fabric/core` `decodeFabricUri` (magic, size, body hash, known opcode, BIP340 author). Types: `SITE_LOGIN_REQUEST` 0x4230, `SITE_LOGIN_RESPONSE` 0x4231, `FABRIC_SIGN_REQUEST` 0x4232.
+## Passport v2 sign-in
+Pages, Passport, and the desktop apps exchange canonical `fabric:<frame>` strings (whole signed AMP frames, checked with `@fabric/core` `decodeFabricUri`). Types: `PASSPORT_CHALLENGE` 0x4240, `PASSPORT_ASSERTION` 0x4241, `PASSPORT_SIGN_REQUEST` 0x4242. Spec: `@fabric/core` `docs/PASSPORT.md`.
 
-- **Origin comes from the browser.** The content script forwards `FABRIC_MESSAGE` posts; the background binds the request to `sender.origin` / `sender.url`, never to a field the page wrote. A site-signed request that names another origin is refused; an unsigned one is rebuilt with the real origin. Only HTTPS and loopback origins may ask.
-- **The user picks the identity** in the popup: Passport signs directly, or Passport asks a linked desktop.
-- **Desktop signers** (Hub on 8080, GoonCitizen on 3041, or bases the user adds) are loopback only. They answer `GET /services/fabric/identity` and `POST /services/fabric/sign` only to a loopback socket with a loopback Host and **no web-page `Origin`** (none, or an extension origin such as Passport's background; a site's `fetch` always carries its own), spend each nonce once, refuse devices outside their identity cluster, and wait for a native OS dialog — never the web UI, which any script on that origin could drive. A CLI Hub, a hosted relay, and Android have no such dialog and do not mount the routes.
-- **Linking a desktop** uses `POST /services/fabric/link { sessionId }` on the same terms: Passport makes a v2 offer on the desktop's own loopback `/device-links`; the desktop sees only sessions created for its own origin, asks natively, signs as responder, and publishes its half of the `IdentityCrossSign`. Passport countersigns as usual.
-- **Trusted hubs** is the only way to widen where Passport sends data; it never widens which origins may ask for a login.
+- **Origin comes from the browser.** The content script forwards `PASSPORT_CHALLENGE` posts with the page's `MessagePort`; the background binds the challenge to `sender.origin` / `sender.url`, never to a field the page wrote, and refuses one naming another origin. Only HTTPS and loopback origins may ask, only the top page or a same-origin frame, one challenge per tab and frame, each nonce once. The answer goes back to that frame's port only.
+- **Nothing extra without consent.** The assertion carries the identity key of the account the user picked. Wallet xpubs and the cosigner key go only when the site asked and the user ticked them.
+- **The user picks the account and network** in the popup: Passport signs directly, or asks a linked desktop. A desktop's answer must be signed by the key pinned when it was linked (after both sides showed the same pairing code), on its own network, naming the Passport account that linked it.
+- **Desktop signers** (Hub on 8080, GoonCitizen on 3041, or bases the user adds) are loopback only. They answer `GET /services/fabric/identity` and `POST /services/fabric/sign` (a `PASSPORT_SIGN_REQUEST`) only to a loopback socket with a loopback Host and **no web-page `Origin`** (none, or an extension origin such as Passport's background; a site's `fetch` always carries its own), spend each nonce once, refuse devices outside their identity cluster, and wait for a native OS dialog — never the web UI, which any script on that origin could drive. A CLI Hub, a hosted relay, and Android have no such dialog and do not mount the routes.
+- **Linking a desktop** uses `POST /services/fabric/link { sessionId }` on the same terms: Passport makes a v2 offer on the desktop's own loopback `/device-links`; the desktop sees only sessions created for its own origin, shows the pairing code in its native dialog, signs as responder, and publishes its half of the `IdentityCrossSign`. Passport countersigns only after the user confirms the same code.
+- **Trusted hubs** is the only way to widen where Passport sends data; it never widens which origins may ask to sign in.
 
 **Basics coverage:** [`tests/adversarialEnvironment.basics.unit.ts`](tests/adversarialEnvironment.basics.unit.ts). Related: [`tests/fabricHubAllowlist.unit.ts`](tests/fabricHubAllowlist.unit.ts).
 

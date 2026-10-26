@@ -7,7 +7,7 @@
  */
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
-const { verifyIdentitySchnorr } = require('@fabric/http/functions/fabricSiteLoginVerify');
+const { verifyIdentitySchnorr } = require('../../src/utils/loadFabricPassport').identitySchnorr;
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const {
   buildDeviceLinkMessage,

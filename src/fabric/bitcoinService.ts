@@ -38,6 +38,16 @@ export interface FabricBitcoinNodeConfig {
 /** Optional auth for Hub watch-only xpub routes when `FABRIC_BITCOIN_XPUB_QUERY_TOKEN` is set. */
 export interface FabricBitcoinHttpOpts {
   xpubQueryToken?: string | null;
+  /** Standard (`m/44'`) account xpub watched beside the SegWit (`m/84'`) one. */
+  standardXpub?: string | null;
+}
+
+/** Watch addresses of an account wallet: SegWit receive, plus standard receive when given. */
+function watchAddresses (xpub: string, networkName: string, count: number, standardXpub?: string | null): string[] {
+  const out = deriveReceiveAddresses(xpub, networkName, count);
+  const standard = String(standardXpub ?? '').trim();
+  if (standard) out.push(...deriveReceiveAddresses(standard, networkName, count, 'pkh'));
+  return out;
 }
 
 function trimXpubQueryToken (t?: string | null): string | undefined {
@@ -82,7 +92,7 @@ export interface BitcoinStatus {
 function networkFromName (name: string): bitcoin.networks.Network {
   const n = String(name || 'regtest').toLowerCase();
   if (n === 'mainnet' || n === 'main') return bitcoin.networks.bitcoin;
-  if (n === 'testnet' || n === 'signet' || n === 'test') return bitcoin.networks.testnet;
+  if (n.startsWith('testnet') || n === 'signet' || n === 'test') return bitcoin.networks.testnet;
   return bitcoin.networks.regtest;
 }
 
@@ -105,18 +115,19 @@ function decodeBip32Root (xpub: string): BIP32Interface | null {
 }
 
 /**
- * Derive BIP84 (native SegWit) receive addresses from an xpub for watch-only balance.
- * Path: m/84'/0'/0'/0/i (external chain)
+ * Derive receive addresses (external chain `…/0/i`) from an account xpub for
+ * watch-only balance: native SegWit for `m/84'`, legacy (`pkh`) for `m/44'`.
  */
-export function deriveReceiveAddresses (xpub: string, networkName: string, count = 20): string[] {
+export function deriveReceiveAddresses (xpub: string, networkName: string, count = 20, script: 'wpkh' | 'pkh' = 'wpkh'): string[] {
   const addressNetwork = networkFromName(networkName);
   const root = decodeBip32Root(xpub);
   if (!root) return [];
+  const pay = script === 'pkh' ? bitcoin.payments.p2pkh : bitcoin.payments.p2wpkh;
   try {
     const addrs: string[] = [];
     for (let i = 0; i < count; i++) {
       const child = root.derive(0).derive(i);
-      const { address } = bitcoin.payments.p2wpkh({ pubkey: Buffer.from(child.publicKey), network: addressNetwork });
+      const { address } = pay({ pubkey: Buffer.from(child.publicKey), network: addressNetwork });
       if (address) addrs.push(address);
     }
     return addrs;
@@ -199,7 +210,7 @@ export async function fetchWalletBalance (
   networkName: string,
   opts?: FabricBitcoinHttpOpts
 ): Promise<WalletBalance> {
-  const addresses = deriveReceiveAddresses(xpub, networkName, 20);
+  const addresses = watchAddresses(xpub, networkName, 20, opts?.standardXpub);
 
   try {
     const status = await fetchBitcoinStatus(baseUrl);
@@ -210,6 +221,7 @@ export async function fetchWalletBalance (
     const root = baseUrl.replace(/\/+$/, '');
     const params = new URLSearchParams();
     params.set('xpub', xpub);
+    if (opts?.standardXpub) params.set('standardXpub', String(opts.standardXpub).trim());
     if (addresses.length > 0) params.set('addresses', addresses.join(','));
     const path = `/services/bitcoin/xpub?${params.toString()}`;
 
@@ -253,9 +265,10 @@ export async function fetchTransactionHistory (
 
   const root = baseUrl.replace(/\/+$/, '');
   const limit = Math.max(1, Math.min(100, count));
-  const watchAddrs = deriveReceiveAddresses(trimmedXpub, networkName, 50);
+  const watchAddrs = watchAddresses(trimmedXpub, networkName, 50, opts?.standardXpub);
   const params = new URLSearchParams();
   params.set('xpub', trimmedXpub);
+  if (opts?.standardXpub) params.set('standardXpub', String(opts.standardXpub).trim());
   params.set('limit', String(limit));
   if (watchAddrs.length > 0) {
     params.set('addresses', watchAddrs.join(','));

@@ -33,15 +33,15 @@ function fabricCoreRoots (release) {
   roots.push(path.resolve(__dirname, 'node_modules/@fabric/core'));
   return roots;
 }
-/** Core tree for `fabric:` site login (same order as `src/utils/loadFabricSiteLogin.js`). */
-function resolveFabricSiteLoginCoreRoot (release) {
+/** Core tree for Passport sign-in and accounts (same order as `src/utils/loadFabricPassport.js`). */
+function resolveFabricPassportCoreRoot (release) {
   for (const root of fabricCoreRoots(release)) {
-    if (fs.existsSync(path.join(root, 'functions', 'fabricSiteLogin.js'))) {
-      console.log(`[webpack] fabric: site login core: ${root}`);
+    if (fs.existsSync(path.join(root, 'functions', 'passport.js')) && fs.existsSync(path.join(root, 'functions', 'accountKeys.js'))) {
+      console.log(`[webpack] Passport core: ${root}`);
       return root;
     }
   }
-  throw new Error('fabric: site login needs @fabric/core with functions/fabricSiteLogin.js (set FABRIC_CORE or clone ../fabric-clean)');
+  throw new Error('Passport needs @fabric/core with functions/passport.js and functions/accountKeys.js (set FABRIC_CORE or clone ../fabric-clean)');
 }
 /** Core tree for named federations (same order as `src/utils/loadFabricFederation.js`). */
 function resolveFabricFederationCoreRoot (release) {
@@ -147,8 +147,8 @@ module.exports = (env, argv) => {
         '@fabric/core/constants': path.resolve(__dirname, 'node_modules/@fabric/core/constants.js'),
         '@fabric/core/types/message': path.resolve(__dirname, 'node_modules/@fabric/core/types/message.js'),
         '@fabric/http/assets': path.resolve(__dirname, 'node_modules/@fabric/http/assets'),
-        'fabric-site-login-core': resolveFabricSiteLoginCoreRoot(release),
-        [path.resolve(__dirname, 'src/utils/loadFabricSiteLogin.js')]: path.resolve(__dirname, 'src/utils/fabricSiteLoginCore.browser.js'),
+        'fabric-passport-core': resolveFabricPassportCoreRoot(release),
+        [path.resolve(__dirname, 'src/utils/loadFabricPassport.js')]: path.resolve(__dirname, 'src/utils/fabricPassportCore.browser.js'),
         'fabric-federation-core': resolveFabricFederationCoreRoot(release),
         [path.resolve(__dirname, 'src/utils/loadFabricFederation.js')]: path.resolve(__dirname, 'src/utils/fabricFederationCore.browser.js')
       }

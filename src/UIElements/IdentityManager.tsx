@@ -21,12 +21,10 @@
 
 // Dependencies
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import { wordlists, mnemonicToSeedSync, generateMnemonic } from 'bip39';
-import { bech32m } from 'bech32';
-import { BIP32Factory, BIP32Interface } from 'bip32';
+import { wordlists } from 'bip39';
+import { BIP32Factory } from 'bip32';
 import * as ecc from 'tiny-secp256k1';
 import * as bitcoin from 'bitcoinjs-lib';
-import { FABRIC_KEY_DERIVATION_PATH } from '@fabric/core/constants';
 import { FABRIC_STATE_STORAGE_KEY } from '../constants/fabricExtension';
 import { PASSPORT_EXTENSION_VERSION } from '../constants/extensionVersion';
 import { swallowNonFatal } from '../utils/nonFatal';
@@ -52,7 +50,38 @@ import {
   cancelDeviceLinkSession,
   keyFingerprint
 } from '../utils/fabricDeviceLinkSign';
-import { normalizeDesktopSignerBase, requestDesktopLink } from '../utils/fabricDesktopSigner';
+import { normalizeDesktopSignerBase, requestDesktopLink, pinDesktop, type DesktopSigner } from '../utils/fabricDesktopSigner';
+import { pairingCode } from '../utils/fabricSiteMessage';
+import {
+  ACCOUNT_NETWORKS,
+  LOCK_PASSWORD_MIN,
+  type AccountVault,
+  type VaultIdentity,
+  type PublicIdentity,
+  accountIndex,
+  accountNetwork,
+  assertLockPassword,
+  cosignerPrivateKeyHex,
+  createVault,
+  currentView,
+  forgetMaster,
+  generateSeedPhrase,
+  isAccountVault,
+  masterFromSeedPhrase,
+  masterFromXprv,
+  normalizeSeedPhrase,
+  publicIdentities,
+  readVaultBackup,
+  recallMaster,
+  rememberMaster,
+  renameAccount,
+  switchAccount,
+  unlockVault,
+  pairKey,
+  vaultAccounts,
+  vaultBackup,
+  vaultIdentities
+} from '../utils/passportVault';
 import { publishIdentityCrossSign, publishIdentityCrossSignKind } from '../utils/identityCrossSignPublish';
 import { REVOKE_TYPE } from '../utils/identityCrossSign';
 import {
@@ -65,7 +94,6 @@ import {
 } from '../utils/linkedDevices';
 
 // Services
-import { validateXpub } from '../utils/xpub';
 import { testFabricSignalingReachable, type FabricSignalingTestOk } from '../fabric/fabricWebRTCPeering';
 import { touchFabricActivity, readFabricActivityMs } from '../utils/fabricActivityStorage';
 import {
@@ -225,40 +253,12 @@ const truncateMiddle = (str: string | undefined, frontLen: number = 5, backLen: 
 /** Hub faucets only hand out coins on test networks. */
 const FAUCET_NETWORKS = new Set(['regtest', 'signet']);
 
-type KeyGenerationState = 'initial' | 'warning' | 'generating' | 'complete' | 'xpub_login' | 'xprv_login' | 'logged_in' | 'wallet' | 'peers' | 'password_entry' | 'add_identity' | 'confirmation' | 'no_password_warning' | 'settings' | 'derivation_password_warning' | 'seed_phrase_entry' | 'identity_detail' | 'login_selection' | 'seed_phrase_login' | 'sign_message' | 'restore_identity' | 'verify_message' | 'derivation_password_entry';
+type KeyGenerationState = 'initial' | 'warning' | 'generating' | 'complete' | 'xprv_login' | 'logged_in' | 'wallet' | 'peers' | 'add_identity' | 'confirmation' | 'settings' | 'derivation_password_warning' | 'identity_detail' | 'login_selection' | 'seed_phrase_login' | 'sign_message' | 'verify_message' | 'derivation_password_entry';
 type WalletSubView = 'receive' | 'history' | 'send' | null;
-type XpubLoginState = 'input' | 'validating' | 'error';
 type PasswordState = 'input' | 'verifying' | 'error';
 
-interface Identity {
-  id: string;
-  bech32: string;
-  xpub: string;
-  publicKeyHex: string;
-  /** Present when the identity was derived from seed in-session; used for offline message signing. */
-  privateKeyHex?: string;
-  name?: string;
-  isCurrent: boolean;
-  loadedAt: string;
-  hasPrivateKey: boolean;
-  balance?: string;
-}
-
-interface KeyPairStorage {
-  public: string;
-  private: string;
-}
-
-function isKeyPairStorage (k: unknown): k is KeyPairStorage {
-  if (!k || typeof k !== 'object') return false;
-  const o = k as Record<string, unknown>;
-  return (
-    typeof o.public === 'string' &&
-    typeof o.private === 'string' &&
-    /^[0-9a-f]+$/i.test(o.public) &&
-    /^[0-9a-f]+$/i.test(o.private)
-  );
-}
+/** One account + network of the Passport vault (keys only on the current one, while unlocked). */
+type Identity = VaultIdentity;
 
 interface BitcoinNode {
   id: string;
@@ -339,8 +339,6 @@ const FABRIC_HUB_PRESETS: ReadonlyArray<{ id: string; label: string; hubAddress:
 // Move DEFAULT_SETTINGS before state declarations
 const DEFAULT_SETTINGS = {
   autoLockTimer: 15,
-  /** Same default as `@fabric/core/constants` FABRIC_KEY_DERIVATION_PATH (hub / Fabric identity). */
-  derivationPath: FABRIC_KEY_DERIVATION_PATH,
   bitcoinNodes: DEFAULT_BITCOIN_NODES,
   fabricNodes: DEFAULT_FABRIC_NODES,
   /** Optional; must match Hub `FABRIC_BITCOIN_XPUB_QUERY_TOKEN` when the hub gates xpub scans. */
@@ -349,7 +347,6 @@ const DEFAULT_SETTINGS = {
 
 interface Settings {
   autoLockTimer: number;
-  derivationPath: string;
   bitcoinNodes: BitcoinNode[];
   fabricNodes: FabricNode[];
   xpubQueryToken: string;
@@ -363,10 +360,6 @@ function normalizeSettings (raw: Partial<Settings> | undefined): Settings {
       : DEFAULT_SETTINGS.autoLockTimer;
   return {
     autoLockTimer,
-    derivationPath:
-      typeof raw?.derivationPath === 'string' && raw.derivationPath.trim()
-        ? raw.derivationPath
-        : DEFAULT_SETTINGS.derivationPath,
     bitcoinNodes: Array.isArray(raw?.bitcoinNodes) ? raw.bitcoinNodes : DEFAULT_SETTINGS.bitcoinNodes,
     fabricNodes: Array.isArray(raw?.fabricNodes) ? raw.fabricNodes : DEFAULT_SETTINGS.fabricNodes,
     xpubQueryToken:
@@ -374,120 +367,26 @@ function normalizeSettings (raw: Partial<Settings> | undefined): Settings {
   };
 }
 
-/** Encrypted extended private key (base58) at `path`, unlocked with the same password used for seed-derived login. */
-interface WalletCryptoV1 {
-  v: 1;
-  salt: string;
-  iv: string;
-  tag: string;
-  ciphertext: string;
-  path: string;
-}
-
+/**
+ * What Passport keeps in extension storage: the sealed vault (master xprv under the lock
+ * password, plus public views of the accounts used so far) and the current account's public
+ * identity, which the background reads for the `X-Fabric-Identity` header. No private keys.
+ */
 interface StorageState {
-  keys: KeyPairStorage[];
-  identities: Identity[];
-  blobs: unknown[];
+  v: 2;
+  vault: AccountVault | null;
+  identities: PublicIdentity[];
   settings: Settings;
-  /** Per-identity encrypted account xprv (identity id → blob). */
-  walletCryptos?: Record<string, WalletCryptoV1>;
-  /** @deprecated Single-blob format; migrated to walletCryptos on load. */
-  walletCrypto?: WalletCryptoV1;
 }
 
 type IdentityDebugPanelState = StorageState | { error: string };
 
-const WALLET_PBKDF2_ITERATIONS = 200_000;
-
-function isWalletCryptoV1 (x: unknown): x is WalletCryptoV1 {
-  if (!x || typeof x !== 'object') return false;
-  const o = x as Record<string, unknown>;
-  return (
-    o.v === 1 &&
-    typeof o.salt === 'string' &&
-    typeof o.iv === 'string' &&
-    typeof o.tag === 'string' &&
-    typeof o.ciphertext === 'string' &&
-    typeof o.path === 'string'
-  );
-}
-
-function encryptAccountXprv (xprvBase58: string, password: string, path: string): WalletCryptoV1 {
-  const salt = crypto.randomBytes(16);
-  const key = crypto.pbkdf2Sync(password, salt, WALLET_PBKDF2_ITERATIONS, 32, 'sha256');
-  const iv = crypto.randomBytes(12);
-  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
-  const enc = Buffer.concat([cipher.update(xprvBase58, 'utf8'), cipher.final()]);
-  const tag = cipher.getAuthTag();
+function readStorageState (raw: unknown): { vault: AccountVault | null; settings: Settings } {
+  const o = raw && typeof raw === 'object' ? raw as Record<string, unknown> : {};
   return {
-    v: 1,
-    salt: salt.toString('hex'),
-    iv: iv.toString('hex'),
-    tag: tag.toString('hex'),
-    ciphertext: enc.toString('hex'),
-    path
+    vault: o.v === 2 && isAccountVault(o.vault) ? o.vault : null,
+    settings: normalizeSettings(o.settings as Partial<Settings> | undefined)
   };
-}
-
-function decryptAccountXprv (blob: WalletCryptoV1, password: string): string {
-  const salt = Buffer.from(blob.salt, 'hex');
-  const key = crypto.pbkdf2Sync(password, salt, WALLET_PBKDF2_ITERATIONS, 32, 'sha256');
-  const decipher = crypto.createDecipheriv('aes-256-gcm', key, Buffer.from(blob.iv, 'hex'));
-  decipher.setAuthTag(Buffer.from(blob.tag, 'hex'));
-  return Buffer.concat([
-    decipher.update(Buffer.from(blob.ciphertext, 'hex')),
-    decipher.final()
-  ]).toString('utf8');
-}
-
-function coerceWalletCryptosFromStorage (parsed: StorageState): Record<string, WalletCryptoV1> {
-  const out: Record<string, WalletCryptoV1> = {};
-  if (parsed.walletCryptos && typeof parsed.walletCryptos === 'object') {
-    for (const [id, val] of Object.entries(parsed.walletCryptos)) {
-      if (isWalletCryptoV1(val)) out[id] = val;
-    }
-  }
-  if (Object.keys(out).length === 0 && parsed.walletCrypto && isWalletCryptoV1(parsed.walletCrypto)) {
-    const first = parsed.identities?.find((id: Identity) => id.hasPrivateKey);
-    if (first?.id) out[first.id] = parsed.walletCrypto;
-  }
-  return out;
-}
-
-/** Never persist raw private key hex in identities (session-only `privateKeyHex`). */
-function stripPrivateKeyHexFromIdentities (identities: Identity[]): Identity[] {
-  return identities.map(({ privateKeyHex, ...rest }) => rest);
-}
-
-/** Build identity + encrypted xprv from a BIP32 node at `path` (password encrypts the stored xprv). */
-function identityAndWalletBlobFromNode (
-  derivedKey: BIP32Interface,
-  path: string,
-  encryptPassword: string
-): { identity: Identity; blob: WalletCryptoV1 } {
-  const pubKeyPoint = derivedKey.publicKey;
-  if (!pubKeyPoint || pubKeyPoint.length !== 33) {
-    throw new Error('Invalid public key');
-  }
-  const publicKeyHex = Buffer.from(pubKeyPoint).toString('hex');
-  const xCoord = pubKeyPoint.slice(1, 33);
-  const words = bech32m.toWords(xCoord);
-  const bech32mEncoded = bech32m.encode('id', words);
-  const xprv = derivedKey.toBase58();
-  const identity: Identity = {
-    id: bech32mEncoded,
-    xpub: derivedKey.neutered().toBase58(),
-    publicKeyHex,
-    bech32: bech32mEncoded,
-    isCurrent: true,
-    name: bech32mEncoded,
-    loadedAt: new Date().toISOString(),
-    hasPrivateKey: true,
-    privateKeyHex: derivedKey.privateKey
-      ? Buffer.from(derivedKey.privateKey).toString('hex')
-      : undefined
-  };
-  return { identity, blob: encryptAccountXprv(xprv, encryptPassword, path) };
 }
 
 const STORAGE_KEY = FABRIC_STATE_STORAGE_KEY;
@@ -641,42 +540,41 @@ const ensureWalletLoaded = async (node: BitcoinNode): Promise<string> => {
   }
 };
 
-// Update the type definition to include masterKey
-interface GeneratedValues {
-  seed: Buffer;
-  privateKey: string;
-  publicKey: string;
-  xCoord: Buffer;
-  bech32mEncoded: string;
-  masterKey: BIP32Interface;
-}
-
 const IdentityManager = () => {
   const [state, setState] = useState<KeyGenerationState>('initial');
   const [seedPhrase, setSeedPhrase] = useState<string | null>(null);
-  const [seedWords, setSeedWords] = useState<string[]>([]);
-  const [xpubState, setXpubState] = useState<XpubLoginState>('input');
-  const [xpub, setXpub] = useState<string>('');
+  /** BIP39 passphrase (the derivation password): with the seed phrase it makes the master. */
   const [password, setPassword] = useState<string>('');
   const [passwordState, setPasswordState] = useState<PasswordState>('input');
-  const [identities, setIdentities] = useState<Identity[]>([]);
+  /** The sealed master plus public views of the accounts used so far. */
+  const [vault, setVault] = useState<AccountVault | null>(null);
+  /** The open master xprv: in memory (and session storage) only, until lock. */
+  const [masterXprv, setMasterXprv] = useState<string | null>(null);
+  const [lockPassword, setLockPassword] = useState<string>('');
+  const [confirmLockPassword, setConfirmLockPassword] = useState<string>('');
+  const [xprvInput, setXprvInput] = useState<string>('');
+  const [vaultError, setVaultError] = useState<string | null>(null);
+  const [accountForm, setAccountForm] = useState<{ account: string; network: string; label: string }>({
+    account: '1',
+    network: 'mainnet',
+    label: ''
+  });
+  /** Balance per account pair (`network:account`), BTC. */
+  const [balances, setBalances] = useState<Record<string, string>>({});
   const [debugInfo, setDebugInfo] = useState<IdentityDebugPanelState | null>(null);
   const [showDebug, setShowDebug] = useState<boolean>(false);
   const [showPassword, setShowPassword] = useState<boolean>(false);
   const [confirmationSeed, setConfirmationSeed] = useState<string>('');
   const [confirmationPassword, setConfirmationPassword] = useState<string>('');
-  const [derivationPassword, setDerivationPassword] = useState<string>('');
-  const [derivationPasswordState, setDerivationPasswordState] = useState<PasswordState>('input');
   const [editingIdentity, setEditingIdentity] = useState<Identity | null>(null);
   const [newIdentityName, setNewIdentityName] = useState<string>('');
   const [isLoggingOut, setIsLoggingOut] = useState(false);
   const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
   /** Same destructive action as footer Logout; modal copy differs for Settings "Clear Data". */
   const [eraseConfirmMode, setEraseConfirmMode] = useState<'logout' | 'erase_all'>('logout');
-  const [selectedIdentity, setSelectedIdentity] = useState<Identity | null>(null);
+  const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [showSensitiveInfo, setShowSensitiveInfo] = useState<boolean>(false);
   const [isValidPhrase, setIsValidPhrase] = useState<boolean>(true);
-  const [generatedValues, setGeneratedValues] = useState<GeneratedValues | null>(null);
   const [messageToSign, setMessageToSign] = useState<string>('');
   const [signature, setSignature] = useState<string | null>(null);
   const [showSignature, setShowSignature] = useState<boolean>(false);
@@ -695,7 +593,6 @@ const IdentityManager = () => {
   const [fabricTestError, setFabricTestError] = useState<string | null>(null);
   const [fabricTestOk, setFabricTestOk] = useState<FabricSignalingTestOk | null>(null);
   const [isFabricTestModalOpen, setIsFabricTestModalOpen] = useState<boolean>(false);
-  const [walletCryptos, setWalletCryptos] = useState<Record<string, WalletCryptoV1>>({});
   const [signUnlockPassword, setSignUnlockPassword] = useState('');
   const [signUnlockError, setSignUnlockError] = useState<string | null>(null);
   const [isSigning, setIsSigning] = useState(false);
@@ -735,7 +632,6 @@ const IdentityManager = () => {
 
   const [settings, setSettings] = useState<Settings>({
     autoLockTimer: DEFAULT_SETTINGS.autoLockTimer,
-    derivationPath: DEFAULT_SETTINGS.derivationPath,
     bitcoinNodes: DEFAULT_SETTINGS.bitcoinNodes,
     fabricNodes: DEFAULT_SETTINGS.fabricNodes,
     xpubQueryToken: DEFAULT_SETTINGS.xpubQueryToken
@@ -799,18 +695,41 @@ const IdentityManager = () => {
     }
   }, []);
 
-  const signingIdentity: Identity | null = selectedIdentity
-    ?? identities.find(i => i.isCurrent)
-    ?? identities.find(i => i.hasPrivateKey)
-    ?? null;
+  const identities: Identity[] = useMemo(() => {
+    try {
+      return vaultIdentities(vault, masterXprv);
+    } catch (err) {
+      console.error('Passport: cannot read accounts:', err);
+      return [];
+    }
+  }, [vault, masterXprv]);
+  const selectedIdentity: Identity | null = identities.find(i => pairKey(i) === selectedKey) ?? null;
+  const vaultCurrent = currentView(vault);
+  const locked = !!vault && !masterXprv;
 
-  const handleStartDeviceLink = useCallback(async (hubOverride?: string) => {
+  /** The current account: the only pair whose keys are open while unlocked. */
+  const signingIdentity: Identity | null = identities.find(i => i.isCurrent) ?? null;
+  /** Federation (and escrow) signatures use the account's cosigner key, never the identity key. */
+  const cosignerHex = useMemo(
+    () => (signingIdentity && masterXprv ? cosignerPrivateKeyHex(masterXprv, signingIdentity) : null),
+    [signingIdentity, masterXprv]
+  );
+  const hubNetwork = btcStatus && btcStatus.available ? accountNetwork(btcStatus.network) : '';
+  const walletNetworkMismatch = !!(signingIdentity && hubNetwork && hubNetwork !== signingIdentity.network);
+
+  const handleStartDeviceLink = useCallback(async (desktop?: DesktopSigner) => {
     const pk = signingIdentity?.privateKeyHex;
     const xp = signingIdentity?.xpub;
-    if (!pk || !xp) {
+    const me = signingIdentity;
+    if (!pk || !xp || !me) {
       setDeviceLinkError('Unlock your Passport identity before creating a link offer.');
       return;
     }
+    if (desktop && !desktop.network) {
+      setDeviceLinkError('This desktop app did not say which network it signs on. Update it, then link again.');
+      return;
+    }
+    const hubOverride = desktop ? desktop.base : undefined;
     clearDeviceLinkPoll();
     if (deviceLinkOffer && deviceLinkOffer.sessionId) {
       void cancelDeviceLinkSession(deviceLinkOffer.hubBase, deviceLinkOffer.sessionId, {
@@ -886,9 +805,25 @@ const IdentityManager = () => {
           if (tick.status === 'accepted' && 'responder' in tick) {
             if (asked) return;
             asked = true;
+            if (desktop && String(tick.responder.pubkeyHex).toLowerCase() !== desktop.pubkey) {
+              void cancelDeviceLinkSession(started.hubBase, started.sessionId, {
+                pollSecret: started.pollSecret
+              });
+              stop('Another key answered for this desktop app. Nothing was signed.');
+              return;
+            }
+            let code = '';
+            try {
+              code = pairingCode(me.publicKeyHex, tick.responder.pubkeyHex);
+            } catch (_) {
+              stop('This device cannot link with itself.');
+              return;
+            }
             const approved = window.confirm(
-              `Link this Passport with the device whose key fingerprint is ${keyFingerprint(tick.responder.pubkeyHex)} ` +
-              `(via ${tick.origin})?\n\nApprove only if the other device shows this fingerprint.`
+              `Pairing code: ${code}\n\n` +
+              `Link this Passport with ${desktop ? (desktop.name || desktop.signer) : 'the other device'} ` +
+              `(key ${keyFingerprint(tick.responder.pubkeyHex)}, via ${tick.origin})?\n\n` +
+              'Approve only if the other device shows the same six digits.'
             );
             if (!approved) {
               void cancelDeviceLinkSession(started.hubBase, started.sessionId, {
@@ -932,6 +867,22 @@ const IdentityManager = () => {
             linkedAt: new Date().toISOString(),
             role: 'initiator'
           });
+          if (desktop && desktop.network) {
+            try {
+              await pinDesktop({
+                base: desktop.base,
+                signer: desktop.signer,
+                name: desktop.name,
+                pubkey: tick.responder.pubkeyHex,
+                network: desktop.network,
+                device: { account: me.account, network: me.network, pubkey: me.publicKeyHex }
+              });
+            } catch (err: unknown) {
+              stop(`Linked, but this desktop app cannot sign in for you: ${err instanceof Error ? err.message : String(err)}`);
+              refreshLinkedDevices();
+              return;
+            }
+          }
           refreshLinkedDevices();
           stop(null);
         } finally {
@@ -975,29 +926,21 @@ const IdentityManager = () => {
   }, [signingIdentity, refreshLinkedDevices]);
 
   const performAutoLock = useCallback(() => {
-    setIdentities(prev => {
-      const hadPk = prev.some(i => !!i.privateKeyHex);
-      if (hadPk) setShowAutoLockBanner(true);
-      return prev.map(id => {
-        if (!id.privateKeyHex) return id;
-        const { privateKeyHex, ...rest } = id;
-        return rest;
-      });
+    setMasterXprv(prev => {
+      if (prev) setShowAutoLockBanner(true);
+      return null;
     });
-    setSelectedIdentity(prev => {
-      if (!prev?.privateKeyHex) return prev;
-      const { privateKeyHex, ...rest } = prev;
-      return rest;
-    });
+    void forgetMaster();
     setSeedPhrase(sp => {
       if (sp) setShowAutoLockBanner(true);
       return null;
     });
-    setGeneratedValues(gv => {
-      if (gv) setShowAutoLockBanner(true);
-      return null;
-    });
     setPassword('');
+    setLockPassword('');
+    setConfirmLockPassword('');
+    setXprvInput('');
+    setConfirmationSeed('');
+    setConfirmationPassword('');
     setSignUnlockPassword('');
     setSignUnlockError(null);
     setMessageToSign('');
@@ -1010,20 +953,18 @@ const IdentityManager = () => {
     setState(s => {
       if (s === 'sign_message' || s === 'verify_message' || s === 'identity_detail') return 'logged_in';
       if (s === 'settings') return 'logged_in';
+      if (s === 'add_identity') return 'logged_in';
       const interrupted: KeyGenerationState[] = [
         'generating',
         'complete',
         'confirmation',
         'warning',
-        'seed_phrase_entry',
         'derivation_password_entry',
         'derivation_password_warning',
         'seed_phrase_login',
-        'restore_identity',
-        'add_identity',
-        'xpub_login'
+        'xprv_login'
       ];
-      if (interrupted.includes(s)) return 'logged_in';
+      if (interrupted.includes(s)) return 'initial';
       return s;
     });
 
@@ -1056,10 +997,7 @@ const IdentityManager = () => {
 
   useEffect(() => {
     if (!storageHydrated || settings.autoLockTimer <= 0) return;
-    const hasSk =
-      identities.some(i => !!i.privateKeyHex) ||
-      !!seedPhrase ||
-      !!generatedValues;
+    const hasSk = !!masterXprv || !!seedPhrase;
     if (!hasSk) return;
     const id = window.setInterval(() => {
       if (Date.now() - lastUserActivityRef.current >= settings.autoLockTimer * 60_000) {
@@ -1070,9 +1008,8 @@ const IdentityManager = () => {
   }, [
     storageHydrated,
     settings.autoLockTimer,
-    identities,
+    masterXprv,
     seedPhrase,
-    generatedValues,
     performAutoLock
   ]);
 
@@ -1105,17 +1042,13 @@ const IdentityManager = () => {
 
         if (savedState) {
           try {
-            const parsedState = savedState as StorageState;
-            setWalletCryptos(coerceWalletCryptosFromStorage(parsedState));
-            if (parsedState.settings) {
-              setSettings(normalizeSettings(parsedState.settings));
-            }
-            if (parsedState.identities && parsedState.identities.length > 0) {
-              setIdentities(parsedState.identities);
-              // Only set state to logged_in if we have valid identities
-              if (parsedState.identities.some(id => id.id && id.xpub)) {
-                setState('logged_in');
-              }
+            const restored = readStorageState(savedState);
+            setSettings(restored.settings);
+            if (restored.vault) {
+              setVault(restored.vault);
+              const open = await recallMaster(restored.vault);
+              if (open) setMasterXprv(open);
+              setState('logged_in');
             }
           } catch (error) {
             console.error('Failed to parse saved state:', error);
@@ -1140,39 +1073,11 @@ const IdentityManager = () => {
     const saveState = async () => {
       if (!storageHydrated) return;
       try {
-        const keyPairs: KeyPairStorage[] = [];
-
-        // If we have a master key from seed phrase, store its key pair
-        if (seedPhrase && password) {
-          const seed = mnemonicToSeedSync(seedPhrase, password);
-          const masterKey = bip32.fromSeed(seed);
-          if (masterKey.privateKey && masterKey.publicKey) {
-            keyPairs.push({
-              private: Buffer.from(masterKey.privateKey).toString('hex'),
-              public: Buffer.from(masterKey.publicKey).toString('hex')
-            });
-          }
-
-          // Store key pairs for each identity that has one
-          identities.forEach((identity: Identity) => {
-            if (identity.hasPrivateKey) {
-              const derivedKey = masterKey.derivePath(settings.derivationPath);
-              if (derivedKey.privateKey && derivedKey.publicKey) {
-                keyPairs.push({
-                  private: Buffer.from(derivedKey.privateKey).toString('hex'),
-                  public: Buffer.from(derivedKey.publicKey).toString('hex')
-                });
-              }
-            }
-          });
-        }
-
         const state: StorageState = {
-          keys: keyPairs,
-          identities: stripPrivateKeyHexFromIdentities(identities),
-          blobs: [],
-          settings: settings,
-          walletCryptos
+          v: 2,
+          vault,
+          identities: publicIdentities(vault),
+          settings
         };
 
         if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
@@ -1185,7 +1090,7 @@ const IdentityManager = () => {
       }
     };
     saveState();
-  }, [identities, settings, walletCryptos, storageHydrated]);
+  }, [vault, settings, storageHydrated]);
 
   useEffect(() => {
     const loadDebugInfo = async () => {
@@ -1222,7 +1127,7 @@ const IdentityManager = () => {
     // Validate password strength
     if (password.length < 8) {
       setPasswordState('error');
-      setVerificationResult('Derivation password must be at least 8 characters long');
+      setVerificationResult('A passphrase must be at least 8 characters long (or leave it empty).');
       return;
     }
 
@@ -1236,48 +1141,48 @@ const IdentityManager = () => {
       // Add artificial delay
       await new Promise(resolve => setTimeout(resolve, 1500));
 
-      // Generate a BIP39 mnemonic
-      const mnemonic = generateMnemonic(256, undefined, wordlists.english);
-      setSeedPhrase(mnemonic);
-
-      // Generate the seed from the mnemonic
-      const seed = mnemonicToSeedSync(mnemonic);
-
-      // Generate the master key (aligned with the mnemonic seed)
-      const masterKey = bip32.fromSeed(seed);
-
-      const pub = Buffer.from(masterKey.publicKey);
-      if (pub.length !== 33 || (pub[0] !== 0x02 && pub[0] !== 0x03)) {
-        throw new Error('Expected compressed secp256k1 public key from BIP32');
-      }
-      const xCoord = pub.subarray(1, 33);
-      const publicKey = pub.toString('hex');
-      const privateKey = masterKey.privateKey
-        ? Buffer.from(masterKey.privateKey).toString('hex')
-        : '';
-
-      // Encode with bech32m
-      const words = bech32m.toWords(xCoord);
-      const bech32mEncoded = bech32m.encode('id', words);
-
-      // Store all generated values including the master key
-      setGeneratedValues({
-        seed,
-        privateKey,
-        publicKey,
-        xCoord,
-        bech32mEncoded,
-        masterKey
-      });
-
+      setSeedPhrase(generateSeedPhrase());
       setState('complete');
       setPasswordState('input');
     } catch (error) {
       console.error('Failed to generate key:', error);
-      setState('password_entry');
-      // Show error message
+      setState('derivation_password_entry');
       setPasswordState('error');
     }
+  };
+
+  /** Seal a new master under the lock password and open account 0. */
+  const openNewVault = async (master: string, lock: string): Promise<void> => {
+    const next = createVault({ master, lockPassword: lock, account: 0, network: 'mainnet' });
+    setVault(next);
+    setMasterXprv(master);
+    setSelectedKey(null);
+    setBalances({});
+    await rememberMaster(master);
+    setShowAutoLockBanner(false);
+    bumpUserActivity();
+  };
+
+  const clearImportFields = () => {
+    setSeedPhrase(null);
+    setPassword('');
+    setLockPassword('');
+    setConfirmLockPassword('');
+    setXprvInput('');
+    setConfirmationSeed('');
+    setConfirmationPassword('');
+    setVaultError(null);
+  };
+
+  /** Lock password + confirmation, or an error to show. */
+  const lockPasswordProblem = (): string | null => {
+    try {
+      assertLockPassword(lockPassword);
+    } catch (err: unknown) {
+      return err instanceof Error ? err.message : String(err);
+    }
+    if (lockPassword !== confirmLockPassword) return 'The lock passwords do not match.';
+    return null;
   };
 
   const handleProceedToConfirmation = () => {
@@ -1286,86 +1191,49 @@ const IdentityManager = () => {
   };
 
   const handleConfirmation = async () => {
-    if (confirmationSeed === seedPhrase && confirmationPassword === password) {
-      // Show loading state
-      setPasswordState('verifying');
-
-      // Add artificial delay
-      await new Promise(resolve => setTimeout(resolve, 1500));
-
-      try {
-        if (!generatedValues) {
-          throw new Error('No generated values found');
-        }
-
-        const path = settings.derivationPath;
-        const derivedKey = generatedValues.masterKey.derivePath(path);
-        const { identity: newIdentity, blob } = identityAndWalletBlobFromNode(
-          derivedKey,
-          path,
-          confirmationPassword
-        );
-
-        // Add the new identity and make it current
-        setIdentities(prev => {
-          const updated = prev.map(id => ({ ...id, isCurrent: false }));
-          return [newIdentity, ...updated];
-        });
-        setWalletCryptos(prev => ({ ...prev, [newIdentity.id]: blob }));
-
-        // Clear all sensitive data before advancing
-        setSeedPhrase(null);
-        setPassword('');
-        setConfirmationSeed('');
-        setConfirmationPassword('');
-        setGeneratedValues(null);
-
-        // Finally advance to logged in state
-        setState('logged_in');
-        setPasswordState('input');
-      } catch (error) {
-        console.error('Failed to save identity:', error);
-        setPasswordState('error');
-      }
-    } else {
+    if (!seedPhrase || normalizeSeedPhrase(confirmationSeed) !== seedPhrase || confirmationPassword !== password) {
+      setVaultError('The seed phrase or passphrase does not match what you wrote down.');
+      setPasswordState('error');
+      return;
+    }
+    const problem = lockPasswordProblem();
+    if (problem) {
+      setVaultError(problem);
+      setPasswordState('error');
+      return;
+    }
+    setPasswordState('verifying');
+    try {
+      await openNewVault(masterFromSeedPhrase(seedPhrase, password), lockPassword);
+      clearImportFields();
+      setState('logged_in');
+      setPasswordState('input');
+    } catch (error: unknown) {
+      console.error('Failed to create Passport:', error);
+      setVaultError(error instanceof Error ? error.message : 'Could not create your Passport.');
       setPasswordState('error');
     }
   };
 
-  const handleXpubLogin = async () => {
+  /** Import: seed phrase + optional passphrase, or a master xprv; sealed under a new lock password. */
+  const handleImport = async (source: 'seed' | 'xprv') => {
+    const problem = lockPasswordProblem();
+    if (problem) {
+      setVaultError(problem);
+      return;
+    }
+    setPasswordState('verifying');
     try {
-      setXpubState('validating');
-      // Validate xpub format
-      if (!validateXpub(xpub)) {
-        setXpubState('error');
-        return;
-      }
-
-      // TODO: implement bech32m encoded id here
-      // Create new identity from xpub
-      const newIdentity: Identity = {
-        id: `id${xpub.slice(0, 8)}`,
-        xpub,
-        publicKeyHex: xpub,  // Add this line
-        bech32: `id${xpub.slice(0, 8)}`, // Simple bech32-like format for display
-        isCurrent: true,
-        name: 'Xpub Identity',
-        loadedAt: new Date().toISOString(),
-        hasPrivateKey: false  // We don't have the private key for xpub-based identities
-      };
-
-      // Add the new identity and make it current
-      setIdentities(prev => {
-        const updated = prev.map(id => ({ ...id, isCurrent: false }));
-        return [newIdentity, ...updated];
-      });
-
+      const master = source === 'seed'
+        ? masterFromSeedPhrase(seedPhrase || '', password)
+        : masterFromXprv(xprvInput);
+      await openNewVault(master, lockPassword);
+      clearImportFields();
       setState('logged_in');
-      setXpubState('input');
-      setXpub('');
-    } catch (error) {
-      console.error('Failed to validate xpub:', error);
-      setXpubState('error');
+    } catch (error: unknown) {
+      setVaultError(error instanceof Error ? error.message : 'Could not import that key.');
+    } finally {
+      setPasswordState('input');
     }
   };
 
@@ -1378,20 +1246,17 @@ const IdentityManager = () => {
       // Add artificial delay
       await new Promise(resolve => setTimeout(resolve, 1500));
 
-      // Clear generated values including master key
-      setGeneratedValues(null);
+      setVault(null);
+      setMasterXprv(null);
+      setSelectedKey(null);
+      setBalances({});
+      await forgetMaster();
 
-      // Clear all identities
-      setIdentities([]);
-      setWalletCryptos({});
-
-      // Save empty state to storage
       const state: StorageState = {
-        keys: [],
+        v: 2,
+        vault: null,
         identities: [],
-        blobs: [],
-        settings: DEFAULT_SETTINGS,
-        walletCryptos: {}
+        settings: DEFAULT_SETTINGS
       };
 
       // Try chrome.storage.local first, fall back to localStorage
@@ -1401,23 +1266,15 @@ const IdentityManager = () => {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
       }
 
-      // Reset all states
       setState('initial');
-      setSeedPhrase(null);
-      setXpub('');
-      setXpubState('input');
-      setPassword('');
+      clearImportFields();
       setPasswordState('input');
-      setConfirmationSeed('');
-      setConfirmationPassword('');
-      setDerivationPassword('');
-      setDerivationPasswordState('input');
       setShowLogoutConfirm(false);
       setShowAutoLockBanner(false);
     } catch (error) {
       console.error('Failed to logout:', error);
-      // Even if storage fails, we should still clear the local state
-      setIdentities([]);
+      setVault(null);
+      setMasterXprv(null);
       setState('initial');
       setShowAutoLockBanner(false);
     } finally {
@@ -1441,14 +1298,8 @@ const IdentityManager = () => {
   };
 
   const handleSaveIdentityName = () => {
-    if (editingIdentity) {
-      setIdentities(prev =>
-        prev.map(id =>
-          id.xpub === editingIdentity.xpub
-            ? { ...id, name: newIdentityName }
-            : id
-        )
-      );
+    if (editingIdentity && vault) {
+      setVault(renameAccount(vault, editingIdentity, newIdentityName));
       setEditingIdentity(null);
       setNewIdentityName('');
     }
@@ -1456,51 +1307,29 @@ const IdentityManager = () => {
 
   const handleStartOver = () => {
     setState('initial');
-    setSeedPhrase(null);
-    setXpub('');
-    setXpubState('input');
-    setPassword('');
+    clearImportFields();
     setPasswordState('input');
-    setConfirmationSeed('');
-    setConfirmationPassword('');
-    setDerivationPassword('');
-    setDerivationPasswordState('input');
     setEditingIdentity(null);
     setNewIdentityName('');
   };
 
   const handleGoBack = () => {
-    if (identities.length > 0) {
-      setState('logged_in');
-    } else {
-      setState('initial');
-    }
+    setVaultError(null);
+    setState(vault ? 'logged_in' : 'initial');
   };
 
   const handleGoBackWithReset = () => {
-    if (identities.length > 0) {
-      setState('logged_in');
-    } else {
-      setState('initial');
-    }
-    setXpubState('input');
-    setXpub('');
-  };
-
-  const handleGoBackWithXpubReset = () => {
-    if (identities.length > 0) {
-      setState('logged_in');
-    } else {
-      setState('initial');
-    }
-    setXpubState('input');
-    setXpub('');
+    clearImportFields();
+    setState(vault ? 'logged_in' : 'initial');
   };
 
   const handleGoBackWithConfirmationReset = () => {
     setState('initial');
     setConfirmationSeed('');
     setConfirmationPassword('');
+    setLockPassword('');
+    setConfirmLockPassword('');
+    setVaultError(null);
     setPasswordState('input');
   };
 
@@ -1511,56 +1340,78 @@ const IdentityManager = () => {
   };
 
   const handleIdentityClick = (identity: Identity) => {
-    setSelectedIdentity(identity);
+    setSelectedKey(pairKey(identity));
     setState('identity_detail');
   };
 
   const handleBackFromDetail = () => {
-    setSelectedIdentity(null);
+    setSelectedKey(null);
     setShowSensitiveInfo(false);
     setState('logged_in');
   };
 
-  const handleMakeCurrent = (identity: Identity) => {
-    setIdentities(prev =>
-      prev.map(id => ({
-        ...id,
-        isCurrent: id.id === identity.id
-      }))
-    );
-    // Update the selected identity to reflect the current state
-    setSelectedIdentity(prev => prev ? { ...prev, isCurrent: true } : null);
-  };
-
-  /** @returns error message, or null when the identity is now unlocked. */
-  const unlockIdentity = (identity: Identity | null | undefined, password: string): string | null => {
-    if (!identity?.id) return 'No identity selected.';
-    const blob = walletCryptos[identity.id];
-    if (!blob) return 'No encrypted signing key on this device for this identity.';
+  /** Switch accounts and/or networks. Locked, only accounts used before. */
+  const selectAccount = (pair: { account: number; network: string }, label?: string): string | null => {
+    if (!vault) return 'Create or import a Passport first.';
     try {
-      const xprv = decryptAccountXprv(blob, password);
-      const node = bip32.fromBase58(xprv);
-      if (!node.privateKey) throw new Error('Missing private key');
-      const pk = Buffer.from(node.privateKey).toString('hex');
-      const id = identity.id;
-      setIdentities(prev =>
-        prev.map(row => (row.id === id && row.hasPrivateKey ? { ...row, privateKeyHex: pk } : row))
-      );
-      setSelectedIdentity(prev =>
-        prev?.id === id && prev.hasPrivateKey ? { ...prev, privateKeyHex: pk } : prev
-      );
-      setShowAutoLockBanner(false);
+      setVault(switchAccount(vault, { ...pair, master: masterXprv, label }));
+      setWalletBalance(null);
+      setWalletTxs([]);
+      setReceiveAddr(null);
+      setReceiveAddrIdx(0);
       bumpUserActivity();
       return null;
     } catch (err: unknown) {
-      void err;
-      return 'Wrong password or unreadable wallet data.';
+      const code = (err as { code?: string } | null)?.code;
+      if (code === 'FABRIC_ACCOUNT_LOCKED') return 'Unlock Passport to open an account you have not used yet.';
+      return err instanceof Error ? err.message : String(err);
     }
   };
 
-  const handleUnlockSigning = () => {
-    if (!selectedIdentity?.id) return;
-    const error = unlockIdentity(selectedIdentity, signUnlockPassword);
+  const handleMakeCurrent = (identity: Identity) => {
+    const error = selectAccount(identity);
+    if (error) setVaultError(error);
+  };
+
+  const handleAddAccount = () => {
+    const account = accountIndex(accountForm.account);
+    const network = accountNetwork(accountForm.network);
+    if (account < 0) {
+      setVaultError('The account number must be a whole number from 0 to 2147483647.');
+      return;
+    }
+    if (!network) {
+      setVaultError('Pick a network.');
+      return;
+    }
+    const error = selectAccount({ account, network }, accountForm.label.trim() || undefined);
+    if (error) {
+      setVaultError(error);
+      return;
+    }
+    setVaultError(null);
+    setAccountForm({ account: String(account + 1), network, label: '' });
+    setState('logged_in');
+  };
+
+  /** @returns error message, or null when Passport is now unlocked. */
+  const unlockPassport = async (lockPwd: string): Promise<string | null> => {
+    if (!vault) return 'Create or import a Passport first.';
+    let master: string;
+    try {
+      master = unlockVault(vault, lockPwd);
+    } catch (_) {
+      return 'Wrong lock password.';
+    }
+    setMasterXprv(master);
+    await rememberMaster(master);
+    setShowAutoLockBanner(false);
+    bumpUserActivity();
+    return null;
+  };
+
+  const handleUnlockSigning = async () => {
+    const error = await unlockPassport(signUnlockPassword);
     setSignUnlockError(error);
     if (!error) setSignUnlockPassword('');
   };
@@ -1584,10 +1435,6 @@ const IdentityManager = () => {
     setIsSigning(true);
 
     try {
-      if (!selectedIdentity.hasPrivateKey) {
-        throw new Error('Cannot sign messages with an xpub-based identity. Please use an identity with a private key.');
-      }
-
       const pkLocal = selectedIdentity.privateKeyHex;
       if (pkLocal) {
         const { signature, publicKeyHex } = signBitcoinMessageLocal(messageToSign, pkLocal);
@@ -1630,12 +1477,10 @@ const IdentityManager = () => {
         console.warn('Bitcoin RPC signing failed:', rpcErr);
       }
 
-      if (walletCryptos[selectedIdentity.id]) {
-        throw new Error('Unlock signing with your password below, then try again.');
+      if (!selectedIdentity.isCurrent) {
+        throw new Error('Only the current account signs. Switch to this account first.');
       }
-      throw new Error(
-        'No signing key in memory. Unlock with your password, or configure an optional Bitcoin Core / Hub RPC node for wallet signing.'
-      );
+      throw new Error('Unlock Passport with your lock password below, then try again.');
     } catch (error: unknown) {
       console.error('Failed to sign message:', error);
       setSignature(null);
@@ -1710,55 +1555,15 @@ const IdentityManager = () => {
 
   const handleExportWallet = async () => {
     try {
-      // Generate key pairs for backup if we have seed phrase and password
-      const keyPairs: KeyPairStorage[] = [];
-      if (seedPhrase && password) {
-        const seed = mnemonicToSeedSync(seedPhrase, password);
-        const masterKey = bip32.fromSeed(seed);
-
-        // Store master key pair
-        if (masterKey.privateKey && masterKey.publicKey) {
-          keyPairs.push({
-            private: Buffer.from(masterKey.privateKey).toString('hex'),
-            public: Buffer.from(masterKey.publicKey).toString('hex')
-          });
-        }
-
-        // Store key pairs for each identity
-        identities.forEach((identity: Identity) => {
-          if (identity.hasPrivateKey) {
-            const derivedKey = masterKey.derivePath(settings.derivationPath);
-            if (derivedKey.privateKey && derivedKey.publicKey) {
-              keyPairs.push({
-                private: Buffer.from(derivedKey.privateKey).toString('hex'),
-                public: Buffer.from(derivedKey.publicKey).toString('hex')
-              });
-            }
-          }
-        });
-      }
-
-      // Create the export data with all identities, settings, and key pairs
-      const exportData = {
-        version: '1.0',
-        timestamp: new Date().toISOString(),
-        state: {
-          keys: keyPairs,
-          identities: stripPrivateKeyHexFromIdentities(identities),
-          settings,
-          walletCryptos
-        }
-      };
-
-      // Convert to JSON and create blob
-      const jsonString = JSON.stringify(exportData, null, 2);
+      if (!vault) return;
+      const jsonString = JSON.stringify(vaultBackup(vault), null, 2);
       const blob = new Blob([jsonString], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
 
       // Create download link and trigger download
       const a = document.createElement('a');
       a.href = url;
-      a.download = `fabric-wallet-backup-${new Date().toISOString().split('T')[0]}.json`;
+      a.download = `fabric-passport-backup-${new Date().toISOString().split('T')[0]}.json`;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
@@ -1778,57 +1583,17 @@ const IdentityManager = () => {
       reader.onload = async (e) => {
         try {
           const content = e.target?.result as string;
-          const data = JSON.parse(content);
-
-          // Validate the backup data
-          if (!data.version || !data.state || !Array.isArray(data.state.identities)) {
-            throw new Error('Invalid backup file format');
-          }
-
-          // Validate key pairs if present
-          if (data.state.keys && Array.isArray(data.state.keys)) {
-            const validKeyPairs = data.state.keys.every(isKeyPairStorage);
-
-            if (!validKeyPairs) {
-              throw new Error('Invalid key pair format in backup');
-            }
-          }
-
-          const importedIdentities = stripPrivateKeyHexFromIdentities(data.state.identities);
-          const restoredParsed: StorageState = {
-            keys: data.state.keys || [],
-            identities: importedIdentities,
-            blobs: [],
-            settings: normalizeSettings(data.state.settings),
-            walletCryptos: (data.state as StorageState).walletCryptos,
-            walletCrypto: (data.state as StorageState).walletCrypto
-          };
-          const importedCryptos = coerceWalletCryptosFromStorage(restoredParsed);
-
-          // Set the new state
-          setIdentities(importedIdentities);
-          setSettings(normalizeSettings(data.state.settings));
-          setWalletCryptos(importedCryptos);
-
-          // Save to storage
-          const state: StorageState = {
-            keys: data.state.keys || [],
-            identities: importedIdentities,
-            blobs: [],
-            settings: data.state.settings,
-            walletCryptos: importedCryptos
-          };
-
-          if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-            await chrome.storage.local.set({ [STORAGE_KEY]: state });
-          } else {
-            localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-          }
-
-          // Return to logged in state
+          const restored = readVaultBackup(JSON.parse(content));
+          await forgetMaster();
+          setMasterXprv(null);
+          setSelectedKey(null);
+          setBalances({});
+          setVault(restored);
+          setVaultError(null);
           setState('logged_in');
-        } catch (error) {
-          console.error('Failed to restore wallet:', error);
+        } catch (error: unknown) {
+          console.error('Failed to restore Passport:', error);
+          setVaultError(error instanceof Error ? error.message : 'Could not read that backup.');
         }
       };
       reader.readAsText(file);
@@ -1838,11 +1603,7 @@ const IdentityManager = () => {
   };
 
   const renderSignMessageState = () => {
-    const signNeedsUnlock =
-      !!selectedIdentity?.hasPrivateKey &&
-      !selectedIdentity?.privateKeyHex &&
-      !!selectedIdentity?.id &&
-      !!walletCryptos[selectedIdentity.id];
+    const signNeedsUnlock = locked && !!selectedIdentity?.isCurrent;
 
     return (
       <Message className="fade-in">
@@ -1859,10 +1620,10 @@ const IdentityManager = () => {
           {signNeedsUnlock && (
             <Segment>
               <Form.Field>
-                <label>Password (unlock encrypted key on this device)</label>
+                <label>Lock password</label>
                 <Input
                   type="password"
-                  placeholder="Password from wallet creation or seed login"
+                  placeholder="The password that unlocks Passport"
                   value={signUnlockPassword}
                   onChange={(e) => {
                     setSignUnlockPassword(e.target.value);
@@ -1876,7 +1637,7 @@ const IdentityManager = () => {
                   <p>{signUnlockError}</p>
                 </Message>
               )}
-              <Button type="button" color="blue" content="Unlock signing" onClick={handleUnlockSigning} />
+              <Button type="button" color="blue" content="Unlock" onClick={() => void handleUnlockSigning()} />
             </Segment>
           )}
           <Form>
@@ -2177,24 +1938,10 @@ const IdentityManager = () => {
         <Segment style={{ wordBreak: 'break-word', fontFamily: 'monospace' }}>
           {seedPhrase}
         </Segment>
-        <p>Your derivation password is:</p>
-        <Segment style={{
-          wordBreak: 'break-word',
-          fontFamily: 'monospace',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between'
-        }}>
-          <span>{showPassword ? password : '••••••••'}</span>
-          <Button
-            icon={showPassword ? 'eye slash' : 'eye'}
-            onClick={() => setShowPassword(!showPassword)}
-            size="mini"
-            style={{ marginLeft: '1em' }}
-          />
-        </Segment>
-        <p style={{ color: 'red' }}>IMPORTANT: Save both your seed phrase and password in a secure location!</p>
-        <p>These will be used to derive your master keys and cannot be recovered if lost.</p>
+        <p style={{ color: 'red' }}>
+          IMPORTANT: Write down the seed phrase{password ? ' and keep your passphrase with it' : ''}.
+        </p>
+        <p>Together they recreate every account and its funds, and they cannot be recovered if lost. Passport never shows the seed phrase again.</p>
         <Button.Group fluid style={{ marginTop: '1em' }}>
           <Button
             color='black'
@@ -2216,40 +1963,74 @@ const IdentityManager = () => {
     </Message>
   );
 
-  const renderXpubLoginState = () => (
+  /** The lock password seals the master on this device; it is not the passphrase. */
+  const renderLockPasswordFields = () => (
+    <>
+      <Form.Field>
+        <label>Lock password (unlocks Passport on this device)</label>
+        <Input
+          type="password"
+          placeholder={`At least ${LOCK_PASSWORD_MIN} characters`}
+          value={lockPassword}
+          onChange={(e) => {
+            setLockPassword(e.target.value);
+            setVaultError(null);
+          }}
+          autoComplete="new-password"
+        />
+      </Form.Field>
+      <Form.Field>
+        <label>Confirm lock password</label>
+        <Input
+          type="password"
+          placeholder="Type it again"
+          value={confirmLockPassword}
+          onChange={(e) => {
+            setConfirmLockPassword(e.target.value);
+            setVaultError(null);
+          }}
+          autoComplete="new-password"
+        />
+      </Form.Field>
+      {vaultError && (
+        <Message negative size="small">
+          <p>{vaultError}</p>
+        </Message>
+      )}
+    </>
+  );
+
+  const renderXprvLoginState = () => (
     <Message className="fade-in" style={{ width: '100%' }}>
-      <Message.Header>Login with Extended Public Key</Message.Header>
+      <Message.Header>Import a master key</Message.Header>
       <Message.Content>
-        <Form onSubmit={(e) => { e.preventDefault(); handleXpubLogin(); }}>
+        <p>Paste a master extended private key (xprv or tprv, depth 0). Account keys are not accepted: Passport derives every account from the master.</p>
+        <Form onSubmit={(e) => { e.preventDefault(); void handleImport('xprv'); }}>
           <Form.Field>
-            <label>Enter your xpub:</label>
+            <label>Master xprv</label>
             <Input
-              placeholder='xpub...'
-              value={xpub}
-              onChange={(e) => setXpub(e.target.value)}
-              error={xpubState === 'error'}
-              style={{
-                fontFamily: 'monospace',
-                width: '100%',
-                fontSize: '0.9em'
+              type="password"
+              placeholder="xprv..."
+              value={xprvInput}
+              onChange={(e) => {
+                setXprvInput(e.target.value);
+                setVaultError(null);
               }}
+              autoComplete="off"
+              style={{ fontFamily: 'monospace', width: '100%', fontSize: '0.9em' }}
             />
           </Form.Field>
-          {xpubState === 'error' && (
-            <Message negative>
-              <Message.Header>Invalid xpub</Message.Header>
-              <p>Please enter a valid extended public key</p>
-            </Message>
-          )}
+          {renderLockPasswordFields()}
           <Button.Group vertical fluid style={{ marginTop: '1em' }}>
             <Button
+              type="submit"
               color='green'
-              content='Login'
-              onClick={handleXpubLogin}
-              disabled={!xpub.trim() || xpubState === 'validating'}
-              loading={xpubState === 'validating'}
+              content='Import'
+              disabled={!xprvInput.trim() || passwordState === 'verifying'}
+              loading={passwordState === 'verifying'}
             />
             <Button
+              type="button"
               color='black'
               content='Go Back'
               onClick={handleGoBackWithReset}
@@ -2264,13 +2045,13 @@ const IdentityManager = () => {
     <Message warning className="fade-in">
       <Message.Header>Important Security Information</Message.Header>
       <Message.Content>
-        <p>You have chosen not to use a derivation password. This means:</p>
+        <p>You have chosen not to use a passphrase. This means:</p>
         <ul>
-          <li>Only your seed phrase will be needed to access your accounts</li>
+          <li>Only your seed phrase will be needed to recreate your accounts</li>
           <li>Anyone with access to your seed phrase can control your funds</li>
-          <li>You will not have the additional security of a password</li>
+          <li>You will still set a lock password for this device next</li>
         </ul>
-        <p><strong>Are you sure you want to proceed without a password?</strong></p>
+        <p><strong>Are you sure you want to proceed without a passphrase?</strong></p>
         <Button.Group vertical fluid style={{ marginTop: '1em' }}>
           <Button
             color='black'
@@ -2292,16 +2073,16 @@ const IdentityManager = () => {
 
   const renderDerivationPasswordEntry = () => (
     <Message className="fade-in">
-      <Message.Header>Set Derivation Password</Message.Header>
+      <Message.Header>Set a Passphrase</Message.Header>
       <Message.Content>
-        <p>This password will be used with your <strong>seed phrase</strong> to derive your <strong>master keys</strong>.</p>
-        <p><strong>Important:</strong> You must store this password along with your seed phrase to recover your identity.</p>
+        <p>The passphrase (BIP39) is used with your <strong>seed phrase</strong> to derive your <strong>master key</strong>. A different passphrase makes different accounts.</p>
+        <p><strong>Important:</strong> Store it with your seed phrase; you need both to recover. It is not your lock password, which you set after the seed phrase.</p>
         <Form>
           <Form.Field>
-            <label>Create a derivation password:</label>
+            <label>Passphrase (optional):</label>
             <Input
               type="password"
-              placeholder="Password"
+              placeholder="Passphrase"
               value={password}
               onChange={(e) => {
                 setPassword(e.target.value);
@@ -2336,105 +2117,6 @@ const IdentityManager = () => {
                 setPasswordState('input');
                 setVerificationResult(null);
               }}
-            />
-          </Button.Group>
-        </Form>
-      </Message.Content>
-    </Message>
-  );
-
-  const renderSeedPhraseEntry = () => (
-    <Message className="fade-in">
-      <Message.Header>Enter Your Seed Phrase</Message.Header>
-      <Message.Content>
-        <p>Please enter your 12 or 24-word seed phrase and derivation password. Each word must be from the BIP39 wordlist.</p>
-        <Form>
-          <Form.Field>
-            <label>Seed Phrase</label>
-            <Input
-              type="text"
-              placeholder="Enter your 12 or 24 word seed phrase"
-              value={seedPhrase || ''}
-              onChange={(e) => {
-                const phrase = e.target.value.trim();
-                setSeedPhrase(phrase);
-                // Validate the phrase
-                const words = phrase.split(/\s+/);
-                const isValidLength = words.length === 12 || words.length === 24;
-                const allWordsValid = words.every(word => wordlist.includes(word.toLowerCase()));
-                setIsValidPhrase(isValidLength && allWordsValid);
-              }}
-              error={!isValidPhrase && seedPhrase !== null}
-              style={{ fontFamily: 'monospace' }}
-            />
-            {!isValidPhrase && seedPhrase !== null && (
-              <Message negative>
-                <Message.Header>Invalid Seed Phrase</Message.Header>
-                <p>Please ensure all words are from the BIP39 wordlist and the phrase contains exactly 12 or 24 words.</p>
-              </Message>
-            )}
-          </Form.Field>
-          <Form.Field>
-            <label>Derivation Password</label>
-            <Input
-              type="password"
-              placeholder="Enter your derivation password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              error={passwordState === 'error'}
-              autoComplete="new-password"
-            />
-            {passwordState === 'error' && (
-              <Message negative>
-                <Message.Header>Error</Message.Header>
-                <p>Failed to process seed phrase. Please check your input and try again.</p>
-              </Message>
-            )}
-          </Form.Field>
-          <Button.Group vertical fluid style={{ marginTop: '1em' }}>
-            <Button
-              content='Continue'
-              onClick={async () => {
-                try {
-                  if (!seedPhrase) {
-                    setIsValidPhrase(false);
-                    return;
-                  }
-                  setPasswordState('verifying');
-
-                  // Generate the seed from the mnemonic
-                  const seed = mnemonicToSeedSync(seedPhrase, password);
-
-                  // Derive the master key using BIP32
-                  const masterKey = bip32.fromSeed(seed);
-
-                  const path = settings.derivationPath;
-                  const derivedKey = masterKey.derivePath(path);
-                  const { identity: newIdentity, blob } = identityAndWalletBlobFromNode(derivedKey, path, password);
-
-                  // Add the new identity and make it current
-                  setIdentities(prev => {
-                    const updated = prev.map(id => ({ ...id, isCurrent: false }));
-                    return [newIdentity, ...updated];
-                  });
-                  setWalletCryptos(prev => ({ ...prev, [newIdentity.id]: blob }));
-
-                  setState('logged_in');
-
-                  // Clear sensitive data
-                  setPassword('');
-                  setSeedPhrase(null);
-                } catch (error) {
-                  console.error('Failed to process seed phrase:', error);
-                  setPasswordState('error');
-                }
-              }}
-              disabled={!isValidPhrase || !seedPhrase}
-              loading={passwordState === 'verifying'}
-            />
-            <Button
-              content='Go Back'
-              onClick={() => setState('add_identity')}
             />
           </Button.Group>
         </Form>
@@ -2516,71 +2198,60 @@ const IdentityManager = () => {
                   fontSize: '1.2em',
                   fontWeight: 'bold'
                 }}>
-                  <span>{selectedIdentity.balance || '0.00'} BTC</span>
+                  <span>{balances[pairKey(selectedIdentity)] || '0.00'} BTC</span>
                 </div>
               </div>
 
               <div style={{ marginBottom: '1em' }}>
-                <h5 style={{ marginBottom: '0.5em' }}>Identity</h5>
-                <div style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '0.5em',
-                  fontFamily: 'monospace',
-                  wordBreak: 'break-all'
-                }}>
-                  <span>{showSensitiveInfo ? selectedIdentity.id : truncateMiddle(selectedIdentity.id)}</span>
-                  <Icon
-                    name={showSensitiveInfo ? 'eye slash' : 'eye'}
-                    link
-                    onClick={() => setShowSensitiveInfo(!showSensitiveInfo)}
-                    style={{ cursor: 'pointer' }}
-                  />
+                <h5 style={{ marginBottom: '0.5em' }}>Account</h5>
+                <div style={{ fontFamily: 'monospace' }}>
+                  #{selectedIdentity.account} on {selectedIdentity.network}
                 </div>
               </div>
 
-              <div>
-                <h5 style={{ marginBottom: '0.5em' }}>Public Key</h5>
-                <div style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '0.5em',
-                  fontFamily: 'monospace',
-                  wordBreak: 'break-all'
-                }}>
-                  <span>{showSensitiveInfo ? selectedIdentity.publicKeyHex : truncateMiddle(selectedIdentity.publicKeyHex)}</span>
-                  <Icon
-                    name={showSensitiveInfo ? 'eye slash' : 'eye'}
-                    link
-                    onClick={() => setShowSensitiveInfo(!showSensitiveInfo)}
-                    style={{ cursor: 'pointer' }}
-                  />
+              {([
+                ['Identity', selectedIdentity.id],
+                ['Public key', selectedIdentity.publicKeyHex],
+                ['Wallet xpub (SegWit, receives)', selectedIdentity.wallet.segwit.xpub],
+                ['Wallet xpub (legacy, watched)', selectedIdentity.wallet.standard.xpub],
+                ['Escrow key (cosigner)', selectedIdentity.cosignerPubkey]
+              ] as Array<[string, string]>).filter(([, value]) => !!value).map(([title, value]) => (
+                <div key={title} style={{ marginBottom: '1em' }}>
+                  <h5 style={{ marginBottom: '0.5em' }}>{title}</h5>
+                  <div style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '0.5em',
+                    fontFamily: 'monospace',
+                    wordBreak: 'break-all'
+                  }}>
+                    <span>{showSensitiveInfo ? value : truncateMiddle(value)}</span>
+                    <Icon
+                      name={showSensitiveInfo ? 'eye slash' : 'eye'}
+                      link
+                      onClick={() => setShowSensitiveInfo(!showSensitiveInfo)}
+                      style={{ cursor: 'pointer' }}
+                    />
+                    <Icon
+                      name="copy"
+                      link
+                      aria-label={`Copy ${title}`}
+                      onClick={() => copyWithNotice(value, title)}
+                      style={{ cursor: 'pointer' }}
+                    />
+                  </div>
                 </div>
-              </div>
-
-              <div>
-                <h5 style={{ marginBottom: '0.5em' }}>xpub</h5>
-                <div style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '0.5em',
-                  fontFamily: 'monospace',
-                  wordBreak: 'break-all'
-                }}>
-                  <span>{showSensitiveInfo ? selectedIdentity.xpub : truncateMiddle(selectedIdentity.xpub)}</span>
-                  <Icon
-                    name={showSensitiveInfo ? 'eye slash' : 'eye'}
-                    link
-                    onClick={() => setShowSensitiveInfo(!showSensitiveInfo)}
-                    style={{ cursor: 'pointer' }}
-                  />
-                </div>
-              </div>
+              ))}
             </Segment>
+            {vaultError && (
+              <Message negative size="small" onDismiss={() => setVaultError(null)}>
+                <p>{vaultError}</p>
+              </Message>
+            )}
             <Button.Group vertical fluid style={{ marginTop: '1em' }}>
               <Button
                 icon='check circle'
-                content='Make Current'
+                content={selectedIdentity.isCurrent ? 'Current account' : 'Use this account'}
                 onClick={() => handleMakeCurrent(selectedIdentity)}
                 size='small'
                 color={selectedIdentity.isCurrent ? 'green' : 'blue'}
@@ -2775,8 +2446,9 @@ const IdentityManager = () => {
     const activeNode = settings.fabricNodes.find(n => n.isActive);
     const hubBase = activeNode ? activeNode.hubAddress.replace(/\/+$/, '') : null;
     const currentId = identities.find(id => id.isCurrent);
-    const faucetReceiveAddr = faucetNetwork && currentId?.xpub
-      ? deriveReceiveAddress(currentId.xpub, faucetNetwork, receiveAddrIdx)
+    const segwitXpub = currentId ? currentId.wallet.segwit.xpub : '';
+    const faucetReceiveAddr = faucetNetwork && segwitXpub && accountNetwork(faucetNetwork) === currentId?.network
+      ? deriveReceiveAddress(segwitXpub, faucetNetwork, receiveAddrIdx)
       : null;
 
     return (
@@ -2798,9 +2470,19 @@ const IdentityManager = () => {
         </div>
 
         <Segment inverted style={darkPanelStyle}>
+          {currentId ? (
+            <p style={{ color: 'rgba(255,255,255,0.6)', fontSize: '0.8em', margin: '0 0 0.5em' }}>
+              {currentId.name} · account #{currentId.account} on {currentId.network}
+            </p>
+          ) : null}
           {btcStatus && !btcStatus.available ? (
             <p style={{ color: 'rgba(255,255,255,0.65)', fontSize: '0.88em', margin: '0.25em 0' }}>
               Bitcoin service not available on the active Fabric node.
+            </p>
+          ) : walletNetworkMismatch ? (
+            <p style={{ color: 'rgba(255,255,255,0.65)', fontSize: '0.88em', margin: '0.25em 0' }}>
+              The active Fabric node runs {btcStatus?.network}, but this account is on {currentId?.network}.
+              Switch networks for this account, or pick a node on {currentId?.network}.
             </p>
           ) : walletBalance ? (
             <div style={{ marginBottom: '0.5em' }}>
@@ -2866,7 +2548,7 @@ const IdentityManager = () => {
               {receiveAddr ? (
                 <>
                   <p style={{ color: 'rgba(255,255,255,0.7)', fontSize: '0.85em', marginBottom: '0.35em' }}>
-                    Receive address (BIP84, index {receiveAddrIdx}):
+                    Receive address (SegWit, BIP84, index {receiveAddrIdx}):
                   </p>
                   <Segment inverted style={{ ...darkPanelStyle, wordBreak: 'break-all', fontFamily: 'monospace', fontSize: '0.88em', padding: '0.75em', background: '#1f2022' }}>
                     {receiveAddr}
@@ -2896,7 +2578,7 @@ const IdentityManager = () => {
                 </>
               ) : (
                 <p style={{ color: 'rgba(255,255,255,0.45)', fontSize: '0.85em' }}>
-                  Could not derive an address. Make sure your identity has an xpub and the network is known.
+                  Could not derive an address for this account.
                 </p>
               )}
             </div>
@@ -3060,7 +2742,7 @@ const IdentityManager = () => {
 
         <FederationsPanel
           hubBase={hubBase}
-          privateKeyHex={(currentId && currentId.privateKeyHex) || null}
+          privateKeyHex={cosignerHex}
           onPendingChange={setFederationsPending}
         />
 
@@ -3132,7 +2814,7 @@ const IdentityManager = () => {
           </Button>
           <p style={{ fontSize: '0.8em', color: 'rgba(255,255,255,0.55)', marginTop: '0.5em', marginBottom: 0 }}>
             Connects to your active Fabric node, verifies its identity, and registers this wallet for notifications
-            (group invitations, group proposals, chat, delegation signatures).
+            (group invitations, group proposals, chat).
             Manage hub URLs under Settings.
           </p>
         </Segment>
@@ -3203,11 +2885,40 @@ const IdentityManager = () => {
     );
   };
 
+  const renderUnlockForm = () => (
+    <Form
+      onSubmit={(e) => {
+        e.preventDefault();
+        void handleUnlockSigning();
+      }}
+      style={{ marginTop: '0.5em' }}
+    >
+      <Form.Field>
+        <Input
+          type="password"
+          placeholder="Lock password"
+          value={signUnlockPassword}
+          onChange={(e) => {
+            setSignUnlockPassword(e.target.value);
+            setSignUnlockError(null);
+          }}
+          autoComplete="current-password"
+          action={{ type: 'submit', color: 'blue', content: 'Unlock' }}
+        />
+      </Form.Field>
+      {signUnlockError && (
+        <Message negative size="small">
+          <p>{signUnlockError}</p>
+        </Message>
+      )}
+    </Form>
+  );
+
   const renderLoggedInState = () => {
     const current = identities.find(id => id.isCurrent);
     const balanceLabel = walletBalance
       ? formatSats(walletBalance.balanceSats)
-      : `${current?.balance || '0.00'} BTC`;
+      : `${(current && balances[pairKey(current)]) || '0.00'} BTC`;
 
     return (
     <div className="fade-in" style={{ width: '100%' }}>
@@ -3235,7 +2946,7 @@ const IdentityManager = () => {
                 alignItems: 'center',
                 gap: '0.5em'
               }}>
-                {truncateMiddle(current.name || 'Unnamed Identity')}
+                {truncateMiddle(current.name || `Account ${current.account}`)}
                 <Icon
                   name='pencil'
                   style={{
@@ -3247,12 +2958,15 @@ const IdentityManager = () => {
                   onClick={(e: React.MouseEvent) => {
                     e.stopPropagation();
                     setStartEditingOnDetail(true);
-                    setSelectedIdentity(current);
+                    setSelectedKey(pairKey(current));
                     setState('identity_detail');
                   }}
                 />
               </h4>
             </div>
+            <span style={{ fontSize: '0.8em', opacity: 0.7 }}>
+              #{current.account} · {current.network}
+            </span>
           </div>
           <div style={{
             display: 'flex',
@@ -3271,35 +2985,32 @@ const IdentityManager = () => {
           {renderIdentityCardActionBar()}
         </Segment>
       )}
-      {(() => {
-        const cur = identities.find(id => id.isCurrent);
-        if (!cur?.hasPrivateKey || cur.privateKeyHex || !cur.id || !walletCryptos[cur.id]) return null;
-        return (
-          <>
-            {showAutoLockBanner && (
-              <Message
-                warning
-                size="small"
-                style={{ marginTop: '0.75em' }}
-                onDismiss={() => setShowAutoLockBanner(false)}
-              >
-                <p style={{ margin: 0 }}>
-                  Session timed out
-                  {settings.autoLockTimer > 0
-                    ? ` after ${settings.autoLockTimer} minute${settings.autoLockTimer === 1 ? '' : 's'} without activity`
-                    : ''}
-                  . In-memory signing keys were cleared.
-                </p>
-              </Message>
-            )}
-            <Message info size="small" style={{ marginTop: showAutoLockBanner ? '0.5em' : '0.75em' }}>
+      {locked && (
+        <>
+          {showAutoLockBanner && (
+            <Message
+              warning
+              size="small"
+              style={{ marginTop: '0.75em' }}
+              onDismiss={() => setShowAutoLockBanner(false)}
+            >
               <p style={{ margin: 0 }}>
-                Offline signing is locked. Open <strong>Sign Message</strong> and enter the password you used when creating or restoring this identity to use the encrypted key stored on this device.
+                Session timed out
+                {settings.autoLockTimer > 0
+                  ? ` after ${settings.autoLockTimer} minute${settings.autoLockTimer === 1 ? '' : 's'} without activity`
+                  : ''}
+                . Passport locked and cleared its keys from memory.
               </p>
             </Message>
-          </>
-        );
-      })()}
+          )}
+          <Message info size="small" style={{ marginTop: showAutoLockBanner ? '0.5em' : '0.75em' }}>
+            <p style={{ margin: 0 }}>
+              Passport is locked. Enter your lock password to sign in to sites, sign messages, or open new accounts.
+            </p>
+            {renderUnlockForm()}
+          </Message>
+        </>
+      )}
 
       <style>{`
         .ui.segment:hover .edit-icon {
@@ -3310,13 +3021,22 @@ const IdentityManager = () => {
         }
       `}</style>
 
+      {vaultError && (
+        <Message negative size="small" onDismiss={() => setVaultError(null)}>
+          <p>{vaultError}</p>
+        </Message>
+      )}
+
       <Message style={{ marginTop: '1em' }}>
-        <Message.Header>Loaded Identities</Message.Header>
+        <Message.Header>Accounts</Message.Header>
         <Message.Content style={{ marginTop: '1em' }}>
+          <p style={{ fontSize: '0.8em', opacity: 0.75 }}>
+            Every account comes from the same seed: its own Fabric identity, wallet, and escrow key. The network changes the keys too.
+          </p>
           <List divided relaxed size='small'>
-            {identities.map((identity, index) => (
+            {identities.map((identity) => (
               <List.Item
-                key={index}
+                key={pairKey(identity)}
                 style={{ cursor: 'pointer' }}
                 onClick={() => handleIdentityClick(identity)}
               >
@@ -3324,7 +3044,7 @@ const IdentityManager = () => {
                 <List.Content>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '0.5em' }}>
                     <List.Header style={{ fontSize: '0.9em' }}>
-                      {truncateMiddle(identity.name || 'Unnamed Identity')}
+                      {truncateMiddle(identity.name || `Account ${identity.account}`)}
                     </List.Header>
                     <Icon
                       name='pencil'
@@ -3335,11 +3055,9 @@ const IdentityManager = () => {
                         handleEditIdentity(identity);
                       }}
                     />
-                    <Icon
-                      name={identity.hasPrivateKey ? 'lock' : 'unlock'}
-                      color={identity.hasPrivateKey ? 'green' : 'grey'}
-                      title={identity.hasPrivateKey ? 'Has signing ability' : 'Read-only identity'}
-                    />
+                    <span style={{ fontSize: '0.75em', opacity: 0.7 }}>
+                      #{identity.account} · {identity.network}
+                    </span>
                   </div>
                   <List.Description style={{ wordBreak: 'break-all', fontFamily: 'monospace', fontSize: '0.7em' }}>
                     {truncateMiddle(identity.id)}
@@ -3354,8 +3072,12 @@ const IdentityManager = () => {
       <Button.Group vertical fluid style={{ marginTop: '1em' }}>
         <Button
           color='green'
-          content='Add New Identity'
-          onClick={() => setState('add_identity')}
+          content='Add Account'
+          onClick={() => {
+            setVaultError(null);
+            setAccountForm(f => ({ ...f, network: current ? current.network : f.network }));
+            setState('add_identity');
+          }}
         />
         <Button
           primary
@@ -3363,7 +3085,7 @@ const IdentityManager = () => {
           onClick={() => {
             const currentIdentity = identities.find(id => id.isCurrent);
             if (currentIdentity) {
-              setSelectedIdentity(currentIdentity);
+              setSelectedKey(pairKey(currentIdentity));
               setVerificationResult(null);
               setMessageToSign('');
               setSignature(null);
@@ -3391,39 +3113,74 @@ const IdentityManager = () => {
     );
   };
 
-
   const renderAddIdentityState = () => (
     <div className="fade-in" style={{ width: '100%' }}>
       <Message info>
-        <Message.Header>Add New Identity</Message.Header>
+        <Message.Header>Add Account</Message.Header>
         <Message.Content>
-          <p style={{ color: 'white' }}>Choose how you'd like to add a new identity:</p>
-          <Button.Group vertical fluid style={{ marginTop: '1em' }}>
-            <Button
-              color='green'
-              content='Create New'
-              onClick={() => setState('warning')}
-            />
-            <Button
-              primary
-              content='Use Existing Seed Phrase'
-              onClick={() => setState('seed_phrase_entry')}
-            />
-            <Button
-              primary
-              content='Use Existing xpub'
-              onClick={() => {
-                setXpubState('input');
-                setXpub('');
-                setState('xpub_login');
-              }}
-            />
-            <Button
-              color='black'
-              content='Back to Dashboard'
-              onClick={() => setState('logged_in')}
-            />
-          </Button.Group>
+          <p style={{ color: 'white' }}>
+            Open another account from your seed. Each account number and network has its own Fabric identity, wallet, and escrow key; picking a different network for the same number gives different keys.
+          </p>
+          {locked && (
+            <>
+              <p style={{ color: 'white' }}>Unlock Passport to open an account you have not used yet.</p>
+              {renderUnlockForm()}
+            </>
+          )}
+          <Form
+            onSubmit={(e) => {
+              e.preventDefault();
+              handleAddAccount();
+            }}
+            style={{ marginTop: '1em' }}
+          >
+            <Form.Field>
+              <label>Account number</label>
+              <Input
+                type="number"
+                min={0}
+                value={accountForm.account}
+                onChange={(e) => setAccountForm(f => ({ ...f, account: e.target.value }))}
+              />
+            </Form.Field>
+            <Form.Field>
+              <label>Network</label>
+              <select
+                value={accountForm.network}
+                onChange={(e) => setAccountForm(f => ({ ...f, network: e.target.value }))}
+              >
+                {ACCOUNT_NETWORKS.map(network => (
+                  <option key={network} value={network}>{network}</option>
+                ))}
+              </select>
+            </Form.Field>
+            <Form.Field>
+              <label>Name (optional)</label>
+              <Input
+                value={accountForm.label}
+                maxLength={64}
+                placeholder={`Account ${accountIndex(accountForm.account) >= 0 ? accountIndex(accountForm.account) : ''}`}
+                onChange={(e) => setAccountForm(f => ({ ...f, label: e.target.value }))}
+              />
+            </Form.Field>
+            {vaultError && (
+              <Message negative size="small">
+                <p>{vaultError}</p>
+              </Message>
+            )}
+            <Button.Group vertical fluid style={{ marginTop: '1em' }}>
+              <Button type="submit" color='green' content='Open Account' />
+              <Button
+                type="button"
+                color='black'
+                content='Back to Dashboard'
+                onClick={() => {
+                  setVaultError(null);
+                  setState('logged_in');
+                }}
+              />
+            </Button.Group>
+          </Form>
         </Message.Content>
       </Message>
     </div>
@@ -3433,14 +3190,9 @@ const IdentityManager = () => {
     if (process.env.NODE_ENV !== 'development') return null;
 
     const browserStorage = {
-      identities: identities.map(id => ({
-        name: id.name,
-        xpub: id.xpub,
-        bech32: id.bech32,
-        isCurrent: id.isCurrent
-      })),
-      keys: [], // This would be populated with actual keys if available
-      blobs: [], // This would be populated with actual blobs if available
+      current: vault ? vault.current : null,
+      locked,
+      accounts: publicIdentities(vault),
       settings: settings
     };
 
@@ -3476,57 +3228,59 @@ const IdentityManager = () => {
 
   const renderConfirmationState = () => (
     <Message className="fade-in">
-      <Message.Header>Confirm Your Identity</Message.Header>
+      <Message.Header>Confirm and Lock</Message.Header>
       <Message.Content>
-        <p>Please enter your seed phrase and password to confirm you have saved them correctly.</p>
+        <p>Type your seed phrase and passphrase to confirm you saved them, then choose the lock password Passport asks for on this device.</p>
         <Message info>
-          <Message.Header>Important Note</Message.Header>
-          <p>If you are not using a derivation password and understand the risks, leave the password field blank.</p>
-          <p>Remember: Without a password, anyone with access to your seed phrase can control your funds.</p>
+          <Message.Header>Two passwords</Message.Header>
+          <p>The <strong>passphrase</strong> goes with your seed phrase and recreates your accounts anywhere. Leave it blank if you did not set one.</p>
+          <p>The <strong>lock password</strong> only unlocks Passport on this device. Forgetting it means restoring from the seed phrase.</p>
         </Message>
-        <Form>
+        <Form onSubmit={(e) => { e.preventDefault(); void handleConfirmation(); }}>
           <Form.Field>
-            <label>Enter your seed phrase:</label>
+            <label>Seed phrase:</label>
             <Input
               type="text"
               placeholder="Seed phrase"
               value={confirmationSeed}
-              onChange={(e: React.ChangeEvent<HTMLInputElement>) => setConfirmationSeed(e.target.value)}
+              onChange={(e: React.ChangeEvent<HTMLInputElement>) => {
+                setConfirmationSeed(e.target.value);
+                setVaultError(null);
+              }}
               error={passwordState === 'error'}
               disabled={passwordState === 'verifying'}
-              autoComplete={false}
+              autoComplete="off"
             />
           </Form.Field>
           <Form.Field>
-            <label>Enter the derivation password:</label>
+            <label>Passphrase:</label>
             <Input
               autoComplete="new-password"
               type="password"
-              placeholder="Password (leave blank if not using one)"
+              placeholder="Leave blank if you did not set one"
               value={confirmationPassword}
-              onChange={(e: React.ChangeEvent<HTMLInputElement>) => setConfirmationPassword(e.target.value)}
+              onChange={(e: React.ChangeEvent<HTMLInputElement>) => {
+                setConfirmationPassword(e.target.value);
+                setVaultError(null);
+              }}
               error={passwordState === 'error'}
               disabled={passwordState === 'verifying'}
             />
           </Form.Field>
-          {passwordState === 'error' && (
-            <Message negative>
-              <Message.Header>Verification Failed</Message.Header>
-              <p>Please check your seed phrase and password and try again.</p>
-            </Message>
-          )}
+          {renderLockPasswordFields()}
           <Button.Group vertical fluid style={{ marginTop: '1em' }}>
             <Button
+              type="button"
               color='black'
               content='Go Back'
               onClick={handleGoBackWithConfirmationReset}
               disabled={passwordState === 'verifying'}
             />
             <Button
+              type="submit"
               color='green'
-              content='Verify'
-              onClick={handleConfirmation}
-              disabled={!confirmationSeed.trim() || passwordState === 'verifying'}
+              content='Create Passport'
+              disabled={!confirmationSeed.trim() || !lockPassword || passwordState === 'verifying'}
               loading={passwordState === 'verifying'}
             />
           </Button.Group>
@@ -3537,28 +3291,35 @@ const IdentityManager = () => {
 
   const renderLoginSelection = () => (
     <Message className="fade-in">
-      <Message.Header>Choose Login Method</Message.Header>
+      <Message.Header>Use an Existing Key</Message.Header>
       <Message.Content>
-        <p>Select how you would like to log in:</p>
+        <p>Bring in the seed behind your accounts:</p>
         <Button.Group vertical fluid style={{ marginTop: '1em' }}>
           <Button
             color='green'
-            content='Use Seed Phrase'
-            onClick={() => setState('seed_phrase_login')}
-          />
-          <Button
-            basic
-            disabled
-            title='Extended private key import is not available in this build.'
-            content='Use Extended Private Key (xprv) — coming soon'
+            content='Seed Phrase'
+            onClick={() => {
+              clearImportFields();
+              setState('seed_phrase_login');
+            }}
           />
           <Button
             primary
-            content='Use Extended Public Key (xpub)'
+            content='Master Extended Private Key (xprv)'
             onClick={() => {
-              setXpubState('input');
-              setXpub('');
-              setState('xpub_login');
+              clearImportFields();
+              setState('xprv_login');
+            }}
+          />
+          <Button
+            primary
+            content='Passport Backup File'
+            onClick={() => {
+              const input = document.createElement('input');
+              input.type = 'file';
+              input.accept = '.json,application/json';
+              input.onchange = (event) => { void handleRestoreWallet(event); };
+              input.click();
             }}
           />
           <Button
@@ -3566,16 +3327,21 @@ const IdentityManager = () => {
             onClick={handleGoBack}
           />
         </Button.Group>
+        {vaultError && (
+          <Message negative size="small">
+            <p>{vaultError}</p>
+          </Message>
+        )}
       </Message.Content>
     </Message>
   );
 
   const renderSeedPhraseLogin = () => (
     <Message className="fade-in">
-      <Message.Header>Login with Seed Phrase</Message.Header>
+      <Message.Header>Import a Seed Phrase</Message.Header>
       <Message.Content>
-        <p>Enter your seed phrase and derivation password to log in.</p>
-        <Form>
+        <p>Enter your seed phrase and its passphrase (if any), then choose the lock password for this device.</p>
+        <Form onSubmit={(e) => { e.preventDefault(); void handleImport('seed'); }}>
           <Form.Field>
             <label>Seed Phrase</label>
             <Input
@@ -3583,16 +3349,17 @@ const IdentityManager = () => {
               placeholder="Enter your 12 or 24 word seed phrase"
               value={seedPhrase || ''}
               onChange={(e) => {
-                const phrase = e.target.value.trim();
+                const phrase = normalizeSeedPhrase(e.target.value);
                 setSeedPhrase(phrase);
-                // Validate the phrase
-                const words = phrase.split(/\s+/);
+                const words = phrase.split(' ');
                 const isValidLength = words.length === 12 || words.length === 24;
-                const allWordsValid = words.every(word => wordlist.includes(word.toLowerCase()));
+                const allWordsValid = words.every(word => wordlist.includes(word));
                 setIsValidPhrase(isValidLength && allWordsValid);
+                setVaultError(null);
               }}
               error={!isValidPhrase && seedPhrase !== null}
               style={{ fontFamily: 'monospace' }}
+              autoComplete="off"
             />
             {!isValidPhrase && seedPhrase !== null && (
               <Message negative>
@@ -3602,166 +3369,32 @@ const IdentityManager = () => {
             )}
           </Form.Field>
           <Form.Field>
-            <label>Derivation Password</label>
+            <label>Passphrase (optional)</label>
             <Input
               type="password"
-              placeholder="Enter your derivation password"
+              placeholder="Leave blank if you did not set one"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
-              error={passwordState === 'error'}
-              autoComplete="current-password"
+              autoComplete="off"
             />
-            {passwordState === 'error' && (
-              <Message negative>
-                <Message.Header>Error</Message.Header>
-                <p>Failed to restore identity. Please check your seed phrase and password.</p>
-              </Message>
-            )}
           </Form.Field>
+          {renderLockPasswordFields()}
           <Button.Group vertical fluid style={{ marginTop: '1em' }}>
             <Button
+              type="submit"
               color='green'
-              content='Login'
-              onClick={async () => {
-                try {
-                  if (!seedPhrase) {
-                    setIsValidPhrase(false);
-                    return;
-                  }
-
-                  // Generate the seed from the mnemonic
-                  const seed = mnemonicToSeedSync(seedPhrase, password);
-
-                  // Derive the master key using BIP32
-                  const masterKey = bip32.fromSeed(seed);
-
-                  const path = settings.derivationPath;
-                  const derivedKey = masterKey.derivePath(path);
-                  const { identity: newIdentity, blob } = identityAndWalletBlobFromNode(derivedKey, path, password);
-
-                  // Add the new identity and make it current
-                  setIdentities(prev => {
-                    const updated = prev.map(id => ({ ...id, isCurrent: false }));
-                    return [newIdentity, ...updated];
-                  });
-                  setWalletCryptos(prev => ({ ...prev, [newIdentity.id]: blob }));
-
-                  setState('logged_in');
-
-                  // Clear sensitive data
-                  setPassword('');
-                  setSeedPhrase(null);
-                } catch (error) {
-                  console.error('Failed to login with seed phrase:', error);
-                  // Show error message
-                  setPasswordState('error');
-                }
-              }}
-              disabled={!isValidPhrase || !seedPhrase}
-            />
-            <Button
-              color='black'
-              content='Go Back'
-              onClick={() => setState('login_selection')}
-            />
-          </Button.Group>
-        </Form>
-      </Message.Content>
-    </Message>
-  );
-
-  const renderRestoreIdentity = () => (
-    <Message className="fade-in">
-      <Message.Header>Restore Identity</Message.Header>
-      <Message.Content>
-        <p>Please enter your seed phrase and derivation password to restore your identity.</p>
-        <Form>
-          <Form.Field>
-            <label>Seed Phrase</label>
-            <Input
-              type="text"
-              placeholder="Enter your 12 or 24 word seed phrase"
-              value={seedPhrase || ''}
-              onChange={(e) => {
-                const phrase = e.target.value.trim();
-                setSeedPhrase(phrase);
-                // Validate the phrase
-                const words = phrase.split(/\s+/);
-                const isValidLength = words.length === 12 || words.length === 24;
-                const allWordsValid = words.every(word => wordlist.includes(word.toLowerCase()));
-                setIsValidPhrase(isValidLength && allWordsValid);
-              }}
-              error={!isValidPhrase && seedPhrase !== null}
-              style={{ fontFamily: 'monospace' }}
-            />
-            {!isValidPhrase && seedPhrase !== null && (
-              <Message negative>
-                <Message.Header>Invalid Seed Phrase</Message.Header>
-                <p>Please ensure all words are from the BIP39 wordlist and the phrase contains exactly 12 or 24 words.</p>
-              </Message>
-            )}
-          </Form.Field>
-          <Form.Field>
-            <label>Derivation Password</label>
-            <Input
-              type="password"
-              placeholder="Enter your derivation password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              error={passwordState === 'error'}
-              autoComplete="current-password"
-            />
-            {passwordState === 'error' && (
-              <Message negative>
-                <Message.Header>Error</Message.Header>
-                <p>Failed to restore identity. Please check your seed phrase and password.</p>
-              </Message>
-            )}
-          </Form.Field>
-          <Button.Group vertical fluid style={{ marginTop: '1em' }}>
-            <Button
-              content='Restore Identity'
-              onClick={async () => {
-                try {
-                  if (!seedPhrase) {
-                    setIsValidPhrase(false);
-                    return;
-                  }
-                  setPasswordState('verifying');
-
-                  // Generate the seed from the mnemonic
-                  const seed = mnemonicToSeedSync(seedPhrase, password);
-
-                  // Derive the master key using BIP32
-                  const masterKey = bip32.fromSeed(seed);
-
-                  const path = settings.derivationPath;
-                  const derivedKey = masterKey.derivePath(path);
-                  const { identity: newIdentity, blob } = identityAndWalletBlobFromNode(derivedKey, path, password);
-
-                  // Add the new identity and make it current
-                  setIdentities(prev => {
-                    const updated = prev.map(id => ({ ...id, isCurrent: false }));
-                    return [newIdentity, ...updated];
-                  });
-                  setWalletCryptos(prev => ({ ...prev, [newIdentity.id]: blob }));
-
-                  setState('logged_in');
-
-                  // Clear sensitive data
-                  setPassword('');
-                  setSeedPhrase(null);
-                } catch (error) {
-                  console.error('Failed to restore identity:', error);
-                  setPasswordState('error');
-                }
-              }}
-              disabled={!isValidPhrase || !seedPhrase || !password.trim()}
+              content='Import'
+              disabled={!isValidPhrase || !seedPhrase || passwordState === 'verifying'}
               loading={passwordState === 'verifying'}
             />
             <Button
+              type="button"
+              color='black'
               content='Go Back'
-              onClick={() => setState('add_identity')}
+              onClick={() => {
+                clearImportFields();
+                setState('login_selection');
+              }}
             />
           </Button.Group>
         </Form>
@@ -4090,7 +3723,7 @@ const IdentityManager = () => {
                       fluid
                     />
                     <p style={{ marginTop: '0.5em', fontSize: '0.85em', color: 'rgba(255,255,255,0.65)' }}>
-                      After this many minutes without keyboard or pointer activity in the popup, session signing keys and any seed phrase in memory are cleared. The timer uses the same clock when you close and reopen the popup.
+                      After this many minutes without keyboard or pointer activity in the popup, Passport locks: the open master key and any seed phrase in memory are cleared. The timer uses the same clock when you close and reopen the popup.
                     </p>
                   </Form.Field>
                 </List.Description>
@@ -4098,27 +3731,17 @@ const IdentityManager = () => {
             </List.Item>
             <List.Item>
               <List.Content>
-                <List.Header>Default Derivation Path</List.Header>
+                <List.Header>Lock now</List.Header>
                 <List.Description>
-                  <p style={{ marginBottom: '0.75em' }}>
-                    Seed-based identities are derived at this path. The matching extended private key (xprv) is encrypted on this device with the password you set at creation or seed login so you can sign after restart.
-                  </p>
-                  <Form.Field>
-                    <label>BIP32 derivation path:</label>
-                    <Input
-                      value={settings.derivationPath}
-                      onChange={(e) => handleSettingsChange('derivationPath', e.target.value)}
-                      placeholder={FABRIC_KEY_DERIVATION_PATH}
-                      fluid
-                      disabled
-                      title={settings.derivationPath}
-                    />
-                    {settings.derivationPath.trim() !== FABRIC_KEY_DERIVATION_PATH && (
-                      <p style={{ marginTop: '0.5em', fontSize: '0.85em', color: 'rgba(255,200,120,0.95)' }}>
-                        Differs from the current Fabric default ({FABRIC_KEY_DERIVATION_PATH}). Keep this only if your identities were created with this path.
-                      </p>
-                    )}
-                  </Form.Field>
+                  <Button
+                    size="small"
+                    disabled={!masterXprv}
+                    onClick={() => {
+                      performAutoLock();
+                      setShowAutoLockBanner(false);
+                    }}
+                    content={masterXprv ? 'Lock Passport' : 'Locked'}
+                  />
                 </List.Description>
               </List.Content>
             </List.Item>
@@ -4218,7 +3841,7 @@ const IdentityManager = () => {
                   <DesktopSignersPanel
                     pubkey={signingIdentity?.publicKeyHex || null}
                     disabled={deviceLinkBusy || !signingIdentity?.privateKeyHex}
-                    onLink={(base) => void handleStartDeviceLink(base)}
+                    onLink={(desktop) => void handleStartDeviceLink(desktop)}
                   />
                 </List.Description>
               </List.Content>
@@ -4250,7 +3873,7 @@ const IdentityManager = () => {
                   />
                   {!signingIdentity?.privateKeyHex ? (
                     <p style={{ marginTop: '0.5em', color: 'rgba(255,200,120,0.95)' }}>
-                      Unlock this identity to create or revoke a link.
+                      Unlock Passport to create or revoke a link.
                     </p>
                   ) : null}
                   {deviceLinkOffer ? (
@@ -4315,11 +3938,15 @@ const IdentityManager = () => {
               <List.Content>
                 <List.Header>Backup & Restore</List.Header>
                 <List.Description>
-                  <p>Export or restore your wallet data.</p>
+                  <p>
+                    The backup file holds your sealed master key (still locked with your lock password) and
+                    the accounts you have opened. It has no seed phrase; keep that written down separately.
+                  </p>
                   <Button.Group>
                     <Button
                       primary
-                      content='Export Wallet'
+                      content='Export Backup'
+                      disabled={!vault}
                       onClick={handleExportWallet}
                     />
                   </Button.Group>
@@ -4330,7 +3957,7 @@ const IdentityManager = () => {
               <List.Content>
                 <List.Header>Clear All Data</List.Header>
                 <List.Description>
-                  <p>Remove all identities and settings from this device.</p>
+                  <p>Remove your Passport, its accounts, and settings from this device.</p>
                   <Button
                     negative
                     content='Clear Data'
@@ -4375,8 +4002,8 @@ const IdentityManager = () => {
         return renderCompleteState();
       case 'confirmation':
         return renderConfirmationState();
-      case 'xpub_login':
-        return renderXpubLoginState();
+      case 'xprv_login':
+        return renderXprvLoginState();
       case 'logged_in':
         return renderLoggedInState();
       case 'wallet':
@@ -4389,8 +4016,6 @@ const IdentityManager = () => {
         return renderDerivationPasswordWarningState();
       case 'derivation_password_entry':
         return renderDerivationPasswordEntry();
-      case 'seed_phrase_entry':
-        return renderSeedPhraseEntry();
       case 'identity_detail':
         return renderIdentityDetail();
       case 'login_selection':
@@ -4399,8 +4024,6 @@ const IdentityManager = () => {
         return renderSeedPhraseLogin();
       case 'sign_message':
         return renderSignMessageState();
-      case 'restore_identity':
-        return renderRestoreIdentity();
       case 'settings':
         return renderSettings();
       case 'verify_message':
@@ -4427,14 +4050,19 @@ const IdentityManager = () => {
         setWalletBalance(null);
         return;
       }
-      const bal = await fetchWalletBalance(base, cur.xpub, status.network || 'regtest', {
-        xpubQueryToken: settings.xpubQueryToken
+      // The account's keys belong to its network; a node on another chain would scan the wrong addresses.
+      if (accountNetwork(status.network) !== cur.network) {
+        setWalletBalance(null);
+        return;
+      }
+      const bal = await fetchWalletBalance(base, cur.wallet.segwit.xpub, cur.network, {
+        xpubQueryToken: settings.xpubQueryToken,
+        standardXpub: cur.wallet.standard.xpub
       });
       setWalletBalance(bal);
       if (bal.balanceSats != null) {
-        setIdentities(prev => prev.map(id =>
-          id.isCurrent ? { ...id, balance: formatBtc(bal.balanceSats) } : id
-        ));
+        const key = pairKey(cur);
+        setBalances(prev => ({ ...prev, [key]: formatBtc(bal.balanceSats) }));
       }
     } catch (err: unknown) {
       swallowNonFatal('identity-wallet-balance-refresh', err);
@@ -4446,15 +4074,15 @@ const IdentityManager = () => {
   const refreshWalletTxs = useCallback(async () => {
     const base = getActiveFabricBase();
     const cur = identities.find(id => id.isCurrent);
-    if (!base || !cur?.xpub) {
+    if (!base || !cur || walletNetworkMismatch) {
       setWalletTxs([]);
       return;
     }
     setWalletTxsLoading(true);
     try {
-      const net = btcStatus?.network || 'regtest';
-      const txs = await fetchTransactionHistory(base, cur.xpub, net, 25, {
-        xpubQueryToken: settings.xpubQueryToken
+      const txs = await fetchTransactionHistory(base, cur.wallet.segwit.xpub, cur.network, 25, {
+        xpubQueryToken: settings.xpubQueryToken,
+        standardXpub: cur.wallet.standard.xpub
       });
       setWalletTxs(txs);
     } catch (err: unknown) {
@@ -4463,7 +4091,7 @@ const IdentityManager = () => {
     } finally {
       setWalletTxsLoading(false);
     }
-  }, [getActiveFabricBase, identities, btcStatus, settings.xpubQueryToken]);
+  }, [getActiveFabricBase, identities, walletNetworkMismatch, settings.xpubQueryToken]);
 
   const handleFaucetRequest = useCallback(async () => {
     const base = getActiveFabricBase();
@@ -4504,16 +4132,17 @@ const IdentityManager = () => {
 
   const deriveCurrentReceiveAddr = useCallback(() => {
     const cur = identities.find(id => id.isCurrent);
-    if (!cur?.xpub) { setReceiveAddr(null); return; }
-    const net = btcStatus?.network || 'regtest';
-    const addr = deriveReceiveAddress(cur.xpub, net, receiveAddrIdx);
+    if (!cur) { setReceiveAddr(null); return; }
+    const addr = deriveReceiveAddress(cur.wallet.segwit.xpub, cur.network, receiveAddrIdx);
     setReceiveAddr(addr);
-  }, [identities, btcStatus, receiveAddrIdx]);
+  }, [identities, receiveAddrIdx]);
 
   const faucetAutoAddrRef = useRef<string | null>(null);
   useEffect(() => {
     const cur = identities.find(id => id.isCurrent);
-    const auto = faucetNetwork && cur?.xpub ? deriveReceiveAddress(cur.xpub, faucetNetwork, receiveAddrIdx) : null;
+    const auto = faucetNetwork && cur && accountNetwork(faucetNetwork) === cur.network
+      ? deriveReceiveAddress(cur.wallet.segwit.xpub, cur.network, receiveAddrIdx)
+      : null;
     const prevAuto = faucetAutoAddrRef.current;
     faucetAutoAddrRef.current = auto;
     if (!auto) return;
@@ -4562,7 +4191,7 @@ const IdentityManager = () => {
       }
       void refreshArcNotifications();
     }
-  }, [state, refreshArcNotifications]);
+  }, [state, refreshArcNotifications, vault?.current?.account, vault?.current?.network]);
 
   const currentIdentityId = identities.find(i => i.isCurrent)?.id ?? null;
   useEffect(() => {
@@ -4616,7 +4245,7 @@ const IdentityManager = () => {
             jsonrpc: '2.0',
             id: Date.now(),
             method: 'RegisterWebRTCPeer',
-            params: [{ peerId: `passport-${currentIdentity.id.slice(0, 12)}`, metadata: { fabricPeerId: currentIdentity.publicKeyHex, xpub: currentIdentity.xpub, source: 'passport' } }]
+            params: [{ peerId: `passport-${currentIdentity.id.slice(0, 12)}`, metadata: { fabricPeerId: currentIdentity.publicKeyHex, source: 'passport' } }]
           })
         }).catch(() => {});
       }
@@ -4720,13 +4349,16 @@ const IdentityManager = () => {
   };
 
   const handleToggleFabricNode = (id: string) => {
-    setSettings(prev => ({
-      ...prev,
-      fabricNodes: prev.fabricNodes.map(node => ({
-        ...node,
-        isActive: node.id === id ? !node.isActive : node.isActive
-      }))
-    }));
+    setSettings(prev => {
+      const activating = !prev.fabricNodes.find(node => node.id === id)?.isActive;
+      return {
+        ...prev,
+        fabricNodes: prev.fabricNodes.map(node => ({
+          ...node,
+          isActive: node.id === id ? activating : node.isActive && !activating
+        }))
+      };
+    });
   };
 
   const handleTestFabricNode = async (node: FabricNode) => {
@@ -4795,14 +4427,14 @@ const IdentityManager = () => {
             <Message.Header>Important</Message.Header>
             {eraseConfirmMode === 'erase_all' ? (
               <>
-                <p>This removes all identities, encrypted signing material, and stored settings (including Bitcoin and Fabric nodes) from this device.</p>
-                <p><strong>Export a wallet backup first</strong> if you need to restore later.</p>
+                <p>This removes your Passport (the sealed master key and every account) and stored settings (including Bitcoin and Fabric nodes) from this device.</p>
+                <p><strong>Export a backup first</strong> if you need to restore later, and keep your seed phrase.</p>
               </>
             ) : (
               <>
-                <p>Logging out removes all identities from this device.</p>
-                <p><strong>You will need your seed phrase and password to restore your identities.</strong></p>
-                <p>If you have not securely backed up your seed phrase and password, you may permanently lose access to your funds.</p>
+                <p>Logging out removes your Passport and every account from this device.</p>
+                <p><strong>You will need your seed phrase (and passphrase, if you set one) to restore your accounts.</strong></p>
+                <p>If you have not securely backed them up, you may permanently lose access to your funds.</p>
               </>
             )}
           </Message>
@@ -4825,15 +4457,16 @@ const IdentityManager = () => {
 
       {editingIdentity && (
         <Modal open={true} onClose={() => setEditingIdentity(null)}>
-          <Modal.Header>Edit Identity Name</Modal.Header>
+          <Modal.Header>Rename Account</Modal.Header>
           <Modal.Content>
             <Form>
               <Form.Field>
-                <label>Identity Name</label>
+                <label>Account #{editingIdentity.account} on {editingIdentity.network}</label>
                 <Input
                   value={newIdentityName}
+                  maxLength={64}
                   onChange={(e) => setNewIdentityName(e.target.value)}
-                  placeholder="Enter a name for this identity"
+                  placeholder="Enter a name for this account"
                 />
               </Form.Field>
             </Form>
@@ -4845,25 +4478,20 @@ const IdentityManager = () => {
         </Modal>
       )}
 
-      <SiteLoginPrompt
+      {vaultCurrent ? (
+        <SiteLoginPrompt
+          masterXprv={masterXprv}
+          current={{ account: vaultCurrent.account, network: vaultCurrent.network, label: vaultCurrent.label }}
+          accounts={vaultAccounts(vault).map(v => ({ account: v.account, network: v.network, label: v.label }))}
+          networks={ACCOUNT_NETWORKS}
+          needsUnlock={locked}
+          onUnlock={(lockPwd) => unlockPassport(lockPwd)}
+        />
+      ) : null}
+      <DeviceLinkPrompt
         privateKeyHex={signingIdentity?.privateKeyHex || null}
         xpub={signingIdentity?.xpub || null}
-        onUnlock={(password) => unlockIdentity(signingIdentity, password)}
-        needsUnlock={
-          !!signingIdentity?.hasPrivateKey &&
-          !signingIdentity?.privateKeyHex &&
-          !!walletCryptos[signingIdentity.id]
-        }
-      />
-      <DeviceLinkPrompt
-        privateKeyHex={selectedIdentity?.privateKeyHex || null}
-        xpub={selectedIdentity?.xpub || null}
-        needsUnlock={
-          !!selectedIdentity?.hasPrivateKey &&
-          !selectedIdentity?.privateKeyHex &&
-          !!selectedIdentity?.id &&
-          !!walletCryptos[selectedIdentity.id]
-        }
+        needsUnlock={locked}
       />
     </div>
   );

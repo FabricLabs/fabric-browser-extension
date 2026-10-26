@@ -31,11 +31,13 @@ type Props = {
   needsUnlock?: boolean;
 };
 
-function notifyPage (tabId: number | undefined, payload: Record<string, unknown>): void {
-  if (tabId == null) return;
+/** The content script posts it only in frames of `origin` (the page that asked). */
+function notifyPage (tabId: number | undefined, origin: string | undefined, payload: Record<string, unknown>): void {
+  if (tabId == null || !origin) return;
   void chrome.tabs.sendMessage(tabId, {
+    ...payload,
     type: 'FABRIC_DEVICE_LINK_PAGE_RESULT',
-    ...payload
+    origin
   }).catch((err: unknown) => swallowNonFatal('device-link-page-result', err));
 }
 
@@ -99,7 +101,7 @@ export default function DeviceLinkPrompt (props: Props): React.ReactElement | nu
   }, []);
 
   const reject = useCallback(() => {
-    notifyPage(tabId, {
+    notifyPage(tabId, pending?.pageOrigin, {
       source: 'fabric-passport',
       type: FABRIC_DEVICE_LINK_RESULT,
       ok: false,
@@ -111,7 +113,7 @@ export default function DeviceLinkPrompt (props: Props): React.ReactElement | nu
       error: 'rejected'
     });
     clearPending();
-  }, [clearPending, tabId]);
+  }, [clearPending, tabId, pending]);
 
   const approve = useCallback(async () => {
     if (!pending || !offer || !armed) return;
@@ -150,7 +152,7 @@ export default function DeviceLinkPrompt (props: Props): React.ReactElement | nu
         linkedAt: new Date().toISOString(),
         role: 'responder'
       }).catch((err: unknown) => swallowNonFatal('linked-devices-merge', err));
-      notifyPage(tabId, {
+      notifyPage(tabId, pending.pageOrigin, {
         source: 'fabric-passport',
         type: FABRIC_DEVICE_LINK_RESULT,
         ok: true,

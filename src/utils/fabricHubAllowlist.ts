@@ -1,5 +1,5 @@
 /**
- * Allowed Hub HTTP origins for fabric://login and fabric://link (Passport).
+ * Allowed Hub HTTP origins for device links (`fabric://link`) and Hub calls from Passport.
  * Mirrors `@fabric/http/functions/fabricHubAllowlist` for the extension bundle.
  *
  * Default network hubs are **HTTPS-only**. Cleartext production origins require

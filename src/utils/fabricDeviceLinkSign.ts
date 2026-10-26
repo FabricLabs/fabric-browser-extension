@@ -9,11 +9,11 @@
  * checked: the responder verifies the initiator's offer first, and the
  * initiator countersigns only a responder the user approved.
  *
- * Popup-only: pulls `@fabric/core` via fabricSiteLoginSign. Content scripts must use
+ * Popup-only: pulls `@fabric/core` via fabricIdentitySign. Content scripts must use
  * `fabricDeviceLinkFetch.ts` instead.
  */
 
-import { buildClientSignedBody, fabricSigningIdentity } from './fabricSiteLoginSign';
+import { buildClientSignedBody, fabricSigningIdentity } from './fabricIdentitySign';
 import { deviceLinkFetchHeaders } from './fabricDeviceLinkFetch';
 import type { DeviceLinkPending } from './fabricDeviceLinkFetch';
 
@@ -149,7 +149,7 @@ export async function startDeviceLinkAsInitiator (opts: {
     protocolUrl?: string;
   };
   try {
-    const own = fabricSigningIdentity(opts.privateKeyHex, opts.xpub);
+    const own = fabricSigningIdentity({ privateKeyHex: opts.privateKeyHex, xpub: opts.xpub });
     const label = safeDeviceLabel(opts.label || 'Passport');
     // The Hub picks the session id and nonce; Passport signs only an offer it rebuilt itself.
     const prep = await fetch(`${hubBase}/device-links`, {
@@ -171,7 +171,7 @@ export async function startDeviceLinkAsInitiator (opts: {
     if (prepared.offerMessage !== offerMessage) {
       return { ok: false, error: 'hub offer does not match this identity, label, or origin' };
     }
-    const signed = buildClientSignedBody(offerMessage, DEVICE_LINK_OFFER_TAG, opts.privateKeyHex, opts.xpub);
+    const signed = buildClientSignedBody(offerMessage, DEVICE_LINK_OFFER_TAG, { privateKeyHex: opts.privateKeyHex, xpub: opts.xpub });
     const res = await fetch(`${hubBase}/device-links`, {
       method: 'POST',
       headers: jsonHeaders(),
@@ -257,7 +257,7 @@ export async function tickDeviceLinkAsInitiator (opts: {
     if (status !== 'accepted' && status !== 'linked') {
       return { ok: true, status, sessionId: opts.sessionId };
     }
-    const own = fabricSigningIdentity(opts.privateKeyHex, opts.xpub);
+    const own = fabricSigningIdentity({ privateKeyHex: opts.privateKeyHex, xpub: opts.xpub });
     const sameSession = String(st.sessionId || '').toLowerCase() === opts.sessionId.toLowerCase() &&
       String(st.nonce || '').toLowerCase() === opts.nonce.toLowerCase() &&
       st.label === opts.label &&
@@ -300,9 +300,9 @@ export async function countersignDeviceLink (opts: {
 }): Promise<{ ok: true; status: string } | { ok: false; error: string }> {
   const a = opts.accepted;
   try {
-    const own = fabricSigningIdentity(opts.privateKeyHex, opts.xpub);
+    const own = fabricSigningIdentity({ privateKeyHex: opts.privateKeyHex, xpub: opts.xpub });
     const linkMessage = buildDeviceLinkMessage(a.sessionId, a.nonce, own.id, a.responder.id, a.label, a.origin);
-    const signed = buildClientSignedBody(linkMessage, DEVICE_LINK_TAG, opts.privateKeyHex, opts.xpub);
+    const signed = buildClientSignedBody(linkMessage, DEVICE_LINK_TAG, { privateKeyHex: opts.privateKeyHex, xpub: opts.xpub });
     const base = String(opts.hubBase || '').replace(/\/$/, '');
     const post = await fetch(`${base}/device-links/${encodeURIComponent(a.sessionId)}/signatures`, {
       method: 'POST',
@@ -414,12 +414,12 @@ export async function completeDeviceLinkAsResponder (
     return { ok: false, error: 'device link changed since you approved it' };
   }
   try {
-    const own = fabricSigningIdentity(privateKeyHex, xpub);
+    const own = fabricSigningIdentity({ privateKeyHex, xpub });
     if (own.id === offer.initiator.id) {
       return { ok: false, error: 'Cannot link a device to itself — use a different Passport identity' };
     }
     const linkMessage = buildDeviceLinkMessage(offer.sessionId, offer.nonce, offer.initiator.id, own.id, offer.label, offer.origin);
-    const body = buildClientSignedBody(linkMessage, DEVICE_LINK_TAG, privateKeyHex, xpub);
+    const body = buildClientSignedBody(linkMessage, DEVICE_LINK_TAG, { privateKeyHex, xpub });
     const base = String(offer.hubBase || '').replace(/\/$/, '');
     const res = await fetch(`${base}/device-links/${encodeURIComponent(offer.sessionId)}/signatures`, {
       method: 'POST',

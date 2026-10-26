@@ -2,6 +2,7 @@
 
 import { FABRIC_MESH_HUB_REGISTRATION_KEY, FABRIC_STATE_STORAGE_KEY } from '../constants/fabricExtension';
 import { handleFabricRuntimeMessage } from './fabricBackgroundRuntimeMessages';
+import { dropTabPending } from './fabricSiteLoginRuntime';
 import { initIdentityOutband } from './identityOutband';
 import { swallowNonFatal } from '../utils/nonFatal';
 import { setMarketMeshPoster, tickMarketAgent } from '../services/marketRuntime';
@@ -138,6 +139,10 @@ export function registerFabricBackground (): void {
       fabricActionDebugUrl: FABRIC_ACTION_DEBUG_URL,
       syncMeshFromStorage
     });
+  });
+
+  chrome.tabs.onRemoved.addListener((tabId) => {
+    void dropTabPending(tabId).catch((err: unknown) => swallowNonFatal('passport-drop-tab', err));
   });
 
   chrome.storage.onChanged.addListener((changes, area) => {

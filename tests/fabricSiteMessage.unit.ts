@@ -4,24 +4,30 @@ import assert from 'assert';
 import sinon from 'sinon';
 import {
   buildDesktopSignRequest,
-  checkHubLoginChallenge,
+  consentedDisclosures,
   isSignableSiteOrigin,
   originOfSender,
-  readPageSiteLoginRequest,
-  signPassportSiteLogin,
-  verifyDesktopSiteLogin
+  pairingCode,
+  readPageChallenge,
+  signPassportAssertion,
+  verifyPageAssertion
 } from '../src/utils/fabricSiteMessage';
 import {
   discoverDesktopSigners,
   KEEPALIVE_EVERY_MS,
   normalizeDesktopSignerBase,
   parseDesktopSignerBases,
+  pinsForChallenge,
   requestDesktopLink,
-  requestDesktopSignature
+  requestDesktopSignature,
+  desktopRefusalError,
+  DESKTOP_OUTDATED_ERROR,
+  type DesktopPin
 } from '../src/utils/fabricDesktopSigner';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
-const { siteLogin, Key } = require('../src/utils/loadFabricSiteLogin');
+const core = require('../src/utils/loadFabricPassport');
+const { passport, accountKeys, Key } = core;
 
 const SITE = 'https://shop.example';
 
@@ -29,7 +35,26 @@ function jsonResponse (status: number, body: unknown): Response {
   return { ok: status >= 200 && status < 300, status, json: async () => body } as unknown as Response;
 }
 
+function newMaster (): string {
+  return accountKeys.importSeed(accountKeys.generateMnemonic());
+}
+
+function expectations (c: { nonce: string; hash: string; expiresAt: number; network: string | null; request: string[] }) {
+  return {
+    origin: SITE,
+    nonce: c.nonce,
+    challengeHash: c.hash,
+    challengeExpiresAt: c.expiresAt,
+    network: c.network,
+    allow: c.request
+  };
+}
+
 describe('fabricSiteMessage', function () {
+  before(function () {
+    if (!passport) this.skip();
+  });
+
   it('takes the origin from the browser, never the page', function () {
     assert.strictEqual(originOfSender({ origin: 'https://shop.example', url: 'https://other.example/x' }), SITE);
     assert.strictEqual(originOfSender({ url: 'https://shop.example/login?x=1' }), SITE);
@@ -38,71 +63,107 @@ describe('fabricSiteMessage', function () {
     assert.strictEqual(isSignableSiteOrigin('http://shop.example'), false);
   });
 
-  it('rebuilds an unsigned request with the real origin and refuses a site-signed mismatch', function () {
-    const unsigned = siteLogin.createSiteLoginRequest({ origin: 'https://claimed.example', purpose: 'Sign in' });
-    const read = readPageSiteLoginRequest(unsigned.uri, SITE);
+  it('reads a challenge only for the origin the browser reported', function () {
+    const c = passport.createChallenge({ origin: SITE, purpose: 'Sign in', request: ['wallet'] });
+    const read = readPageChallenge(c.uri, SITE);
     assert.ok(read.ok);
     if (!read.ok) return;
-    assert.strictEqual(read.request.origin, SITE);
-    assert.strictEqual(read.request.nonce, unsigned.nonce);
-    assert.strictEqual(read.request.purpose, 'Sign in');
-    assert.strictEqual(siteLogin.readSiteLoginRequest(read.request.requestUri).request.origin, SITE);
+    assert.strictEqual(read.challenge.nonce, c.nonce);
+    assert.strictEqual(read.challenge.hash, c.hash);
+    assert.deepStrictEqual(read.challenge.request, ['wallet']);
+    assert.strictEqual(read.challenge.siteAuthor, null);
 
-    const signed = siteLogin.createSiteLoginRequest({ origin: 'https://claimed.example' }, new Key());
-    const refused = readPageSiteLoginRequest(signed.uri, SITE);
-    assert.ok(!refused.ok);
-    if (!refused.ok) assert.strictEqual(refused.error, 'origin_mismatch');
-
-    assert.ok(!readPageSiteLoginRequest('fabric:' + 'A'.repeat(60000), SITE).ok);
-    assert.ok(!readPageSiteLoginRequest(unsigned.uri, 'http://shop.example').ok);
+    const elsewhere = readPageChallenge(c.uri, 'https://evil.example');
+    assert.ok(!elsewhere.ok);
+    if (!elsewhere.ok) assert.strictEqual(elsewhere.error, 'origin_mismatch');
+    assert.ok(!readPageChallenge('fabric:' + 'A'.repeat(60000), SITE).ok);
+    assert.ok(!readPageChallenge(c.uri, 'http://shop.example').ok);
+    const expired = passport.createChallenge({ origin: SITE, now: Date.now() - 10 * 60 * 1000, ttlMs: 60000 });
+    assert.ok(!readPageChallenge(expired.uri, SITE).ok);
   });
 
-  it('checks a legacy hub-login challenge against the page session and origin', function () {
-    const sessionId = 'cd'.repeat(24);
-    const nonce = 'ab'.repeat(32);
-    const message = `fabric:hub-login:1:${nonce}:${sessionId}:${SITE}`;
-    const ok = checkHubLoginChallenge(message, { sessionId, origin: SITE });
-    assert.ok(ok.ok);
-    if (ok.ok) assert.strictEqual(ok.nonce, nonce);
-    const wrongSite = checkHubLoginChallenge(message, { sessionId, origin: 'https://evil.example' });
-    assert.ok(!wrongSite.ok);
-    const wrongSession = checkHubLoginChallenge(message, { sessionId: 'ee'.repeat(24), origin: SITE });
-    assert.ok(!wrongSession.ok);
-    assert.ok(!checkHubLoginChallenge('fabric:device-link:1:whatever', { sessionId, origin: SITE }).ok);
+  it('signs with the chosen account and shares only what was asked and ticked', function () {
+    const master = newMaster();
+    const c = passport.createChallenge({ origin: SITE, request: ['wallet', 'cosigner'] });
+    const disclose = consentedDisclosures(c.request, ['cosigner', 'wallet', 'nonsense']);
+    assert.deepStrictEqual(disclose, ['wallet', 'cosigner']);
+    assert.deepStrictEqual(consentedDisclosures(['wallet'], ['cosigner']), []);
+
+    const signed = signPassportAssertion({ challenge: c.uri, origin: SITE, masterXprv: master, account: 2, network: 'testnet', disclose });
+    const keys = accountKeys.deriveAccount(master, { account: 2, network: 'testnet' });
+    assert.strictEqual(signed.identity.pubkey, keys.identity.pubkey);
+    const verified = verifyPageAssertion(signed.uri, { ...expectations(c), signers: ['passport'] });
+    assert.ok(verified.ok);
+    if (!verified.ok) return;
+    assert.strictEqual(verified.assertion.network, 'testnet');
+    assert.deepStrictEqual(verified.assertion.disclosed, ['wallet', 'cosigner']);
+
+    const quiet = signPassportAssertion({ challenge: c.uri, origin: SITE, masterXprv: master, account: 0, network: 'mainnet' });
+    const plain = verifyPageAssertion(quiet.uri, { ...expectations(c), signers: ['passport'] });
+    assert.ok(plain.ok);
+    if (plain.ok) assert.deepStrictEqual(plain.assertion.disclosed, []);
+    assert.notStrictEqual(quiet.identity.pubkey, signed.identity.pubkey);
   });
 
-  it('signs a response with the Passport key that the site can verify', function () {
-    const passport = new Key();
-    const request = siteLogin.createSiteLoginRequest({ origin: SITE });
-    const signed = signPassportSiteLogin({ origin: SITE, nonce: request.nonce, privateKeyHex: passport.private.toString('hex') });
-    const verified = siteLogin.verifySiteLoginResponse(signed.uri, { origin: SITE, nonce: request.nonce });
-    assert.strictEqual(verified.ok, true, verified.error);
-    assert.strictEqual(verified.identity.pubkey, passport.pubkey);
-    assert.strictEqual(verified.signer, 'passport');
-    assert.strictEqual(verified.identity.xpub, null);
+  it('refuses an assertion for another sign-in or from the wrong signer', function () {
+    const master = newMaster();
+    const c = passport.createChallenge({ origin: SITE });
+    const other = passport.createChallenge({ origin: SITE });
+    const signed = signPassportAssertion({ challenge: c.uri, origin: SITE, masterXprv: master, account: 0, network: 'mainnet' });
+    assert.ok(!verifyPageAssertion(signed.uri, { ...expectations(other), signers: ['passport'] }).ok);
+    assert.ok(!verifyPageAssertion(signed.uri, { ...expectations(c), signers: ['hub'] }).ok);
+    const pinned = verifyPageAssertion(signed.uri, { ...expectations(c), signers: ['passport'], pubkey: new Key().pubkey });
+    assert.ok(!pinned.ok);
   });
 
-  it('wraps the site request for a desktop and accepts only that desktop key back', function () {
-    const passport = new Key();
+  it('refuses to sign for another network than the challenge names', function () {
+    const c = passport.createChallenge({ origin: SITE, network: 'regtest' });
+    assert.throws(() => signPassportAssertion({ challenge: c.uri, origin: SITE, masterXprv: newMaster(), account: 0, network: 'mainnet' }), /regtest/);
+  });
+
+  it('wraps a challenge for a desktop with the linked account and accepts only the pinned key and device', function () {
+    const master = newMaster();
     const desktop = new Key();
-    const request = siteLogin.createSiteLoginRequest({ origin: SITE });
-    const wrapped = buildDesktopSignRequest({
-      origin: SITE,
-      nonce: request.nonce,
-      requestUri: request.uri,
-      privateKeyHex: passport.private.toString('hex')
-    });
-    const read = siteLogin.readFabricSignRequest(wrapped.uri);
+    const c = passport.createChallenge({ origin: SITE });
+    const wrapped = buildDesktopSignRequest({ challenge: c.uri, origin: SITE, masterXprv: master, device: { account: 1, network: 'mainnet' } });
+    const device = accountKeys.deriveAccount(master, { account: 1, network: 'mainnet' }).identity.pubkey;
+    assert.strictEqual(wrapped.device, device);
+    const read = passport.readSignRequest(wrapped.uri);
     assert.strictEqual(read.ok, true, read.error);
-    assert.strictEqual(read.author, passport.pubkey.slice(2));
-    assert.strictEqual(read.request.nonce, request.nonce);
+    assert.strictEqual(read.author, device.slice(2));
 
-    const response = siteLogin.signSiteLoginResponse({ origin: SITE, nonce: request.nonce, signer: 'hub' }, desktop);
-    assert.ok(verifyDesktopSiteLogin(response.uri, { origin: SITE, nonce: request.nonce, pubkey: desktop.pubkey }).ok);
-    const other = verifyDesktopSiteLogin(response.uri, { origin: SITE, nonce: request.nonce, pubkey: passport.pubkey });
-    assert.ok(!other.ok);
-    const passportSigned = siteLogin.signSiteLoginResponse({ origin: SITE, nonce: request.nonce, signer: 'passport' }, desktop);
-    assert.ok(!verifyDesktopSiteLogin(passportSigned.uri, { origin: SITE, nonce: request.nonce, pubkey: desktop.pubkey }).ok);
+    const answer = passport.signAssertion({ challenge: c.uri, origin: SITE, signer: 'hub', network: 'mainnet', device }, desktop);
+    const ok = verifyPageAssertion(answer.uri, { ...expectations(c), signers: ['hub'], pubkey: desktop.pubkey, device });
+    assert.ok(ok.ok);
+    assert.ok(!verifyPageAssertion(answer.uri, { ...expectations(c), signers: ['hub'], pubkey: new Key().pubkey, device }).ok);
+    assert.ok(!verifyPageAssertion(answer.uri, { ...expectations(c), signers: ['hub'], pubkey: desktop.pubkey, device: new Key().pubkey }).ok);
+    assert.ok(!verifyPageAssertion(answer.uri, { ...expectations(c), signers: ['gooncitizen'], pubkey: desktop.pubkey, device }).ok);
+  });
+
+  it('shows the same pairing code on both devices', function () {
+    const a = new Key().pubkey;
+    const b = new Key().pubkey;
+    assert.match(pairingCode(a, b), /^\d{6}$/);
+    assert.strictEqual(pairingCode(a, b), pairingCode(b, a));
+    assert.notStrictEqual(pairingCode(a, b), pairingCode(a, new Key().pubkey));
+  });
+});
+
+describe('desktop pins', function () {
+  const pin = (network: string): DesktopPin => ({
+    base: 'http://127.0.0.1:8080',
+    signer: 'hub',
+    name: null,
+    pubkey: '02' + 'ab'.repeat(32),
+    network,
+    device: { account: 0, network: 'mainnet', pubkey: '03' + 'cd'.repeat(32) },
+    pinnedAt: 1
+  });
+
+  it('offers a desktop only for challenges on its own network', function () {
+    assert.strictEqual(pinsForChallenge([pin('regtest')], 'mainnet').length, 0);
+    assert.strictEqual(pinsForChallenge([pin('regtest')], 'regtest').length, 1);
+    assert.strictEqual(pinsForChallenge([pin('regtest')], null).length, 1);
   });
 });
 
@@ -164,6 +225,21 @@ describe('fabricDesktopSigner', function () {
     assert.ok(!remote.ok);
   });
 
+  it('asks for a desktop update when a pre-v2 desktop refuses', async function () {
+    const v1 = await requestDesktopSignature({
+      base: '8080',
+      signRequestUri: 'fabric:abc',
+      expiresAt: Date.now() + 60000,
+      fetchImpl: async () => jsonResponse(403, { ok: false, error: 'web pages cannot call the local signer' })
+    });
+    assert.ok(!v1.ok);
+    if (!v1.ok) assert.strictEqual(v1.error, DESKTOP_OUTDATED_ERROR);
+    assert.strictEqual(desktopRefusalError(400, 'unknown message type 16962'), DESKTOP_OUTDATED_ERROR);
+    assert.strictEqual(desktopRefusalError(426, 'passport_outdated'), DESKTOP_OUTDATED_ERROR);
+    assert.strictEqual(desktopRefusalError(403, 'declined on the desktop'), 'declined on the desktop');
+    assert.strictEqual(desktopRefusalError(500, undefined), 'desktop refused (HTTP 500)');
+  });
+
   it('keeps the extension worker alive while the desktop user decides', async function () {
     const clock = sinon.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'setTimeout', 'clearTimeout', 'Date'] });
     let pings = 0;
@@ -199,7 +275,7 @@ describe('fabricDesktopSigner', function () {
         return jsonResponse(200, { ok: true, status: 'accepted', signer: 'hub' });
       }
     });
-    assert.deepStrictEqual(ok, { ok: true, signer: 'hub' });
+    assert.deepStrictEqual(ok, { ok: true, signer: 'hub', code: null, pubkey: null });
     assert.deepStrictEqual(seen, { url: 'http://127.0.0.1:8080/services/fabric/link', body: JSON.stringify({ sessionId }) });
     const declined = await requestDesktopLink({
       base: '8080',

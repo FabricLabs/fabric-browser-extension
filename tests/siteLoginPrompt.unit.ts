@@ -3,39 +3,26 @@
 import assert from 'assert';
 import { MAX_SITE_PURPOSE_CHARS, sanitizeSitePurpose } from '../src/utils/fabricSiteMessage';
 import {
+  buildPendingRow,
   checkSenderFrame,
-  HUB_LOGIN_PROMPT_TTL_MS,
-  queueFabricMessage,
-  siteLoginPromptOpen,
-  type PendingSiteLoginRow
+  livePending,
+  MAX_SEEN_NONCES,
+  rememberNonce
 } from '../src/background/fabricSiteLoginRuntime';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
-const { siteLogin } = require('../src/utils/loadFabricSiteLogin');
+const { passport } = require('../src/utils/loadFabricPassport');
 
 const SITE = 'https://shop.example';
+const REQUEST_ID = 'ef'.repeat(16);
 
 function sender (over: Partial<chrome.runtime.MessageSender> = {}): chrome.runtime.MessageSender {
   return {
     origin: SITE,
     frameId: 0,
-    tab: { id: 7, url: `${SITE}/login` } as chrome.tabs.Tab,
+    tab: { id: 7, url: `${SITE}/login`, title: 'Shop' } as chrome.tabs.Tab,
     ...over
   } as chrome.runtime.MessageSender;
-}
-
-function row (over: Partial<PendingSiteLoginRow> = {}): PendingSiteLoginRow {
-  return {
-    kind: 'fabric',
-    origin: SITE,
-    pageOrigin: SITE,
-    nonce: 'ab'.repeat(32),
-    createdAt: 1_000,
-    sessionId: '',
-    hubBase: '',
-    message: '',
-    ...over
-  };
 }
 
 describe('site-login prompt rules', function () {
@@ -60,11 +47,11 @@ describe('site-login prompt rules', function () {
       assert.strictEqual(sanitizeSitePurpose({ toString: () => 'x' }), null);
     });
 
-    it('is applied when a page request is queued', function () {
-      const request = siteLogin.createSiteLoginRequest({ origin: SITE, purpose: 'Approve \u202Etxt.exe' });
-      const queued = queueFabricMessage({ message: request.uri, id: 'r1' }, sender());
-      assert.strictEqual(queued.ok, true);
-      if (queued.ok) assert.strictEqual(queued.row.purpose, 'Approve txt.exe');
+    it('is applied when a page challenge is queued', function () {
+      const c = passport.createChallenge({ origin: SITE, purpose: 'Approve \u202Etxt.exe' });
+      const built = buildPendingRow({ requestId: REQUEST_ID, challenge: c.uri }, sender());
+      assert.strictEqual(built.ok, true);
+      if (built.ok) assert.strictEqual(built.row.purpose, 'Approve txt.exe');
     });
   });
 
@@ -82,17 +69,53 @@ describe('site-login prompt rules', function () {
     });
   });
 
-  describe('siteLoginPromptOpen', function () {
-    it('is busy while a request is waiting and free once it expires', function () {
-      assert.strictEqual(siteLoginPromptOpen(null, 2_000), false);
-      assert.strictEqual(siteLoginPromptOpen(row({ expiresAt: 5_000 }), 2_000), true);
-      assert.strictEqual(siteLoginPromptOpen(row({ expiresAt: 5_000 }), 5_000), false);
+  describe('buildPendingRow', function () {
+    it('keys the row by tab and frame and binds it to the browser-reported origin', function () {
+      const c = passport.createChallenge({ origin: SITE, request: ['wallet'], network: 'regtest' });
+      const built = buildPendingRow({ requestId: REQUEST_ID, challenge: c.uri }, sender({ frameId: 2 }));
+      assert.ok(built.ok);
+      if (!built.ok) return;
+      assert.strictEqual(built.row.key, '7:2');
+      assert.strictEqual(built.row.origin, SITE);
+      assert.strictEqual(built.row.nonce, c.nonce);
+      assert.strictEqual(built.row.challengeHash, c.hash);
+      assert.strictEqual(built.row.network, 'regtest');
+      assert.deepStrictEqual(built.row.request, ['wallet']);
     });
 
-    it('gives a /sessions sign-in (no expiry) a fixed window', function () {
-      const hub = row({ kind: 'hub-login', expiresAt: undefined, createdAt: 1_000 });
-      assert.strictEqual(siteLoginPromptOpen(hub, 1_000 + HUB_LOGIN_PROMPT_TTL_MS - 1), true);
-      assert.strictEqual(siteLoginPromptOpen(hub, 1_000 + HUB_LOGIN_PROMPT_TTL_MS), false);
+    it('refuses challenges for another origin, bad request ids, and non-tab senders', function () {
+      const c = passport.createChallenge({ origin: 'https://evil.example' });
+      assert.ok(!buildPendingRow({ requestId: REQUEST_ID, challenge: c.uri }, sender()).ok);
+      const mine = passport.createChallenge({ origin: SITE });
+      assert.ok(!buildPendingRow({ requestId: 'short', challenge: mine.uri }, sender()).ok);
+      assert.ok(!buildPendingRow({ requestId: REQUEST_ID, challenge: mine.uri }, sender({ tab: undefined })).ok);
+    });
+  });
+
+  describe('rememberNonce', function () {
+    it('accepts a nonce once until its challenge expires', function () {
+      const first = rememberNonce({}, 'n1', 2_000, 1_000);
+      assert.strictEqual(first.ok, true);
+      assert.strictEqual(rememberNonce(first.seen, 'n1', 2_000, 1_500).ok, false);
+      assert.strictEqual(rememberNonce(first.seen, 'n1', 3_000, 2_000).ok, true);
+    });
+
+    it('keeps at most MAX_SEEN_NONCES, dropping the soonest to expire', function () {
+      const seen: Record<string, number> = {};
+      for (let i = 0; i < MAX_SEEN_NONCES; i++) seen[`n${i}`] = 10_000 + i;
+      const out = rememberNonce(seen, 'new', 50_000, 0);
+      assert.strictEqual(out.ok, true);
+      assert.strictEqual(Object.keys(out.seen).length, MAX_SEEN_NONCES);
+      assert.ok(!('n0' in out.seen));
+      assert.ok('new' in out.seen);
+    });
+  });
+
+  describe('livePending', function () {
+    it('drops expired and malformed rows', function () {
+      const rows = [{ key: '1:0', expiresAt: 5_000 }, { key: '2:0', expiresAt: 1_000 }, null, { expiresAt: 9_000 }];
+      assert.deepStrictEqual(livePending(rows, 2_000).map((r) => r.key), ['1:0']);
+      assert.deepStrictEqual(livePending('nope', 2_000), []);
     });
   });
 });

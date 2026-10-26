@@ -1,57 +1,82 @@
 'use strict';
 
 /**
- * `fabric:` site login for Passport: read what a page asks for, check legacy
- * `fabric:hub-login:1` challenges, and sign responses with the Passport key or
- * wrap them for a linked desktop app.
+ * Passport v2 sign-in for the extension: read a page's `PASSPORT_CHALLENGE`,
+ * sign a `PASSPORT_ASSERTION` with the identity key of the chosen account and
+ * network, wrap a challenge for a linked desktop app, and check what comes back.
  *
  * The page never names its own origin here: callers pass the origin the browser
- * reported (`event.origin` / `sender.origin`), and every request and response is
- * bound to it.
+ * reported (`sender.origin`), and every challenge and assertion is bound to it.
  */
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
-const core = require('./loadFabricSiteLogin');
-// eslint-disable-next-line @typescript-eslint/no-var-requires
-const {
-  parseDesktopLoginMessage,
-  originsMatchForDesktopSession
-} = require('@fabric/http/functions/fabricSiteLoginVerify');
+const core = require('./loadFabricPassport');
 
 /** Longest `fabric:` string a page may post (header + 32 KiB body, base64url). */
 export const MAX_PAGE_FABRIC_CHARS = 48 * 1024;
 
-export type PageSiteLoginRequest = {
+/** What a site may ask Passport to share besides the identity. */
+export type PassportDisclosure = 'wallet' | 'cosigner';
+
+export const PASSPORT_SIGNER = 'passport';
+export const DESKTOP_SIGNERS: readonly string[] = Object.freeze(['hub', 'gooncitizen']);
+
+export type PageChallenge = {
   origin: string;
   nonce: string;
   purpose: string | null;
   issuedAt: number;
   expiresAt: number;
-  /** x-only pubkey of the site key that signed the request, or null when unsigned. */
+  /** Network the site requires, or null when the user picks. */
+  network: string | null;
+  request: PassportDisclosure[];
+  /** sha256 of the challenge frame (what the assertion commits to). */
+  hash: string;
+  /** x-only pubkey of the site key that signed the challenge, or null when unsigned. */
   siteAuthor: string | null;
-  /** The request frame to pass on to a desktop signer (rebuilt when the page sent it unsigned). */
-  requestUri: string;
+  uri: string;
+};
+
+export type VerifiedAssertion = {
+  identity: { id: string; pubkey: string };
+  network: string;
+  signer: string;
+  device: string | null;
+  disclosed: PassportDisclosure[];
+  expiresAt: number;
 };
 
 type Result<T> = ({ ok: true } & T) | { ok: false; error: string };
 
-export function siteLoginAvailable (): boolean {
-  return !!(core && core.siteLogin && core.fabricUri && core.Key);
+export function passportAvailable (): boolean {
+  return !!(core && core.passport && core.accountKeys && core.Key);
 }
 
-/** Origin the browser reported for a runtime message sender (never page-supplied). */
-export function originOfSender (sender: { origin?: string; url?: string } | null | undefined): string | null {
-  if (!sender) return null;
-  const raw = typeof sender.origin === 'string' && sender.origin !== 'null'
-    ? sender.origin
-    : (typeof sender.url === 'string' ? sender.url : '');
+function requireCore (): void {
+  if (!passportAvailable()) throw new Error('Passport is unavailable in this build');
+}
+
+/** http(s) origin of a URL, or null. */
+export function originOfUrl (url: unknown): string | null {
+  if (typeof url !== 'string' || !url) return null;
   try {
-    const u = new URL(raw);
+    const u = new URL(url);
     if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
     return u.origin;
   } catch {
     return null;
   }
+}
+
+/**
+ * Origin the browser reported for a runtime message sender, never one the page
+ * supplied. An opaque (`"null"`) origin is refused. Firefox reports no
+ * `origin`, only the frame's `url`, which the browser fills in as well.
+ */
+export function originOfSender (sender: { origin?: string; url?: string } | null | undefined): string | null {
+  if (!sender) return null;
+  if (typeof sender.origin === 'string') return sender.origin === 'null' ? null : originOfUrl(sender.origin);
+  return originOfUrl(sender.url);
 }
 
 /** True for loopback and HTTPS origins (the only sites Passport signs in to). */
@@ -66,152 +91,180 @@ export function isSignableSiteOrigin (origin: string): boolean {
   }
 }
 
-/**
- * Read a page's `fabric:` `SiteLoginRequest` against the origin the browser reported.
- * A site-signed request must name that origin; an unsigned one is rebuilt with it.
- */
-export function readPageSiteLoginRequest (
+/** Read a page's `PASSPORT_CHALLENGE` against the origin the browser reported. */
+export function readPageChallenge (
   uri: unknown,
   realOrigin: string,
   now: number = Date.now()
-): Result<{ request: PageSiteLoginRequest }> {
-  if (!siteLoginAvailable()) return { ok: false, error: 'fabric_unavailable' };
-  if (typeof uri !== 'string' || !uri || uri.length > MAX_PAGE_FABRIC_CHARS) {
-    return { ok: false, error: 'invalid_fabric_message' };
+): Result<{ challenge: PageChallenge }> {
+  if (!passportAvailable()) return { ok: false, error: 'passport_unavailable' };
+  if (typeof uri !== 'string' || !/^fabric:/i.test(uri) || uri.length > MAX_PAGE_FABRIC_CHARS) {
+    return { ok: false, error: 'invalid_challenge' };
   }
-  const origin = core.siteLogin.normalizeSiteOrigin(realOrigin);
+  const origin = core.passport.normalizeOrigin(realOrigin);
   if (!origin || !isSignableSiteOrigin(origin)) return { ok: false, error: 'origin_not_signable' };
-  const read = core.siteLogin.readSiteLoginRequest(uri, { now });
-  if (!read.ok) return { ok: false, error: String(read.error || 'invalid_site_login_request') };
-  const r = read.request;
-  let requestUri = uri;
-  if (r.origin !== origin) {
-    if (read.author) return { ok: false, error: 'origin_mismatch' };
-    requestUri = core.siteLogin.createSiteLoginRequest({
-      origin,
-      nonce: r.nonce,
-      purpose: r.purpose || undefined,
-      ttlMs: Math.max(1000, r.expiresAt - now),
-      now
-    }).uri;
-  }
+  const read = core.passport.readChallenge(uri, { now });
+  if (!read.ok) return { ok: false, error: String(read.error || 'invalid_challenge') };
+  const c = read.challenge;
+  if (c.origin !== origin) return { ok: false, error: 'origin_mismatch' };
   return {
     ok: true,
-    request: {
+    challenge: {
       origin,
-      nonce: String(r.nonce),
-      purpose: r.purpose ? String(r.purpose) : null,
-      issuedAt: r.issuedAt,
-      expiresAt: r.expiresAt,
+      nonce: String(c.nonce),
+      purpose: c.purpose ? String(c.purpose) : null,
+      issuedAt: Number(c.issuedAt),
+      expiresAt: Number(c.expiresAt),
+      network: c.network ? String(c.network) : null,
+      request: (c.request || []) as PassportDisclosure[],
+      hash: String(read.hash),
       siteAuthor: read.author || null,
-      requestUri
+      uri
     }
   };
 }
 
-/**
- * Check a legacy `fabric:hub-login:1` challenge before Passport signs it: the
- * session id and origin inside it must be the page's own.
- */
-export function checkHubLoginChallenge (
-  message: unknown,
-  expected: { sessionId: string; origin: string }
-): Result<{ nonce: string }> {
-  const parsed = parseDesktopLoginMessage(typeof message === 'string' ? message : '');
-  if (!parsed) return { ok: false, error: 'invalid_challenge' };
-  if (String(parsed.sessionId).toLowerCase() !== String(expected.sessionId || '').toLowerCase()) {
-    return { ok: false, error: 'session_mismatch' };
-  }
-  if (!originsMatchForDesktopSession(parsed.origin, expected.origin)) {
-    return { ok: false, error: 'origin_mismatch' };
-  }
-  return { ok: true, nonce: String(parsed.nonce) };
+/** Keys of one (account, network) pair of the unlocked master (core `deriveAccount`). */
+export function deriveAccountKeys (masterXprv: string, pair: { account: number; network: string }): any {
+  requireCore();
+  return core.accountKeys.deriveAccount(masterXprv, { account: pair.account, network: pair.network });
 }
 
-/** Passport signing key (core `Key` from the same tree as the message helpers). */
-export function passportSigningKey (privateKeyHex: string, xpub?: string | null): { key: any; xpub: string | null } {
-  if (!siteLoginAvailable()) throw new Error('fabric: site login unavailable in this build');
-  const hex = String(privateKeyHex || '').replace(/^0x/i, '');
-  if (!/^[0-9a-f]{64}$/i.test(hex)) throw new Error('private key required');
-  const key = new core.Key({ private: hex });
-  let matched: string | null = null;
-  if (xpub) {
-    try {
-      const neutered = new core.Key({ xpub });
-      if (String(neutered.pubkey).toLowerCase() === String(key.pubkey).toLowerCase()) matched = xpub;
-    } catch { /* xpub is optional */ }
+/** Only what the challenge asked for and the user ticked, in core order. */
+export function consentedDisclosures (request: readonly string[], ticked: readonly string[]): PassportDisclosure[] {
+  const asked = new Set(request || []);
+  const out: PassportDisclosure[] = [];
+  for (const item of ['wallet', 'cosigner'] as PassportDisclosure[]) {
+    if (asked.has(item) && (ticked || []).includes(item)) out.push(item);
   }
-  return { key, xpub: matched };
+  return out;
 }
 
 /**
- * Sign a `SiteLoginResponse` with the Passport identity.
- * The xpub is attached only when `includeXpub` (Hub logins need it; other sites do not).
+ * Sign a `PASSPORT_ASSERTION` with this Passport's identity for the chosen
+ * account and network. Wallet xpubs and the cosigner key go only when listed
+ * in `disclose`.
  */
-export function signPassportSiteLogin (params: {
+export function signPassportAssertion (params: {
+  challenge: string;
   origin: string;
-  nonce: string;
-  privateKeyHex: string;
-  xpub?: string | null;
-  includeXpub?: boolean;
+  masterXprv: string;
+  account: number;
+  network: string;
+  disclose?: PassportDisclosure[];
   now?: number;
-}): { uri: string; identity: { id: string; pubkey: string; xpub: string | null } } {
-  const { key, xpub } = passportSigningKey(params.privateKeyHex, params.xpub);
-  const signed = core.siteLogin.signSiteLoginResponse({
+}): { uri: string; identity: { id: string; pubkey: string }; network: string; disclosed: PassportDisclosure[]; expiresAt: number } {
+  const keys = deriveAccountKeys(params.masterXprv, { account: params.account, network: params.network });
+  const disclose = params.disclose || [];
+  const signed = core.passport.signAssertion({
+    challenge: params.challenge,
     origin: params.origin,
-    nonce: params.nonce,
-    signer: 'passport',
-    xpub: params.includeXpub ? xpub : null,
+    signer: PASSPORT_SIGNER,
+    network: keys.network,
+    disclose,
+    wallet: disclose.includes('wallet') ? keys.wallet : undefined,
+    cosignerKey: disclose.includes('cosigner') ? keys.cosigner.key : undefined,
     now: params.now
-  }, key);
-  return { uri: signed.uri, identity: signed.identity };
+  }, keys.identity.key);
+  return {
+    uri: signed.uri,
+    identity: signed.identity,
+    network: signed.network,
+    disclosed: signed.disclosed,
+    expiresAt: signed.expiresAt
+  };
 }
 
 /**
- * Wrap a site request for a linked desktop app. Signed by the Passport key so the
- * desktop can check this device is in its identity cluster.
+ * Ask a linked desktop app to answer a challenge. Signed by the Passport key
+ * that was linked to it, so the desktop can find this device in its identity
+ * cluster.
  */
 export function buildDesktopSignRequest (params: {
+  challenge: string;
   origin: string;
-  nonce: string;
-  purpose?: string | null;
-  expiresAt?: number;
-  requestUri?: string | null;
-  privateKeyHex: string;
+  masterXprv: string;
+  /** The Passport pair whose identity key was linked to the desktop. */
+  device: { account: number; network: string };
+  disclose?: PassportDisclosure[];
   now?: number;
 }): { uri: string; nonce: string; expiresAt: number; device: string } {
-  const now = Number.isFinite(params.now) ? Number(params.now) : Date.now();
-  const { key } = passportSigningKey(params.privateKeyHex);
-  const requestUri = params.requestUri || core.siteLogin.createSiteLoginRequest({
+  const keys = deriveAccountKeys(params.masterXprv, params.device);
+  const wrapped = core.passport.createSignRequest({
+    challenge: params.challenge,
     origin: params.origin,
-    nonce: params.nonce,
-    purpose: params.purpose || undefined,
-    ttlMs: params.expiresAt ? Math.max(1000, params.expiresAt - now) : undefined,
-    now
-  }).uri;
-  const wrapped = core.siteLogin.createFabricSignRequest({ request: requestUri, origin: params.origin, now }, key);
-  return { uri: wrapped.uri, nonce: wrapped.nonce, expiresAt: wrapped.expiresAt, device: String(key.pubkey).slice(2) };
+    account: 0,
+    disclose: params.disclose || [],
+    now: params.now
+  }, keys.identity.key);
+  return { uri: wrapped.uri, nonce: wrapped.nonce, expiresAt: wrapped.expiresAt, device: keys.identity.pubkey };
 }
 
-/** Verify a desktop's `SiteLoginResponse` before handing it to the page. */
-export function verifyDesktopSiteLogin (uri: unknown, expected: {
+/**
+ * Verify an assertion before handing it to the page: bound to the challenge,
+ * signed by an accepted signer, disclosing nothing it wasn't asked, and (for a
+ * desktop) signed by the key pinned when it was linked.
+ */
+export function verifyPageAssertion (uri: unknown, expected: {
   origin: string;
   nonce: string;
-  pubkey: string;
+  challengeHash: string;
+  challengeExpiresAt: number;
+  network?: string | null;
+  allow: readonly string[];
+  signers: readonly string[];
+  pubkey?: string | null;
+  device?: string | null;
   now?: number;
-}): Result<{ identity: { id: string; pubkey: string; xpub: string | null }; signer: string }> {
-  if (!siteLoginAvailable()) return { ok: false, error: 'fabric_unavailable' };
-  const verified = core.siteLogin.verifySiteLoginResponse(uri, {
+}): Result<{ assertion: VerifiedAssertion }> {
+  if (!passportAvailable()) return { ok: false, error: 'passport_unavailable' };
+  if (typeof uri !== 'string' || uri.length > MAX_PAGE_FABRIC_CHARS) return { ok: false, error: 'invalid assertion' };
+  const verified = core.passport.verifyAssertion(uri, {
     origin: expected.origin,
     nonce: expected.nonce,
-    now: expected.now,
-    signers: ['hub', 'gooncitizen', 'desktop']
+    challengeHash: expected.challengeHash,
+    challengeExpiresAt: expected.challengeExpiresAt,
+    network: expected.network || undefined,
+    allow: [...expected.allow],
+    signers: [...expected.signers],
+    now: expected.now
   });
   if (!verified.ok) return { ok: false, error: String(verified.error) };
-  if (String(verified.identity.pubkey).toLowerCase() !== String(expected.pubkey || '').toLowerCase()) {
-    return { ok: false, error: 'signed by a different desktop key' };
+  const pubkey = String(verified.identity.pubkey).toLowerCase();
+  if (expected.pubkey && pubkey !== String(expected.pubkey).toLowerCase()) {
+    return { ok: false, error: 'signed by a different key than the one linked' };
   }
-  return { ok: true, identity: verified.identity, signer: verified.signer };
+  if (expected.device && String(verified.device || '') !== String(expected.device).toLowerCase()) {
+    return { ok: false, error: 'the desktop answered for a different device' };
+  }
+  const disclosed: PassportDisclosure[] = [];
+  if (verified.wallet) disclosed.push('wallet');
+  if (verified.cosigner) disclosed.push('cosigner');
+  return {
+    ok: true,
+    assertion: {
+      identity: { id: String(verified.identity.id), pubkey },
+      network: String(verified.network),
+      signer: String(verified.signer),
+      device: verified.device || null,
+      disclosed,
+      expiresAt: Number(verified.expiresAt)
+    }
+  };
+}
+
+/** Six-digit code both devices show while pairing. */
+export function pairingCode (a: string, b: string): string {
+  requireCore();
+  return core.passport.pairingCode(a, b);
+}
+
+/** What the user is about to share, in the words the prompt uses. */
+export function describeDisclosures (disclose: readonly string[]): string[] {
+  const out = ['Your Fabric identity (public key) for this site'];
+  if (disclose.includes('wallet')) out.push('Your wallet: balance, history, and addresses (account xpubs)');
+  if (disclose.includes('cosigner')) out.push('Your escrow key, for multisig with this site');
+  return out;
 }
 
 /** Longest site-supplied purpose text a prompt shows. */

@@ -205,7 +205,7 @@ describe('Browser extension (Playwright + Mocha)', function () {
       }
       if (lastErr) throw lastErr;
       const attr = await page.evaluate(() => document.documentElement?.getAttribute('data-fabric-passport'));
-      assert.strictEqual(attr, extensionId);
+      assert.strictEqual(attr, '2', 'Passport v2 marks the page with its protocol version, not its extension id');
     } finally {
       await page.close();
     }

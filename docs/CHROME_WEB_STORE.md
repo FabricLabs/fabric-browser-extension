@@ -47,7 +47,7 @@ Keys never leave the extension unless you export a backup. Site login and device
 
 What you can do
 • Create a new identity (seed + password) or restore from an existing seed
-• Sign in to Fabric sites that use Hub client-signed sessions (Sign in with Passport)
+• Sign in to Fabric sites with Passport: each sign-in names the site your browser shows, and you approve it
 • Create or accept a device-link offer (fabric://link) and publish IdentityCrossSign
 • Connect & register with a Fabric Hub you choose (default https://hub.fabric.pub)
 • Optional Bitcoin addresses and Hub wallet actions derived from the same identity
@@ -157,7 +157,7 @@ Paste into each dashboard field. Remove a permission from the manifest instead o
 
 ### `storage`
 ```
-Stores the encrypted identity, settings, trusted Hub origins, and pending site-login / device-link challenges on this profile. Wallet material is encrypted at rest (AES-GCM). Nothing is synced to Fabric Labs.
+Stores the encrypted identity, settings, trusted Hub origins, and pending sign-in / device-link challenges and linked desktop apps on this profile. Wallet material is encrypted at rest (AES-GCM). Nothing is synced to Fabric Labs.
 ```
 
 ### `tabs`
@@ -198,7 +198,7 @@ Fabric sites and Hubs are not a single domain. The content script only handles F
 ### Loopback host permissions `http://localhost/*`, `http://127.0.0.1/*`, `http://[::1]/*`
 Paste the **same** text for each loopback pattern (a port-less pattern matches every port):
 ```
-Loopback-only access so a developer or operator can use a Fabric Hub, GoonCitizen LiveRelay, or the Passport test harness on this machine (cleartext HTTP is refused for public hubs). The content script still only acts on Fabric postMessage. Not used to reach the public internet over HTTP.
+Loopback-only access so a developer or operator can use a Fabric Hub, GoonCitizen LiveRelay, or the Passport test harness on this machine, and so Passport can ask a linked Fabric Hub or GoonCitizen desktop app to sign a sign-in after the user approves it there (cleartext HTTP is refused for public hubs). The content script still only acts on Fabric postMessage. Not used to reach the public internet over HTTP.
 ```
 
 ### Optional host permission `http://*/*`

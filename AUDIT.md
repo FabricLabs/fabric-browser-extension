@@ -37,7 +37,7 @@ Peer documents: [`@fabric/core` AUDIT.md](https://github.com/FabricLabs/fabric/b
    extension injects `js/content.js` at `document_start` into `all_frames` of
    every HTTPS origin, and holds host permissions for the same. That is the
    wallet-extension norm (MetaMask ships `<all_urls>`) and it is what lets any
-   Fabric site offer `fabric://login`. The costs are real and should be
+   Fabric site offer Passport sign-in. The costs are real and should be
    accepted deliberately rather than by default:
    - the install prompt reads *“Read and change all your data on all websites”*;
    - Chrome Web Store review is slower and stricter for broad host access, and

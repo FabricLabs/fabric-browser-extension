@@ -1,50 +1,61 @@
 'use strict';
 
 /**
- * Background side of `fabric:` site login: queue page requests for the popup,
- * and carry a desktop-signed login back to the page (or the Hub session) so the
- * answer survives the popup closing while the user approves on the desktop.
+ * Background side of Passport v2 sign-in.
+ *
+ * - Pages hand a `PASSPORT_CHALLENGE` to the content script, which forwards it
+ *   here. It is read against the origin the browser reports for that frame and
+ *   queued for the popup: at most one per tab and frame, a few in total, each
+ *   dropped at its expiry, and each nonce only once.
+ * - The popup signs (or asks a pinned desktop app to) and hands the assertion
+ *   back here. It is verified against the queued challenge and delivered to
+ *   the content script of that frame only, which posts it on the page's port.
  */
 
 import {
-  FABRIC_MESSAGE_PAGE_RESULT,
-  FABRIC_PENDING_SITE_LOGIN_KEY,
-  FABRIC_SITE_LOGIN_PAGE_RESULT
+  FABRIC_PASSPORT_PAGE_RESULT,
+  FABRIC_PASSPORT_SEEN_NONCES_KEY,
+  FABRIC_PENDING_PASSPORT_KEY
 } from '../constants/siteLogin';
 import {
-  checkHubLoginChallenge,
+  DESKTOP_SIGNERS,
+  PASSPORT_SIGNER,
   originOfSender,
-  readPageSiteLoginRequest,
+  originOfUrl,
+  readPageChallenge,
   sanitizeSitePurpose,
-  verifyDesktopSiteLogin
+  verifyPageAssertion,
+  type PassportDisclosure
 } from '../utils/fabricSiteMessage';
-import { requestDesktopSignature } from '../utils/fabricDesktopSigner';
-import { postFabricSiteLogin } from '../utils/fabricSiteLoginSign';
+import { readDesktopPins, requestDesktopSignature } from '../utils/fabricDesktopSigner';
 import { swallowNonFatal } from '../utils/nonFatal';
 
-export type PendingSiteLoginRow = {
-  /** `hub-login`: legacy `/sessions` challenge; `fabric`: a page `fabric:` `SiteLoginRequest`. */
-  kind: 'hub-login' | 'fabric';
+export type PendingPassportRow = {
+  /** `${tabId}:${frameId}` */
+  key: string;
+  /** Content-script id for the page's port (never shown to the page). */
+  requestId: string;
+  tabId: number;
+  frameId: number;
+  tabTitle: string | null;
   origin: string;
-  pageOrigin: string;
+  challenge: string;
+  challengeHash: string;
   nonce: string;
+  purpose: string | null;
+  network: string | null;
+  request: PassportDisclosure[];
+  siteAuthor: string | null;
+  expiresAt: number;
   createdAt: number;
-  tabId?: number;
-  frameId?: number;
-  sessionId: string;
-  hubBase: string;
-  message: string;
-  requestId?: string;
-  requestUri?: string;
-  purpose?: string | null;
-  expiresAt?: number;
-  siteAuthor?: string | null;
 };
 
-type Outcome = { ok: true; row: PendingSiteLoginRow } | { ok: false; error: string };
+/** Most sign-ins waiting at once, over all tabs. */
+export const MAX_PENDING_PASSPORT = 8;
+/** Most challenge nonces remembered (each until its challenge expires). */
+export const MAX_SEEN_NONCES = 1024;
 
-/** How long a `/sessions` sign-in (which names no expiry) keeps the prompt. */
-export const HUB_LOGIN_PROMPT_TTL_MS = 2 * 60 * 1000;
+type Fail = { ok: false; error: string };
 
 /**
  * A sign-in may come only from the top page or a frame with the top page's
@@ -53,137 +64,233 @@ export const HUB_LOGIN_PROMPT_TTL_MS = 2 * 60 * 1000;
 export function checkSenderFrame (sender: chrome.runtime.MessageSender): { ok: true } | { ok: false; error: 'cross_origin_frame' } {
   if (!sender.frameId) return { ok: true };
   const frame = originOfSender(sender);
-  const top = sender.tab && typeof sender.tab.url === 'string' ? originOfSender({ url: sender.tab.url }) : null;
+  const top = sender.tab ? originOfUrl(sender.tab.url) : null;
   return frame && top && frame === top ? { ok: true } : { ok: false, error: 'cross_origin_frame' };
 }
 
+function sessionStore (): chrome.storage.StorageArea | null {
+  return (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.session) || null;
+}
+
+/** Waiting sign-ins still inside their challenge's lifetime. */
+export function livePending (rows: unknown, now: number = Date.now()): PendingPassportRow[] {
+  if (!Array.isArray(rows)) return [];
+  return rows.filter((r): r is PendingPassportRow => !!r && typeof r === 'object' &&
+    typeof (r as PendingPassportRow).key === 'string' &&
+    Number((r as PendingPassportRow).expiresAt) > now);
+}
+
+export async function readPendingPassport (now: number = Date.now()): Promise<PendingPassportRow[]> {
+  const store = sessionStore();
+  if (!store) return [];
+  const got = await store.get(FABRIC_PENDING_PASSPORT_KEY);
+  return livePending(got && got[FABRIC_PENDING_PASSPORT_KEY], now);
+}
+
+async function writePendingPassport (rows: PendingPassportRow[]): Promise<void> {
+  const store = sessionStore();
+  if (!store) throw new Error('session storage unavailable');
+  await store.set({ [FABRIC_PENDING_PASSPORT_KEY]: rows });
+}
+
 /**
- * True while `current` is still waiting for the user: a new request is then
- * answered `busy` instead of replacing what the prompt shows.
+ * Record a challenge nonce; false when it was already seen (a page replaying a
+ * challenge it got answered once). Entries drop out when their challenge expires.
  */
-export function siteLoginPromptOpen (current: PendingSiteLoginRow | null, now: number = Date.now()): boolean {
-  if (!current) return false;
-  const expiresAt = Number(current.expiresAt) || (Number(current.createdAt) + HUB_LOGIN_PROMPT_TTL_MS);
-  return Number.isFinite(expiresAt) && expiresAt > now;
+export function rememberNonce (
+  seen: Record<string, number>,
+  nonce: string,
+  expiresAt: number,
+  now: number = Date.now()
+): { ok: boolean; seen: Record<string, number> } {
+  const next: Record<string, number> = {};
+  for (const [n, exp] of Object.entries(seen || {})) {
+    if (Number(exp) > now) next[n] = Number(exp);
+  }
+  if (next[nonce]) return { ok: false, seen: next };
+  const keys = Object.keys(next);
+  if (keys.length >= MAX_SEEN_NONCES) {
+    keys.sort((a, b) => next[a] - next[b]);
+    for (const k of keys.slice(0, keys.length - MAX_SEEN_NONCES + 1)) delete next[k];
+  }
+  next[nonce] = expiresAt;
+  return { ok: true, seen: next };
 }
 
-function pendingStore (): chrome.storage.StorageArea {
-  return chrome.storage.session || chrome.storage.local;
+async function claimNonce (nonce: string, expiresAt: number): Promise<boolean> {
+  const store = sessionStore();
+  if (!store) return false;
+  const got = await store.get(FABRIC_PASSPORT_SEEN_NONCES_KEY);
+  const seen = ((got && got[FABRIC_PASSPORT_SEEN_NONCES_KEY]) || {}) as Record<string, number>;
+  const out = rememberNonce(seen, nonce, expiresAt);
+  await store.set({ [FABRIC_PASSPORT_SEEN_NONCES_KEY]: out.seen });
+  return out.ok;
 }
 
-export async function readPendingSiteLogin (): Promise<PendingSiteLoginRow | null> {
-  const got = await pendingStore().get(FABRIC_PENDING_SITE_LOGIN_KEY);
-  return ((got && got[FABRIC_PENDING_SITE_LOGIN_KEY]) as PendingSiteLoginRow | undefined) || null;
-}
-
-export async function writePendingSiteLogin (row: PendingSiteLoginRow): Promise<void> {
-  await pendingStore().set({ [FABRIC_PENDING_SITE_LOGIN_KEY]: row });
-}
-
-export async function clearPendingSiteLogin (): Promise<void> {
-  await pendingStore().remove(FABRIC_PENDING_SITE_LOGIN_KEY);
-}
-
-/** Legacy `/sessions` login: the challenge must name this page's session and origin. */
-export function queueHubLogin (m: Record<string, unknown>, sender: chrome.runtime.MessageSender): Outcome {
-  const sessionId = typeof m.sessionId === 'string' ? m.sessionId.trim() : '';
-  const hubBase = typeof m.hubBase === 'string' ? m.hubBase.trim() : '';
-  const claimed = typeof m.origin === 'string' ? m.origin.trim() : '';
-  const loginMessage = typeof m.message === 'string' ? m.message : '';
-  const origin = originOfSender(sender);
-  if (!sessionId || !hubBase || !loginMessage || !origin) return { ok: false, error: 'invalid_site_login' };
-  if (claimed !== origin) return { ok: false, error: 'origin_mismatch' };
-  const challenge = checkHubLoginChallenge(loginMessage, { sessionId, origin });
-  if (!challenge.ok) return { ok: false, error: challenge.error };
-  return {
-    ok: true,
-    row: {
-      kind: 'hub-login',
-      sessionId,
-      hubBase,
-      origin,
-      message: loginMessage,
-      nonce: challenge.nonce,
-      pageOrigin: origin,
-      createdAt: Date.now(),
-      tabId: sender.tab?.id,
-      frameId: sender.frameId
-    }
-  };
-}
-
-/** Page `fabric:` `SiteLoginRequest`, bound to the frame's real origin. */
-export function queueFabricMessage (m: Record<string, unknown>, sender: chrome.runtime.MessageSender): Outcome {
+/**
+ * Read a page's challenge into a pending row. Pure: no storage.
+ * @param m Content-script message `{ requestId, challenge }`.
+ */
+export function buildPendingRow (
+  m: Record<string, unknown>,
+  sender: chrome.runtime.MessageSender,
+  now: number = Date.now()
+): { ok: true; row: PendingPassportRow } | Fail {
+  if (!sender.tab || typeof sender.tab.id !== 'number') return { ok: false, error: 'not_a_tab' };
+  const frame = checkSenderFrame(sender);
+  if (!frame.ok) return frame;
   const origin = originOfSender(sender);
   if (!origin) return { ok: false, error: 'origin_unknown' };
-  const read = readPageSiteLoginRequest(m.message, origin);
-  if (!read.ok) return { ok: false, error: read.error };
-  const r = read.request;
+  const requestId = typeof m.requestId === 'string' && /^[0-9a-f]{32}$/.test(m.requestId) ? m.requestId : '';
+  if (!requestId) return { ok: false, error: 'invalid_request' };
+  const read = readPageChallenge(m.challenge, origin, now);
+  if (!read.ok) return read;
+  const c = read.challenge;
+  const frameId = typeof sender.frameId === 'number' ? sender.frameId : 0;
   return {
     ok: true,
     row: {
-      kind: 'fabric',
-      origin: r.origin,
-      pageOrigin: r.origin,
-      nonce: r.nonce,
-      purpose: sanitizeSitePurpose(r.purpose),
-      expiresAt: r.expiresAt,
-      siteAuthor: r.siteAuthor,
-      requestUri: r.requestUri,
-      requestId: typeof m.id === 'string' ? m.id.slice(0, 128) : '',
-      sessionId: '',
-      hubBase: '',
-      message: '',
-      createdAt: Date.now(),
-      tabId: sender.tab?.id,
-      frameId: sender.frameId
+      key: `${sender.tab.id}:${frameId}`,
+      requestId,
+      tabId: sender.tab.id,
+      frameId,
+      tabTitle: sanitizeSitePurpose(sender.tab.title),
+      origin: c.origin,
+      challenge: c.uri,
+      challengeHash: c.hash,
+      nonce: c.nonce,
+      purpose: sanitizeSitePurpose(c.purpose),
+      network: c.network,
+      request: c.request,
+      siteAuthor: c.siteAuthor,
+      expiresAt: c.expiresAt,
+      createdAt: now
     }
   };
 }
 
-/** Send a result to the frame that asked (and only if it still has that origin). */
-export function notifySiteLoginPage (row: PendingSiteLoginRow, payload: Record<string, unknown>): void {
-  if (row.tabId == null) return;
-  const message = row.kind === 'fabric'
-    ? { type: FABRIC_MESSAGE_PAGE_RESULT, origin: row.origin, id: row.requestId || '', ...payload }
-    : { type: FABRIC_SITE_LOGIN_PAGE_RESULT, origin: row.origin, sessionId: row.sessionId, ...payload };
-  const sent = typeof row.frameId === 'number'
-    ? chrome.tabs.sendMessage(row.tabId, message, { frameId: row.frameId })
-    : chrome.tabs.sendMessage(row.tabId, message);
-  void Promise.resolve(sent).catch((err: unknown) => swallowNonFatal('site-login-page-result', err));
+/**
+ * Queue a challenge for the popup. A new challenge from the same frame
+ * replaces that frame's (the content script already cancelled its port).
+ */
+export async function queuePassportChallenge (
+  m: Record<string, unknown>,
+  sender: chrome.runtime.MessageSender
+): Promise<{ ok: true; row: PendingPassportRow } | Fail> {
+  const built = buildPendingRow(m, sender);
+  if (!built.ok) return built;
+  const row = built.row;
+  const others = (await readPendingPassport()).filter((r) => r.key !== row.key);
+  if (others.length >= MAX_PENDING_PASSPORT) return { ok: false, error: 'busy' };
+  if (!(await claimNonce(row.nonce, row.expiresAt))) return { ok: false, error: 'challenge_replayed' };
+  await writePendingPassport([...others, row]);
+  return { ok: true, row };
+}
+
+async function takePending (key: string, requestId?: string): Promise<PendingPassportRow | null> {
+  const rows = await readPendingPassport();
+  const row = rows.find((r) => r.key === key && (!requestId || r.requestId === requestId)) || null;
+  if (row) await writePendingPassport(rows.filter((r) => r !== row));
+  return row;
+}
+
+async function peekPending (key: string, requestId?: string): Promise<PendingPassportRow | null> {
+  const rows = await readPendingPassport();
+  return rows.find((r) => r.key === key && (!requestId || r.requestId === requestId)) || null;
+}
+
+/** Hand the result to the content script of that frame, which checks its origin and posts on the page's port. */
+export function deliverToPage (row: PendingPassportRow, payload: { ok: true; assertion: string } | { ok: false; error: string }): void {
+  const message = {
+    type: FABRIC_PASSPORT_PAGE_RESULT,
+    origin: row.origin,
+    requestId: row.requestId,
+    ...payload
+  };
+  void Promise.resolve(chrome.tabs.sendMessage(row.tabId, message, { frameId: row.frameId }))
+    .catch((err: unknown) => swallowNonFatal('passport-page-result', err));
+}
+
+/** What the background checks an assertion against before the page sees it. */
+function expectationsFor (row: PendingPassportRow) {
+  return {
+    origin: row.origin,
+    nonce: row.nonce,
+    challengeHash: row.challengeHash,
+    challengeExpiresAt: row.expiresAt,
+    network: row.network,
+    allow: row.request
+  };
 }
 
 /**
- * Popup asked a linked desktop app to sign the pending login. Runs here so the
- * answer is delivered even after the popup closes.
+ * Popup answered a pending sign-in: an assertion it signed, or a refusal.
+ * @param m `{ key, requestId, ok, assertion? , error? }`
  */
-export async function completeWithDesktop (m: Record<string, unknown>): Promise<{ ok: true } | { ok: false; error: string }> {
-  const row = await readPendingSiteLogin();
+export async function answerPassport (m: Record<string, unknown>): Promise<{ ok: true } | Fail> {
+  const key = typeof m.key === 'string' ? m.key : '';
+  const requestId = typeof m.requestId === 'string' ? m.requestId : undefined;
+  if (m.ok !== true) {
+    const row = await takePending(key, requestId);
+    if (!row) return { ok: false, error: 'no pending sign-in' };
+    deliverToPage(row, { ok: false, error: m.error === 'rejected' ? 'rejected' : 'cancelled' });
+    return { ok: true };
+  }
+  const row = await peekPending(key, requestId);
   if (!row) return { ok: false, error: 'no pending sign-in' };
+  const verified = verifyPageAssertion(m.assertion, { ...expectationsFor(row), signers: [PASSPORT_SIGNER] });
+  if (!verified.ok) return verified;
+  if (Date.now() >= row.expiresAt) {
+    await takePending(row.key, row.requestId);
+    deliverToPage(row, { ok: false, error: 'expired' });
+    return { ok: false, error: 'the sign-in expired' };
+  }
+  if (!(await takePending(row.key, row.requestId))) return { ok: false, error: 'no pending sign-in' };
+  deliverToPage(row, { ok: true, assertion: String(m.assertion) });
+  return { ok: true };
+}
+
+/**
+ * Popup asked a pinned desktop app to answer a pending sign-in. Runs here so
+ * the answer still reaches the page after the popup closes. The desktop and
+ * the key it must sign with come from the pin, never from the message.
+ * @param m `{ key, requestId, base, signRequestUri, expiresAt }`
+ */
+export async function completeWithDesktop (m: Record<string, unknown>): Promise<{ ok: true } | Fail> {
+  const key = typeof m.key === 'string' ? m.key : '';
+  const requestId = typeof m.requestId === 'string' ? m.requestId : undefined;
   const base = typeof m.base === 'string' ? m.base : '';
   const signRequestUri = typeof m.signRequestUri === 'string' ? m.signRequestUri : '';
-  const desktopPubkey = typeof m.desktopPubkey === 'string' ? m.desktopPubkey : '';
   const expiresAt = Number(m.expiresAt);
-  if (!base || !signRequestUri || !desktopPubkey || !Number.isFinite(expiresAt)) {
-    return { ok: false, error: 'invalid desktop sign request' };
-  }
-  if (typeof m.nonce === 'string' && m.nonce !== row.nonce) return { ok: false, error: 'the pending sign-in changed' };
+  if (!base || !signRequestUri || !Number.isFinite(expiresAt)) return { ok: false, error: 'invalid desktop sign request' };
+  const row = await peekPending(key, requestId);
+  if (!row) return { ok: false, error: 'no pending sign-in' };
+  const pin = (await readDesktopPins()).find((p) => p.base === base);
+  if (!pin) return { ok: false, error: 'that desktop app is not linked' };
+  if (row.network && row.network !== pin.network) return { ok: false, error: `that desktop app signs on ${pin.network}` };
 
   const answered = await requestDesktopSignature({ base, signRequestUri, expiresAt });
   if (!answered.ok) return { ok: false, error: answered.error };
-  const verified = verifyDesktopSiteLogin(answered.uri, { origin: row.origin, nonce: row.nonce, pubkey: desktopPubkey });
-  if (!verified.ok) return { ok: false, error: verified.error };
-
-  if (row.kind === 'hub-login') {
-    const posted = await postFabricSiteLogin(row.hubBase, row.sessionId, answered.uri);
-    if (!posted.ok) return { ok: false, error: posted.error };
-    notifySiteLoginPage(row, { ok: true, identity: { id: verified.identity.id, xpub: verified.identity.xpub } });
-  } else {
-    notifySiteLoginPage(row, { ok: true, message: answered.uri, signer: verified.signer });
+  const verified = verifyPageAssertion(answered.uri, {
+    ...expectationsFor(row),
+    signers: DESKTOP_SIGNERS.includes(pin.signer) ? [pin.signer] : [...DESKTOP_SIGNERS],
+    pubkey: pin.pubkey,
+    device: pin.device.pubkey
+  });
+  if (!verified.ok) return verified;
+  const taken = await takePending(row.key, row.requestId);
+  if (!taken) return { ok: false, error: 'no pending sign-in' };
+  if (Date.now() >= row.expiresAt) {
+    deliverToPage(row, { ok: false, error: 'expired' });
+    return { ok: false, error: 'the sign-in expired' };
   }
-  const current = await readPendingSiteLogin();
-  if (current && current.nonce === row.nonce && current.createdAt === row.createdAt) {
-    await clearPendingSiteLogin();
-  }
+  deliverToPage(row, { ok: true, assertion: answered.uri });
   return { ok: true };
+}
+
+/** Drop a closed tab's sign-ins (its ports are gone). */
+export async function dropTabPending (tabId: number): Promise<void> {
+  const rows = await readPendingPassport();
+  const next = rows.filter((r) => r.tabId !== tabId);
+  if (next.length !== rows.length) await writePendingPassport(next);
 }
