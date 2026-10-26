@@ -1,8 +1,9 @@
 'use strict';
 
 /**
- * BIP340 Schnorr client-signed device-link bodies — same construction as Hub
- * `verifyIdentitySchnorr` — and the `fabric:` `/sessions` site-login POST.
+ * BIP340 Schnorr client-signed bodies — same construction as Hub
+ * `verifyIdentitySchnorr`, always over a purpose tag — and the `fabric:`
+ * `/sessions` site-login POST.
  *
  * Prefer HD material (`Key` / mnemonic / xprv) so signing uses Fabric
  * `Identity.fabricKey`. Leaf `{ privateKeyHex, xpub }` (Passport session) is
@@ -15,7 +16,8 @@ import { Buffer } from 'buffer';
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const {
   buildFabricIdentitySignedPayload,
-  parseDesktopLoginMessage
+  parseDesktopLoginMessage,
+  resolveFabricSigningIdentity
 } = require('@fabric/http/functions/fabricSiteLoginVerify');
 
 export type SiteLoginIdentity = {
@@ -35,29 +37,48 @@ export type FabricSignInput =
   | { privateKeyHex: string; xpub: string }
   | { private: string; xpub?: string };
 
+export type FabricSigningIdentity = {
+  id: string;
+  xpub: string;
+  pubkeyHex: string;
+};
+
+function toSignInput (privateKeyHexOrInput: string | FabricSignInput, xpub?: string): FabricSignInput {
+  if (typeof privateKeyHexOrInput !== 'string') return privateKeyHexOrInput;
+  if (typeof xpub !== 'string' || !xpub.startsWith('xpub')) {
+    throw new Error('xpub required for a Fabric identity');
+  }
+  return { privateKeyHex: privateKeyHexOrInput, xpub };
+}
+
+/** Fabric id, xpub, and compressed pubkey of the signing key, without signing anything. */
+export function fabricSigningIdentity (
+  privateKeyHexOrInput: string | FabricSignInput,
+  xpub?: string
+): FabricSigningIdentity {
+  const resolved = resolveFabricSigningIdentity(toSignInput(privateKeyHexOrInput, xpub));
+  const key = resolved.fabricKey;
+  const pubkeyHex = String(key.pubkey || '').toLowerCase();
+  if (!/^[a-f0-9]{66}$/.test(pubkeyHex)) throw new Error('Could not derive Fabric public key');
+  return { id: String(resolved.identityId), xpub: String(key.xpub || ''), pubkeyHex };
+}
+
 /**
- * Build a Hub-verifiable client signature body.
+ * Sign `message` under the purpose `tag` (a `@fabric/core/functions/signingTags`
+ * value) and return a Hub-verifiable body.
  *
  * Overloads:
- * - `(message, privateKeyHex, xpub)` — Passport session leaf (already at Fabric path)
- * - `(message, { mnemonic|xprv|privateKeyHex+xpub })` — preferred structured input
+ * - `(message, tag, privateKeyHex, xpub)` — Passport session leaf (already at Fabric path)
+ * - `(message, tag, { mnemonic|xprv|privateKeyHex+xpub })` — preferred structured input
  */
-export function buildClientSignedLoginBody (
+export function buildClientSignedBody (
   message: string,
+  tag: string,
   privateKeyHexOrInput: string | FabricSignInput,
   xpub?: string
 ): SiteLoginSignatureBody {
-  let input: FabricSignInput;
-  if (typeof privateKeyHexOrInput === 'string') {
-    if (typeof xpub !== 'string' || !xpub.startsWith('xpub')) {
-      throw new Error('xpub required for site login identity');
-    }
-    input = { privateKeyHex: privateKeyHexOrInput, xpub };
-  } else {
-    input = privateKeyHexOrInput;
-  }
-
-  const payload = buildFabricIdentitySignedPayload(input, message);
+  if (typeof tag !== 'string' || !tag) throw new Error('signing tag required');
+  const payload = buildFabricIdentitySignedPayload(toSignInput(privateKeyHexOrInput, xpub), message, tag);
   return {
     signature: payload.signature,
     pubkeyHex: payload.pubkeyHex,

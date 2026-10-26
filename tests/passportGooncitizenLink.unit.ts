@@ -16,8 +16,10 @@ const Key = require('@fabric/core/types/key');
 const Identity = require('@fabric/core/types/identity');
 import {
   completeDeviceLinkAsResponder,
+  countersignDeviceLink,
   startDeviceLinkAsInitiator,
-  tickDeviceLinkAsInitiator
+  tickDeviceLinkAsInitiator,
+  verifyPendingDeviceLink
 } from '../src/utils/fabricDeviceLinkSign';
 import { fetchPendingDeviceLink } from '../src/utils/fabricDeviceLinkFetch';
 import { publishIdentityCrossSignKind } from '../src/utils/identityCrossSignPublish';
@@ -137,6 +139,8 @@ describe('Passport ↔ GoonCitizen LiveRelay (desktop hub + Android)', function 
     assert.strictEqual(pending.status, 200, JSON.stringify(pending.j));
     assert.strictEqual(pending.j.status, 'pending');
 
+    assert.strictEqual(pending.j.origin, hub.origin);
+
     const accept = await jsonFetch(`${phone.origin}/services/star-citizen/device-links/accept`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
@@ -145,13 +149,14 @@ describe('Passport ↔ GoonCitizen LiveRelay (desktop hub + Android)', function 
         sessionId: offer.sessionId,
         nonce: pending.j.nonce,
         label: pending.j.label,
+        origin: pending.j.origin,
         initiator: pending.j.initiator
       })
     });
     assert.strictEqual(accept.status, 200, JSON.stringify(accept.j));
     assert.strictEqual(accept.j.ok, true);
 
-    const linked = await tickDeviceLinkAsInitiator({
+    const tick = await tickDeviceLinkAsInitiator({
       privateKeyHex: passport.privateKeyHex,
       xpub: passport.xpub,
       sessionId: offer.sessionId,
@@ -160,17 +165,25 @@ describe('Passport ↔ GoonCitizen LiveRelay (desktop hub + Android)', function 
       nonce: offer.nonce,
       label: offer.label
     });
-    assert.strictEqual(linked.ok, true, linked.ok === false ? linked.error : '');
-    if (!linked.ok) return;
-    assert.strictEqual(linked.status, 'linked');
-    assert.ok(linked.peerPubkey);
+    assert.strictEqual(tick.ok, true, tick.ok === false ? tick.error : '');
+    if (!tick.ok || tick.status !== 'accepted') throw new Error(`expected accepted, got ${JSON.stringify(tick)}`);
+    const accepted = tick as Extract<typeof tick, { status: 'accepted' }>;
+    assert.strictEqual(accepted.responder.pubkeyHex, phoneIdent.pubkey.toLowerCase());
+
+    const countersigned = await countersignDeviceLink({
+      privateKeyHex: passport.privateKeyHex,
+      xpub: passport.xpub,
+      hubBase: offer.hubBase,
+      accepted
+    });
+    assert.strictEqual(countersigned.ok, true, countersigned.ok === false ? countersigned.error : '');
 
     const signed = await publishIdentityCrossSignKind({
       hubBase: phone.origin,
       privateKeyHex: passport.privateKeyHex,
       xpub: passport.xpub,
       peerPubkey: phoneIdent.pubkey,
-      nonce: offer.nonce
+      binding: { sessionId: offer.sessionId, nonce: offer.nonce, origin: offer.origin }
     });
     assert.strictEqual(signed.ok, true, signed.ok === false ? signed.error : '');
 
@@ -182,7 +195,7 @@ describe('Passport ↔ GoonCitizen LiveRelay (desktop hub + Android)', function 
 
   it('lets Passport accept a GoonCitizen desktop offer on the same hub', async function () {
     assert.ok(hub);
-    const { startDeviceLinkOffer, tickDeviceLinkOffer } = require(
+    const { startDeviceLinkOffer, tickDeviceLinkOffer, confirmDeviceLinkOffer } = require(
       path.join(GOON_ROOT, 'functions/fabricDeviceLinkOffer')
     );
     const desktop = createIdentity();
@@ -197,9 +210,12 @@ describe('Passport ↔ GoonCitizen LiveRelay (desktop hub + Android)', function 
     const fetched = await fetchPendingDeviceLink(hub.origin, offer.sessionId);
     assert.strictEqual(fetched.ok, true, fetched.ok === false ? fetched.error : '');
     if (!fetched.ok) return;
+    const shown = await verifyPendingDeviceLink(fetched);
+    assert.strictEqual(shown.ok, true, shown.ok === false ? shown.error : '');
+    if (!shown.ok) return;
 
     const accepted = await completeDeviceLinkAsResponder(
-      fetched,
+      shown.offer,
       passport.privateKeyHex,
       passport.xpub
     );
@@ -207,15 +223,18 @@ describe('Passport ↔ GoonCitizen LiveRelay (desktop hub + Android)', function 
 
     const tick = await tickDeviceLinkOffer(desktop, offer);
     assert.strictEqual(tick.ok, true, tick.error);
-    assert.strictEqual(tick.status, 'linked');
-    assert.ok(tick.peerPubkey);
+    assert.strictEqual(tick.status, 'accepted');
+    const linked = await confirmDeviceLinkOffer(desktop, offer, tick.responder.id);
+    assert.strictEqual(linked.ok, true, linked.error);
+    assert.strictEqual(linked.status, 'linked');
+    assert.ok(linked.peerPubkey);
 
     const signed = await publishIdentityCrossSignKind({
       hubBase: hub.origin,
       privateKeyHex: passport.privateKeyHex,
       xpub: passport.xpub,
       peerPubkey: desktop.pubkey,
-      nonce: offer.nonce
+      binding: { sessionId: offer.sessionId, nonce: offer.nonce, origin: offer.origin }
     });
     assert.strictEqual(signed.ok, true, signed.ok === false ? signed.error : '');
     assert.strictEqual(SIGN_TYPE, 'IdentityCrossSign');

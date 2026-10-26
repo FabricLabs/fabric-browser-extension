@@ -25,26 +25,32 @@ const FABRIC_HTTP_ASSETS_ALIASES = Array.from(new Set([
   path.resolve(__dirname, '../fabric-http/assets')
 ].filter((p) => fs.existsSync(p))));
 
-/** Core tree for `fabric:` site login (same order as `src/utils/loadFabricSiteLogin.js`). */
-function resolveFabricSiteLoginCoreRoot () {
+function fabricCoreRoots (release) {
   const roots = [];
   if (process.env.FABRIC_CORE) roots.push(path.resolve(process.env.FABRIC_CORE));
-  roots.push(path.resolve(__dirname, '../fabric-clean'));
+  // Release builds stay reproducible: no sibling checkout unless FABRIC_CORE asks for one.
+  if (process.env.FABRIC_CORE || !release) roots.push(path.resolve(__dirname, '../fabric-clean'));
   roots.push(path.resolve(__dirname, 'node_modules/@fabric/core'));
-  for (const root of roots) {
-    if (fs.existsSync(path.join(root, 'functions', 'fabricSiteLogin.js'))) return root;
+  return roots;
+}
+/** Core tree for `fabric:` site login (same order as `src/utils/loadFabricSiteLogin.js`). */
+function resolveFabricSiteLoginCoreRoot (release) {
+  for (const root of fabricCoreRoots(release)) {
+    if (fs.existsSync(path.join(root, 'functions', 'fabricSiteLogin.js'))) {
+      console.log(`[webpack] fabric: site login core: ${root}`);
+      return root;
+    }
   }
   throw new Error('fabric: site login needs @fabric/core with functions/fabricSiteLogin.js (set FABRIC_CORE or clone ../fabric-clean)');
 }
 /** Core tree for named federations (same order as `src/utils/loadFabricFederation.js`). */
-function resolveFabricFederationCoreRoot () {
-  const roots = [];
-  if (process.env.FABRIC_CORE) roots.push(path.resolve(process.env.FABRIC_CORE));
-  roots.push(path.resolve(__dirname, '../fabric-clean'));
-  roots.push(path.resolve(__dirname, 'node_modules/@fabric/core'));
-  for (const root of roots) {
+function resolveFabricFederationCoreRoot (release) {
+  for (const root of fabricCoreRoots(release)) {
     const file = path.join(root, 'types', 'federation.js');
-    if (fs.existsSync(file) && fs.readFileSync(file, 'utf8').includes('MESSAGE_TYPES')) return root;
+    if (fs.existsSync(file) && fs.readFileSync(file, 'utf8').includes('MESSAGE_TYPES')) {
+      console.log(`[webpack] federations core: ${root}`);
+      return root;
+    }
   }
   throw new Error('Federations need @fabric/core whose types/federation has the member messages (set FABRIC_CORE or clone ../fabric-clean)');
 }
@@ -54,8 +60,9 @@ const CopyPlugin = require('copy-webpack-plugin');
 const ProgressBar = require('progress-bar-webpack-plugin');
 const TerserPlugin = require('terser-webpack-plugin');
 
-module.exports = (env) => {
+module.exports = (env, argv) => {
   const isProduction = (env && env.NODE_ENV === 'production') || process.env.NODE_ENV === 'production';
+  const release = isProduction || !!(argv && argv.mode === 'production');
 
   return {
     mode: isProduction ? 'production' : 'development',
@@ -134,13 +141,15 @@ module.exports = (env) => {
       },
       alias: {
         'process/browser': require.resolve('process/browser'),
+        // Every `require('buffer')` (and the provided global) gets the base64url-capable polyfill.
+        buffer$: path.resolve(__dirname, 'shims/buffer.browser.js'),
         // Package exports only expose ./constants for `require`; map explicitly for webpack/browser.
         '@fabric/core/constants': path.resolve(__dirname, 'node_modules/@fabric/core/constants.js'),
         '@fabric/core/types/message': path.resolve(__dirname, 'node_modules/@fabric/core/types/message.js'),
         '@fabric/http/assets': path.resolve(__dirname, 'node_modules/@fabric/http/assets'),
-        'fabric-site-login-core': resolveFabricSiteLoginCoreRoot(),
+        'fabric-site-login-core': resolveFabricSiteLoginCoreRoot(release),
         [path.resolve(__dirname, 'src/utils/loadFabricSiteLogin.js')]: path.resolve(__dirname, 'src/utils/fabricSiteLoginCore.browser.js'),
-        'fabric-federation-core': resolveFabricFederationCoreRoot(),
+        'fabric-federation-core': resolveFabricFederationCoreRoot(release),
         [path.resolve(__dirname, 'src/utils/loadFabricFederation.js')]: path.resolve(__dirname, 'src/utils/fabricFederationCore.browser.js')
       }
     },

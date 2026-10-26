@@ -94,6 +94,26 @@ async function fetchWithTimeout (fetchImpl: FetchLike, url: string, init: Reques
   }
 }
 
+/** Chrome ends an MV3 service worker whose fetch waits over 30 s; any extension API call resets that timer. */
+export const KEEPALIVE_EVERY_MS = 20000;
+
+async function keepWorkerAlive<T> (work: Promise<T>): Promise<T> {
+  const runtime = typeof chrome !== 'undefined' ? chrome.runtime : undefined;
+  if (!runtime || typeof runtime.getPlatformInfo !== 'function') return work;
+  const timer = setInterval(() => {
+    try {
+      runtime.getPlatformInfo(() => { void runtime.lastError; });
+    } catch {
+      /* extension context gone; the fetch fails on its own */
+    }
+  }, KEEPALIVE_EVERY_MS);
+  try {
+    return await work;
+  } finally {
+    clearInterval(timer);
+  }
+}
+
 /**
  * Ask each base who it is. Locked or unreachable desktops are skipped.
  * @param pubkey Passport pubkey (compressed hex) so each desktop says whether it is linked.
@@ -155,13 +175,13 @@ export async function requestDesktopSignature (opts: {
   const now = Number.isFinite(opts.now) ? Number(opts.now) : Date.now();
   const waitMs = Math.max(1000, opts.expiresAt - now + 5000);
   try {
-    const res = await fetchWithTimeout(fetchImpl, `${base}${FABRIC_SIGN_PATH}`, {
+    const res = await keepWorkerAlive(fetchWithTimeout(fetchImpl, `${base}${FABRIC_SIGN_PATH}`, {
       method: 'POST',
       headers: { Accept: 'application/json', 'Content-Type': 'text/plain;charset=utf-8' },
       body: opts.signRequestUri,
       cache: 'no-store',
       credentials: 'omit'
-    }, waitMs);
+    }, waitMs));
     const body = await res.json().catch(() => ({})) as Record<string, unknown>;
     if (!res.ok || body.ok !== true || typeof body.fabric !== 'string') {
       return {
@@ -194,13 +214,13 @@ export async function requestDesktopLink (opts: {
   if (!/^[0-9a-f]{48}$/i.test(String(opts.sessionId || ''))) return { ok: false, error: 'invalid link session' };
   const fetchImpl = opts.fetchImpl || defaultFetch();
   try {
-    const res = await fetchWithTimeout(fetchImpl, `${base}${FABRIC_LINK_PATH}`, {
+    const res = await keepWorkerAlive(fetchWithTimeout(fetchImpl, `${base}${FABRIC_LINK_PATH}`, {
       method: 'POST',
       headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
       body: JSON.stringify({ sessionId: opts.sessionId }),
       cache: 'no-store',
       credentials: 'omit'
-    }, opts.timeoutMs || 150000);
+    }, opts.timeoutMs || 150000));
     const body = await res.json().catch(() => ({})) as Record<string, unknown>;
     if (!res.ok || body.ok !== true) {
       return {

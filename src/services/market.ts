@@ -14,7 +14,7 @@
  * free blobs (rate 0) are requested immediately through `requestBlob`.
  */
 
-import { DocumentOfferBook, type OfferRow, effectiveLatencyMs } from '../types/offerBook';
+import { DocumentOfferBook, MAX_DOCUMENT_BLOBS, type OfferRow, effectiveLatencyMs } from '../types/offerBook';
 
 export interface MarketAgentSettings {
   budgetSats?: number;
@@ -221,6 +221,9 @@ export class MarketAgent {
       return { ok: false, plan, costSats: 0, blobTotal: want.blobTotal || 0, error };
     }
     const blobTotal = want.blobTotal || Number(offers.find((o) => o.blobTotal && o.blobTotal > 0)?.blobTotal) || 1;
+    if (!Number.isInteger(blobTotal) || blobTotal > MAX_DOCUMENT_BLOBS) {
+      return { ok: false, plan, costSats: 0, blobTotal: 0, error: `unsupported blob count ${blobTotal}` };
+    }
     const weights = this.weights();
     const used: string[] = [];
     for (let i = 0; i < blobTotal; i++) {
@@ -252,17 +255,25 @@ export class MarketAgent {
       if (!planned.ok) { want.lastError = planned.error || 'no plan'; summary.skipped++; continue; }
       summary.planned++;
       const cap = this.planCap(want);
-      if (planned.costSats > cap) {
-        want.lastError = `plan costs ${planned.costSats} sats > cap ${cap}`;
+      const live = new Set(Array.from(this.sessions.values())
+        .filter((s) => s.merkleRootHex === want.merkleRootHex && s.status !== 'failed')
+        .map((s) => s.blobIndex));
+      let pendingCost = 0;
+      for (const [index, offer] of planned.plan) {
+        if (!live.has(index)) pendingCost += Math.max(0, Math.floor(Number(offer.rateSats) || 0));
+      }
+      if (pendingCost > cap) {
+        want.lastError = `plan costs ${pendingCost} sats > cap ${cap}`;
         summary.skipped++;
         continue;
       }
       want.lastError = null;
+      let openedHere = 0;
       for (const [index, offer] of planned.plan.entries()) {
-        const session = this.openSession(want, offer, index);
-        if (session) summary.opened++;
+        if (this.openSession(want, offer, index)) openedHere++;
       }
-      if (summary.opened) want.status = 'buying';
+      summary.opened += openedHere;
+      if (openedHere) want.status = 'buying';
     }
     return summary;
   }
@@ -331,7 +342,13 @@ export class MarketAgent {
       this.emit('sessionComplete', s);
     }
     const want = this.wants.get(root);
-    if (want && want.sessions.every((id) => this.sessions.get(id)?.status === 'complete')) want.status = 'complete';
+    if (want) {
+      const live = want.sessions.map((id) => this.sessions.get(id)).filter((s): s is MarketSession => !!s && s.status !== 'failed');
+      const done = new Set(live.filter((s) => s.status === 'complete').map((s) => s.blobIndex));
+      if (live.length && live.every((s) => s.status === 'complete') && (want.blobTotal == null || done.size >= want.blobTotal)) {
+        want.status = 'complete';
+      }
+    }
   }
 
   /** Delivery failed for a blob: penalise the provider locally and re-plan later. */

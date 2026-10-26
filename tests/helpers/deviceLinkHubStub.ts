@@ -2,7 +2,8 @@
 
 /**
  * In-memory Hub `/device-links` + `/identity/cross-sign` for Passport client tests.
- * Verifies BIP340 offer / link signatures the same way `@fabric/http` does.
+ * Verifies tagged BIP340 offer / link signatures (v3) the same way `@fabric/http`
+ * does, and serves the signatures on GET so clients can check them.
  */
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -10,7 +11,9 @@ const { verifyIdentitySchnorr } = require('@fabric/http/functions/fabricSiteLogi
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const {
   buildDeviceLinkMessage,
-  buildDeviceLinkOfferMessage
+  buildDeviceLinkOfferMessage,
+  DEVICE_LINK_OFFER_TAG,
+  DEVICE_LINK_TAG
 } = require('@fabric/http/functions/fabricDeviceLinkMessages');
 
 export type StubSession = {
@@ -19,8 +22,8 @@ export type StubSession = {
   nonce: string;
   label: string;
   status: 'awaiting_offer' | 'pending' | 'accepted' | 'linked';
-  initiator: { id: string; xpub: string; pubkeyHex: string };
-  responder: { id: string; xpub: string; pubkeyHex: string } | null;
+  initiator: { id: string; xpub: string; pubkeyHex: string; offerSignature?: string; countersignature?: string };
+  responder: { id: string; xpub: string; pubkeyHex: string; signature: string } | null;
   linkMessage: string | null;
   offerMessage: string;
 };
@@ -128,11 +131,12 @@ export function installDeviceLinkHubStub (hubOrigin = 'https://relay.goon.vc'): 
       const verified = verifyIdentitySchnorr(session.offerMessage, signature, pubkeyHex, {
         id: initiatorId,
         xpub: identity.xpub
-      });
+      }, DEVICE_LINK_OFFER_TAG);
       if (!verified.ok) {
         return jsonResponse(400, { ok: false, error: verified.error || 'invalid offer signature' });
       }
       session.initiator.pubkeyHex = pubkeyHex.toLowerCase();
+      session.initiator.offerSignature = signature.toLowerCase();
       session.status = 'pending';
       return jsonResponse(200, {
         ok: true,
@@ -163,19 +167,21 @@ export function installDeviceLinkHubStub (hubOrigin = 'https://relay.goon.vc'): 
           session.nonce,
           session.initiator.id,
           String(identity.id),
-          session.label
+          session.label,
+          session.origin
         );
         const verified = verifyIdentitySchnorr(linkMessage, signature, pubkeyHex, {
           id: identity.id,
           xpub: identity.xpub
-        });
+        }, DEVICE_LINK_TAG);
         if (!verified.ok) {
           return jsonResponse(400, { ok: false, error: verified.error || 'invalid responder signature' });
         }
         session.responder = {
           id: String(identity.id),
           xpub: String(identity.xpub),
-          pubkeyHex: pubkeyHex.toLowerCase()
+          pubkeyHex: pubkeyHex.toLowerCase(),
+          signature: signature.toLowerCase()
         };
         session.linkMessage = linkMessage;
         session.status = 'accepted';
@@ -185,13 +191,17 @@ export function installDeviceLinkHubStub (hubOrigin = 'https://relay.goon.vc'): 
         if (!session.linkMessage) {
           return jsonResponse(409, { ok: false, error: 'responder has not accepted yet' });
         }
+        if (identity.id !== session.initiator.id || pubkeyHex.toLowerCase() !== session.initiator.pubkeyHex) {
+          return jsonResponse(400, { ok: false, error: 'initiator does not match the offer' });
+        }
         const verified = verifyIdentitySchnorr(session.linkMessage, signature, pubkeyHex, {
           id: identity.id,
           xpub: identity.xpub
-        });
+        }, DEVICE_LINK_TAG);
         if (!verified.ok) {
           return jsonResponse(400, { ok: false, error: verified.error || 'invalid initiator signature' });
         }
+        session.initiator.countersignature = signature.toLowerCase();
         session.status = 'linked';
         return jsonResponse(200, {
           ok: true,
@@ -224,6 +234,7 @@ export function installDeviceLinkHubStub (hubOrigin = 'https://relay.goon.vc'): 
         origin: session.origin,
         nonce: session.nonce,
         label: session.label,
+        offerMessage: session.status === 'linked' ? undefined : session.offerMessage,
         initiator: session.initiator,
         responder: session.responder,
         linkMessage: session.linkMessage

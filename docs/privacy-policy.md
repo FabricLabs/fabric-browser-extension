@@ -29,7 +29,7 @@ The following is stored in Chromium extension storage on **your** machine (encry
 
 Passport does **not** collect health information, location, general browsing history, page HTML, cookies from unrelated sites, or advertising identifiers.
 
-The content script runs on HTTPS pages (and listed loopback Hub ports) so a Fabric site can `postMessage` a login or device-link request. It does **not** scrape the page. It ignores messages that are not Fabric site-login, device-link, or Hub mesh-bridge messages.
+The content script runs on HTTPS pages and on loopback addresses (`localhost`, `127.0.0.1`, `[::1]`, any port) so a Fabric site can `postMessage` a login or device-link request. It does **not** scrape the page. It ignores messages that are not Fabric site-login, device-link, or Hub mesh-bridge messages.
 
 ## 3. Information sent to other computers
 
@@ -39,7 +39,7 @@ Passport talks to the network only when you use a feature that needs it:
 2. **The website that asked you to sign in**, only after you click **Approve & sign** (or **Approve & link**). The payload is a BIP340 signature plus public identity material — not your seed.
 3. **Chrome / Google** as part of installing or updating the extension from the Chrome Web Store. Fabric Labs does not receive that telemetry.
 
-Cleartext `http://` is allowed only for **loopback** (`localhost` / `127.0.0.1`) so you can develop against a local Hub. Public hubs must be HTTPS.
+Public hubs must be HTTPS. Cleartext `http://` is allowed for **loopback** (`localhost` / `127.0.0.1` / `[::1]`) so you can develop against a local Hub, and for a Hub on your **local network** that you add by exact origin under **Trusted hubs** — Passport then asks Chrome for access to that one host (optional `http://*/*` host permission, granted per host) and talks to it only after you accept. Traffic to such a Hub is not encrypted in transit; add only Hubs on networks you trust.
 
 We do **not** sell user data. We do **not** use user data for advertising, credit-worthiness, or lending. We do **not** transfer user data to data brokers.
 

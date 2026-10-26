@@ -1,6 +1,7 @@
 'use strict';
 
 import assert from 'assert';
+import sinon from 'sinon';
 import {
   buildDesktopSignRequest,
   checkHubLoginChallenge,
@@ -12,6 +13,7 @@ import {
 } from '../src/utils/fabricSiteMessage';
 import {
   discoverDesktopSigners,
+  KEEPALIVE_EVERY_MS,
   normalizeDesktopSignerBase,
   parseDesktopSignerBases,
   requestDesktopLink,
@@ -160,6 +162,30 @@ describe('fabricDesktopSigner', function () {
     if (!refused.ok) assert.strictEqual(refused.error, 'declined on the desktop');
     const remote = await requestDesktopSignature({ base: 'https://hub.fabric.pub', signRequestUri: 'fabric:abc', expiresAt: Date.now() + 1000 });
     assert.ok(!remote.ok);
+  });
+
+  it('keeps the extension worker alive while the desktop user decides', async function () {
+    const clock = sinon.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'setTimeout', 'clearTimeout', 'Date'] });
+    let pings = 0;
+    (globalThis as { chrome?: unknown }).chrome = { runtime: { getPlatformInfo: (cb: () => void) => { pings++; cb(); } } };
+    try {
+      let answer: (r: Response) => void = () => {};
+      const pending = requestDesktopSignature({
+        base: '8080',
+        signRequestUri: 'fabric:abc',
+        expiresAt: Date.now() + 120000,
+        fetchImpl: () => new Promise<Response>((resolve) => { answer = resolve; })
+      });
+      await clock.tickAsync(KEEPALIVE_EVERY_MS * 3 + 1);
+      assert.strictEqual(pings, 3);
+      answer(jsonResponse(200, { ok: true, fabric: 'fabric:def' }));
+      assert.deepStrictEqual(await pending, { ok: true, uri: 'fabric:def' });
+      await clock.tickAsync(KEEPALIVE_EVERY_MS * 3);
+      assert.strictEqual(pings, 3);
+    } finally {
+      clock.restore();
+      delete (globalThis as { chrome?: unknown }).chrome;
+    }
   });
 
   it('asks a loopback desktop to accept a link session and reports refusals', async function () {

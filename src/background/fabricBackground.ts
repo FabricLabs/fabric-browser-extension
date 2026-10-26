@@ -118,6 +118,7 @@ function registerMeshPort (port: chrome.runtime.Port): void {
 }
 
 export function registerFabricBackground (): void {
+  setMarketMeshPoster(postToMesh);
   const sw = globalThis as unknown as ExtensionServiceWorkerGlobal;
 
   sw.addEventListener('install', () => {

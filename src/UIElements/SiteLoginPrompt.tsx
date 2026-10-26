@@ -15,11 +15,13 @@ import { parseHubLoginChallenge, postFabricSiteLogin } from '../utils/fabricSite
 import {
   buildDesktopSignRequest,
   passportSigningKey,
+  sanitizeSitePurpose,
   shortKey,
   signPassportSiteLogin
 } from '../utils/fabricSiteMessage';
 import { discoverDesktopSigners, type DesktopSigner } from '../utils/fabricDesktopSigner';
 import { swallowNonFatal } from '../utils/nonFatal';
+import { useArmDelay } from './useArmDelay';
 
 export type PendingSiteLogin = {
   kind?: 'hub-login' | 'fabric';
@@ -83,6 +85,7 @@ export default function SiteLoginPrompt (props: Props): React.ReactElement | nul
   const [error, setError] = useState<string | null>(null);
   const [desktops, setDesktops] = useState<DesktopSigner[]>([]);
   const [choice, setChoice] = useState<string>('passport');
+  const armed = useArmDelay(pending ? `${pending.origin}|${pending.nonce || ''}|${pending.sessionId}|${pending.createdAt}` : '');
 
   const passport = useMemo(() => {
     if (!privateKeyHex) return null;
@@ -151,7 +154,7 @@ export default function SiteLoginPrompt (props: Props): React.ReactElement | nul
     }
     const challenge = parseHubLoginChallenge(p.message, p.sessionId);
     if (!challenge) return 'This sign-in challenge does not match its session — reload the site and try again.';
-    const signed = signPassportSiteLogin({ origin: challenge.origin, nonce: challenge.nonce, privateKeyHex: keyHex, xpub });
+    const signed = signPassportSiteLogin({ origin: challenge.origin, nonce: challenge.nonce, privateKeyHex: keyHex, xpub, includeXpub: true });
     const posted = await postFabricSiteLogin(p.hubBase, p.sessionId, signed.uri);
     if (!posted.ok) return posted.error;
     notifyPage(p, { ok: true, identity: signed.identity });
@@ -183,7 +186,7 @@ export default function SiteLoginPrompt (props: Props): React.ReactElement | nul
   }, []);
 
   const approve = useCallback(async () => {
-    if (!pending) return;
+    if (!pending || !armed) return;
     if (!privateKeyHex) {
       setError(needsUnlock
         ? 'Unlock your Passport identity (enter password), then approve again.'
@@ -214,7 +217,7 @@ export default function SiteLoginPrompt (props: Props): React.ReactElement | nul
     } finally {
       setBusy(false);
     }
-  }, [pending, privateKeyHex, needsUnlock, desktops, choice, approveWithDesktop, approveWithPassport, clearPending]);
+  }, [pending, armed, privateKeyHex, needsUnlock, desktops, choice, approveWithDesktop, approveWithPassport, clearPending]);
 
   const unlock = useCallback(() => {
     if (!onUnlock) return;
@@ -227,6 +230,7 @@ export default function SiteLoginPrompt (props: Props): React.ReactElement | nul
 
   const canUnlockHere = !!onUnlock && (needsUnlock || !privateKeyHex);
   const left = secondsLeft(pending.expiresAt);
+  const purpose = sanitizeSitePurpose(pending.purpose);
   const linked = desktops.filter((d) => d.linked);
   const unlinked = desktops.filter((d) => !d.linked);
 
@@ -259,14 +263,17 @@ export default function SiteLoginPrompt (props: Props): React.ReactElement | nul
           </Message>
         ) : null}
         <p><strong>Site</strong><br />{pending.origin}</p>
-        {pending.purpose ? (
-          <p><strong>The site says</strong><br /><em>{pending.purpose}</em></p>
+        {purpose ? (
+          <p>
+            <strong>Message from the site (not verified)</strong><br />
+            <span style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{purpose}</span>
+          </p>
         ) : null}
         {pending.kind === 'fabric' ? (
           <p style={{ fontSize: '0.85em' }}>
             {pending.siteAuthor
-              ? <>Request signed by site key <code>{shortKey(pending.siteAuthor)}</code></>
-              : 'Request not signed by the site'}
+              ? <>Request signed with key <code>{shortKey(pending.siteAuthor)}</code></>
+              : 'Request not signed'}
             {left != null ? ` · expires in ${left}s` : ''}
           </p>
         ) : (
@@ -308,7 +315,7 @@ export default function SiteLoginPrompt (props: Props): React.ReactElement | nul
       </Modal.Content>
       <Modal.Actions>
         <Button onClick={reject} disabled={busy}>Ignore</Button>
-        <Button primary onClick={() => void approve()} disabled={busy || !privateKeyHex}>
+        <Button primary onClick={() => void approve()} disabled={busy || !privateKeyHex || !armed}>
           {busy ? 'Signing…' : 'Approve & sign'}
         </Button>
       </Modal.Actions>

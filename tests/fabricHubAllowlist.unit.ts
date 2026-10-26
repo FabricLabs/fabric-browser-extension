@@ -10,13 +10,20 @@ import {
 } from '../src/utils/fabricHubAllowlist';
 
 describe('fabricHubAllowlist (Passport)', function () {
-  it('allows default HTTPS hubs and loopback', function () {
+  it('allows default HTTPS hubs', function () {
     assert.strictEqual(isAllowedFabricHub('https://hub.fabric.pub'), true);
     assert.strictEqual(isAllowedFabricHub('https://relay.goon.vc'), true);
     assert.strictEqual(isAllowedFabricHub('https://goon.vc'), true);
     assert.strictEqual(isAllowedFabricHub('https://hub.goon.vc'), true);
-    assert.strictEqual(isAllowedFabricHub('http://127.0.0.1:8080'), true);
-    assert.strictEqual(isAllowedFabricHub('http://[::1]:3041'), true);
+  });
+
+  it('allows a loopback Hub only when it is the active Fabric node', function () {
+    assert.strictEqual(isAllowedFabricHub('http://127.0.0.1:8080'), false);
+    assert.strictEqual(isAllowedFabricHub('http://[::1]:3041'), false);
+    assert.strictEqual(isAllowedFabricHub('http://127.0.0.1:8080', { activeHub: 'http://127.0.0.1:8080/' }), true);
+    assert.strictEqual(isAllowedFabricHub('http://[::1]:3041', { activeHub: 'http://[::1]:3041' }), true);
+    assert.strictEqual(isAllowedFabricHub('http://127.0.0.1:3041', { activeHub: 'http://127.0.0.1:8080' }), false);
+    assert.strictEqual(isAllowedFabricHub('http://localhost:8080', { activeHub: 'http://127.0.0.1:8080' }), false);
   });
 
   it('names the host permission a cleartext LAN hub needs', function () {

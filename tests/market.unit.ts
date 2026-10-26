@@ -77,6 +77,70 @@ describe('Passport MarketAgent (budget agent mirror)', () => {
     assert.ok(agent.status().sessions.every((s) => s.sellerId === 'near' && s.status === 'delivery_pending'));
   });
 
+  it('retries only the failed blob within budget and then completes', () => {
+    const book = new DocumentOfferBook();
+    book.ingestInventoryResponse({ origin: 'far', items: items(P), latencyMs: 400, hops: 2 });
+    const agent = new MarketAgent({ budgetSats: 2 * P }, { book });
+    const want = agent.want(ROOT, { blobTotal: 2 });
+    assert.strictEqual(agent.tick().opened, 2);
+    for (const s of agent.status().sessions) agent.confirm(s.settlementId);
+    agent.blobReceived(ROOT, 0);
+    agent.blobFailed(ROOT, 1);
+    assert.strictEqual(want.status, 'wanted');
+
+    // Cap is now P (blob 0 spent); only blob 1 still needs buying.
+    assert.strictEqual(agent.tick().opened, 1);
+    assert.strictEqual(want.lastError, null);
+    assert.strictEqual(want.status, 'buying');
+    const retry = agent.status().sessions.find((s) => s.blobIndex === 1 && s.status === 'awaiting_funding')!;
+    agent.confirm(retry.settlementId);
+    agent.blobReceived(ROOT, 1);
+    assert.strictEqual(want.status, 'complete');
+  });
+
+  it('marks a want buying only when it opened sessions itself', () => {
+    const OTHER = 'cd'.repeat(32);
+    const book = new DocumentOfferBook();
+    const agent = new MarketAgent({ budgetSats: 100 * P }, { book });
+    const first = agent.want(OTHER, { blobTotal: 2 });
+    const second = agent.want(ROOT, { blobTotal: 2 });
+    book.ingestInventoryResponse({ origin: 'far', items: items(P), latencyMs: 400, hops: 2 });
+    assert.strictEqual(agent.tick().opened, 2);
+    assert.strictEqual(second.status, 'buying');
+    // Every blob of `second` already has a live session; nothing new opens for it.
+    second.status = 'wanted';
+    book.ingestInventoryResponse({
+      origin: 'far',
+      items: items(P).map((it) => ({ ...it, documentId: 'other', merkleRootHex: OTHER })),
+      latencyMs: 400,
+      hops: 2
+    });
+    assert.strictEqual(agent.tick().opened, 2);
+    assert.strictEqual(first.status, 'buying');
+    assert.strictEqual(second.status, 'wanted');
+  });
+
+  it('refuses peer-advertised blob counts it cannot plan', () => {
+    const book = new DocumentOfferBook();
+    const rows = book.ingestInventoryResponse({
+      origin: 'liar',
+      items: [
+        { documentId: 'doc', merkleRootHex: ROOT, blobTotal: 1e308, rateSats: P },
+        { documentId: 'doc', merkleRootHex: ROOT, blobIndex: 'Infinity', blobTotal: 2, rateSats: P },
+        { documentId: 'doc', merkleRootHex: ROOT, blobs: [{ index: 1e9, total: 'Infinity' }, { index: 0, total: 1e308 }] }
+      ]
+    });
+    assert.strictEqual(rows.length, 2);
+    assert.ok(rows.every((r) => r.blobTotal === null));
+    assert.deepStrictEqual(rows.map((r) => r.blobIndex), [null, 0]);
+
+    const stub = { listOffers: () => [{ ...rows[0], blobTotal: 1e9 }], hopPenaltyMs: 50 } as unknown as DocumentOfferBook;
+    const agent = new MarketAgent({ budgetSats: 100 * P }, { book: stub });
+    const want = agent.want(ROOT);
+    assert.strictEqual(agent.tick().opened, 0);
+    assert.match(String(want.lastError), /unsupported blob count/);
+  });
+
   it('round-trips export/import', () => {
     const book = bookWithTwoSellers();
     const a = new MarketAgent({ budgetSats: 9 * P }, { book });

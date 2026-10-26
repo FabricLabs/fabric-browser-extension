@@ -67,6 +67,26 @@ describe('Passport FabricDocument (core mirror)', function () {
     assert.ok(buyer.complete);
   });
 
+  it('refuses blobs from a record whose blob list the root does not commit to', async () => {
+    const seller = await FabricDocument.seal('page body '.repeat(60), { chunkBytes: 256 });
+    assert.ok(seller.blobTotal >= 2);
+    const record = JSON.parse(JSON.stringify(seller.record));
+    const bytes = seller.bytesFor(0) as Uint8Array;
+    const key = seller.keyFor(0) as string;
+
+    const honest = FabricDocument.fromRecord(record);
+    assert.ok(await honest.verifyRoot());
+    assert.ok(await honest.acceptBytes(0, bytes));
+
+    const truncated = FabricDocument.fromRecord({ ...record, blobs: record.blobs.slice(0, 1) });
+    assert.strictEqual(await truncated.verifyRoot(), false);
+    assert.strictEqual(await truncated.acceptBytes(0, bytes), false);
+    await assert.rejects(truncated.openBlob(0, key, bytes), /document root/);
+
+    const forged = FabricDocument.fromRecord({ ...record, merkleRootHex: 'ab'.repeat(32) });
+    assert.strictEqual(await forged.acceptBytes(0, bytes), false);
+  });
+
   it('inventory items and manifests are hash-only / canonical', async () => {
     const doc = await FabricDocument.seal('x', { chunkBytes: 64 });
     const item = doc.inventoryItem({ rateSats: 2 });

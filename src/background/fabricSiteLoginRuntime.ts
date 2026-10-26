@@ -15,6 +15,7 @@ import {
   checkHubLoginChallenge,
   originOfSender,
   readPageSiteLoginRequest,
+  sanitizeSitePurpose,
   verifyDesktopSiteLogin
 } from '../utils/fabricSiteMessage';
 import { requestDesktopSignature } from '../utils/fabricDesktopSigner';
@@ -41,6 +42,30 @@ export type PendingSiteLoginRow = {
 };
 
 type Outcome = { ok: true; row: PendingSiteLoginRow } | { ok: false; error: string };
+
+/** How long a `/sessions` sign-in (which names no expiry) keeps the prompt. */
+export const HUB_LOGIN_PROMPT_TTL_MS = 2 * 60 * 1000;
+
+/**
+ * A sign-in may come only from the top page or a frame with the top page's
+ * origin, so a site can't put Passport's prompt under another site's frame.
+ */
+export function checkSenderFrame (sender: chrome.runtime.MessageSender): { ok: true } | { ok: false; error: 'cross_origin_frame' } {
+  if (!sender.frameId) return { ok: true };
+  const frame = originOfSender(sender);
+  const top = sender.tab && typeof sender.tab.url === 'string' ? originOfSender({ url: sender.tab.url }) : null;
+  return frame && top && frame === top ? { ok: true } : { ok: false, error: 'cross_origin_frame' };
+}
+
+/**
+ * True while `current` is still waiting for the user: a new request is then
+ * answered `busy` instead of replacing what the prompt shows.
+ */
+export function siteLoginPromptOpen (current: PendingSiteLoginRow | null, now: number = Date.now()): boolean {
+  if (!current) return false;
+  const expiresAt = Number(current.expiresAt) || (Number(current.createdAt) + HUB_LOGIN_PROMPT_TTL_MS);
+  return Number.isFinite(expiresAt) && expiresAt > now;
+}
 
 function pendingStore (): chrome.storage.StorageArea {
   return chrome.storage.session || chrome.storage.local;
@@ -101,7 +126,7 @@ export function queueFabricMessage (m: Record<string, unknown>, sender: chrome.r
       origin: r.origin,
       pageOrigin: r.origin,
       nonce: r.nonce,
-      purpose: r.purpose,
+      purpose: sanitizeSitePurpose(r.purpose),
       expiresAt: r.expiresAt,
       siteAuthor: r.siteAuthor,
       requestUri: r.requestUri,
@@ -156,6 +181,9 @@ export async function completeWithDesktop (m: Record<string, unknown>): Promise<
   } else {
     notifySiteLoginPage(row, { ok: true, message: answered.uri, signer: verified.signer });
   }
-  await clearPendingSiteLogin();
+  const current = await readPendingSiteLogin();
+  if (current && current.nonce === row.nonce && current.createdAt === row.createdAt) {
+    await clearPendingSiteLogin();
+  }
   return { ok: true };
 }

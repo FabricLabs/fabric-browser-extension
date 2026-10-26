@@ -1,9 +1,9 @@
 # Outstanding (security-first)
 Living queue for this repo. Detail and closed items live in [SECURITY.md](../SECURITY.md); posture, known gaps, and pre-listing recommendations live in [AUDIT.md](../AUDIT.md). Suite march: [@fabric/core `docs/PRODUCTION_MARCH.md`](https://github.com/FabricLabs/fabric/blob/feature/rsi/docs/PRODUCTION_MARCH.md).
 
-**Last reviewed:** 2026-08-31 — CI still red on tip `aa584ae` (`Cannot find module '../contracts/hasRole'` from packaged `@fabric/http`). Staged lockfile bump to core **`1c3f8d08c`** / http **`bbdb72a`** (same packaging fix as Hub [#16](https://github.com/FabricLabs/hub.fabric.pub/pull/16)) + Actions `@v7`. `npm run test:unit` was **94 passing** on the prior audit cut.
+**Last reviewed:** 2026-10-25 — lockfile pins core **`984b874ba`** (`FabricLabs/fabric#feature/locks`) / http **`b87b1b0`** (`FabricLabs/fabric-http#feature/fomantic`); the same pair is recorded in [SECURITY.md](../SECURITY.md). `npm run test:unit` is **139 passing** against that core (`FABRIC_CORE=node_modules/@fabric/core`; without it the loaders prefer a sibling `../fabric-clean` checkout). Keep this open until CI is green on that pin set.
 
-**Prior review:** 2026-08-25 — suite quick-win pass; [AUDIT.md](../AUDIT.md) added; invalid ported match patterns removed. Wave 2 lock was core **`88f766c28`** / http **`ca27d14`** (the pin that broke CI).
+**Prior reviews:** 2026-08-31 — CI red on `aa584ae` (`Cannot find module '../contracts/hasRole'` from packaged `@fabric/http`); 2026-08-25 — suite quick-win pass; [AUDIT.md](../AUDIT.md) added; invalid ported match patterns removed. The older pins named there (`88f766c28` / `ca27d14`, `1c3f8d08c` / `bbdb72a`) are superseded.
 
 ## Blockers before store / shared-host pairing claims
 1. **`https://*/*` host breadth — owner decision required.** `host_permissions`
@@ -34,8 +34,8 @@ Living queue for this repo. Detail and closed items live in [SECURITY.md](../SEC
   / 4 moderate / 5 low**, all transitive; for a wallet, a reachable `elliptic`
   advisory should be treated as release-blocking rather than noise.
 - [ ] Move xpub off Hub `GET /services/bitcoin/xpub…` query strings (needs Hub POST endpoints).
-- [x] Pin `@fabric/core` to [#186](https://github.com/FabricLabs/fabric/pull/186) tip **`88f766c28`**. Live Hub still **`f63a33f`** until operator redeploy.
-- [ ] Keep `src/utils/identityCrossSign.ts` lockstep with `@fabric/core/functions/identityCrossSign` (TS re-export; webpack must not pull Hub Node).
+- [x] Pin `@fabric/core` **`984b874ba`** / `@fabric/http` **`b87b1b0`** in `package-lock.json`. Live Hub still **`f63a33f`** until operator redeploy.
+- [ ] Keep `src/utils/identityCrossSign.ts` lockstep with `@fabric/core/functions/identityCrossSign` (browser-safe mirror, not a re-export: webpack must not pull Node-only `@fabric/core`).
 - [ ] Keep `src/utils/fabricHubAllowlist.ts` lockstep with `@fabric/http/functions/fabricHubAllowlist`.
 - [x] Bind device-link `sessionId` into attest messages — device-link v2 with `@fabric/http`; GoonCitizen moved in the same cut. [AUDIT.md](../AUDIT.md) #6.
 - [ ] Ship the v2 device-link and `fabric:` site-login changes together with the `@fabric/core` / `@fabric/http` / Hub / GoonCitizen pins that carry them — an older Hub answers the v1 one-step offer and Passport now refuses it.
@@ -63,7 +63,7 @@ Living queue for this repo. Detail and closed items live in [SECURITY.md](../SEC
   carries a port (`:<n>` or `:*`) and that both loopback twins survive, so a
   port cannot regress into the next upload. Built copy `assets/manifest.json`
   re-synced; `npm run build` clean.
-- **[AUDIT.md](../AUDIT.md) added** — posture table, nine known gaps, the
+- **[AUDIT.md](../AUDIT.md) added** — posture table, ten known gaps, the
   intentional browser-safe duplicate list (`identityCrossSign.ts`,
   `fabricHubAllowlist.ts` — drift is the bug, not duplication), and pre-listing
   recommendations. Matches the shape of the `@fabric/core` / `@fabric/http` /
@@ -74,7 +74,7 @@ Living queue for this repo. Detail and closed items live in [SECURITY.md](../SEC
 - chrome-extension / moz-extension Origins accepted by Hub http thin-client gate on allowlisted hubs.
 - HTTPS-only default hub allowlist; phishing origins refused in `tests/adversarialEnvironment.basics.unit.ts`.
 - Unit coverage for the full device-link HTTP flow (offer → accept → countersign → cross-sign → revoke), ARC publish/withdrawal evaluation, and Bitcoin `sendrawtransaction` / faucet failure modes.
-- IdentityCrossSign TS helper re-exports `@fabric/core` (lockfile **`88f766c28`**: `_normPubkey` rejects colon-smashed / non-hex keys; unknown `kind` rejected; truncated identity-id hex throws; `fabricIdentityAccountPath` exported). Device-link HTTP omits client-set Origin/Referer (Hub accepts `chrome-extension:` / `moz-extension:` on allowlisted hubs). May CodeRabbit notes on PR #3 (`eric/develop`) — invalid derive index, balance NaN, 402 `ln` trim, activity timestamps, harness `:3044`, exact 32-byte master key (`tests/encryptedDatastore.unit.ts`) — are already on **this** `feature/rsi` tip. CI uses `.nvmrc` **24.15.0** (was hardcoded Node 22).
+- IdentityCrossSign TS helper is a browser-safe mirror of `@fabric/core` (introduced at core `88f766c28`: `_normPubkey` rejects colon-smashed / non-hex keys; unknown `kind` rejected; truncated identity-id hex throws; `fabricIdentityAccountPath` exported). Device-link HTTP omits client-set Origin/Referer (Hub accepts `chrome-extension:` / `moz-extension:` on allowlisted hubs). May CodeRabbit notes on PR #3 (`eric/develop`) — invalid derive index, balance NaN, 402 `ln` trim, activity timestamps, harness `:3044`, exact 32-byte master key (`tests/encryptedDatastore.unit.ts`) — are already on **this** `feature/rsi` tip. CI uses `.nvmrc` **26.12.1** (was hardcoded Node 22).
 
 ## PRs
-No human review comments on PR #3. Do not merge or retarget that branch as the RSI deploy. April–May CodeRabbit “quick wins” on `eric/develop` are already on `feature/rsi` (see Closed). **Tests and coverage** on GitHub PR #3 (`eric/develop` @ `51ea3c3`, 2026-08-12) fails: Playwright headless-shell cannot discover the MV3 service worker (`Could not find chrome-extension:// service worker`). This tree stages headed Chromium + `xvfb-run` + `PLAYWRIGHT_CHROMIUM_USE_HEADLESS_SHELL=0`. Codacy ACTION_REQUIRED on that PR; `.codacy.yml` excludes generated trees (Hub-style). Pin core **`88f766c28`** / http **`ca27d14`**. Do not retarget [#3](https://github.com/FabricLabs/fabric-browser-extension/pull/3). Keep `report:install` lockfile wipe (suite RSI convention; script now `rm -f` instead of writing a blank line).
+No human review comments on PR #3. Do not merge or retarget that branch as the RSI deploy. April–May CodeRabbit “quick wins” on `eric/develop` are already on `feature/rsi` (see Closed). **Tests and coverage** on GitHub PR #3 (`eric/develop` @ `51ea3c3`, 2026-08-12) fails: Playwright headless-shell cannot discover the MV3 service worker (`Could not find chrome-extension:// service worker`). This tree stages headed Chromium + `xvfb-run` + `PLAYWRIGHT_CHROMIUM_USE_HEADLESS_SHELL=0`. Codacy ACTION_REQUIRED on that PR; `.codacy.yml` excludes generated trees (Hub-style). Pin core **`984b874ba`** / http **`b87b1b0`**. Do not retarget [#3](https://github.com/FabricLabs/fabric-browser-extension/pull/3). Keep `report:install` lockfile wipe (suite RSI convention; script now `rm -f` instead of writing a blank line).

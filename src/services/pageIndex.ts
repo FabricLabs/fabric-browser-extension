@@ -295,20 +295,27 @@ export interface PageIndexInventoryEvent {
  */
 export class PageIndex {
   readonly book: DocumentOfferBook;
-  private restored = false;
+  private restoring: Promise<void> | null = null;
 
   constructor (private readonly store: PageIndexStore = new MemoryPageIndexStore(), book?: DocumentOfferBook) {
     this.book = book || new DocumentOfferBook();
   }
 
-  private async restore (): Promise<void> {
-    if (this.restored) return;
-    this.restored = true;
-    const rec = await this.store.getMeta<ProviderTelemetryRecord>(TELEMETRY_KEY);
-    if (rec) this.book.importTelemetry(rec);
+  private restore (): Promise<void> {
+    if (!this.restoring) {
+      this.restoring = (async () => {
+        const rec = await this.store.getMeta<ProviderTelemetryRecord>(TELEMETRY_KEY);
+        if (rec) this.book.importTelemetry(rec);
+      })().catch((err: unknown) => {
+        this.restoring = null;
+        throw err;
+      });
+    }
+    return this.restoring;
   }
 
   async persistTelemetry (): Promise<ProviderTelemetryRecord> {
+    await this.restore();
     const rec = this.book.exportTelemetry();
     await this.store.putMeta(TELEMETRY_KEY, rec);
     return rec;

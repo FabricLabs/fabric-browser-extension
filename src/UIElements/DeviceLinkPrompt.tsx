@@ -9,10 +9,16 @@ import {
   FABRIC_RUNTIME_DEVICE_LINK_COMPLETE,
   FABRIC_RUNTIME_DEVICE_LINK_GET
 } from '../constants/deviceLink';
-import { completeDeviceLinkAsResponder, type DeviceLinkPending } from '../utils/fabricDeviceLinkSign';
+import {
+  completeDeviceLinkAsResponder,
+  verifyPendingDeviceLink,
+  type DeviceLinkPending,
+  type VerifiedDeviceLinkOffer
+} from '../utils/fabricDeviceLinkSign';
 import { publishIdentityCrossSign } from '../utils/identityCrossSignPublish';
 import { mergeLinkedDevice } from '../utils/linkedDevices';
 import { swallowNonFatal } from '../utils/nonFatal';
+import { useArmDelay } from './useArmDelay';
 
 export type PendingDeviceLink = DeviceLinkPending & {
   pageOrigin: string;
@@ -35,13 +41,18 @@ function notifyPage (tabId: number | undefined, payload: Record<string, unknown>
 
 /**
  * Approves mutual device-link offers queued by the content script (responder role).
+ * Shows only what the Hub session's signed offer proves: the initiator key's
+ * fingerprint and the Hub it was offered on.
  */
 export default function DeviceLinkPrompt (props: Props): React.ReactElement | null {
   const { privateKeyHex, xpub, needsUnlock } = props;
   const [pending, setPending] = useState<PendingDeviceLink | null>(null);
+  const [offer, setOffer] = useState<VerifiedDeviceLinkOffer | null>(null);
+  const [checking, setChecking] = useState(false);
   const [tabId, setTabId] = useState<number | undefined>(undefined);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const armed = useArmDelay(offer ? `${offer.sessionId}:${offer.initiator.pubkeyHex}` : '');
 
   const pull = useCallback(() => {
     if (typeof chrome === 'undefined' || !chrome.runtime?.sendMessage) return;
@@ -67,6 +78,20 @@ export default function DeviceLinkPrompt (props: Props): React.ReactElement | nu
     return () => chrome.storage.onChanged.removeListener(onChange);
   }, [pull]);
 
+  useEffect(() => {
+    setOffer(null);
+    if (!pending) return undefined;
+    let live = true;
+    setChecking(true);
+    void verifyPendingDeviceLink(pending).then((checked) => {
+      if (!live) return;
+      setChecking(false);
+      if (checked.ok) setOffer(checked.offer);
+      else setError(`This link can't be verified: ${checked.error}`);
+    });
+    return () => { live = false; };
+  }, [pending]);
+
   const clearPending = useCallback(() => {
     chrome.runtime.sendMessage({ type: FABRIC_RUNTIME_DEVICE_LINK_CLEAR }, () => {
       setPending(null);
@@ -89,7 +114,7 @@ export default function DeviceLinkPrompt (props: Props): React.ReactElement | nu
   }, [clearPending, tabId]);
 
   const approve = useCallback(async () => {
-    if (!pending) return;
+    if (!pending || !offer || !armed) return;
     if (!privateKeyHex || !xpub) {
       setError(needsUnlock
         ? 'Unlock your Passport identity (enter password), then approve again.'
@@ -99,30 +124,29 @@ export default function DeviceLinkPrompt (props: Props): React.ReactElement | nu
     setBusy(true);
     setError(null);
     try {
-      const posted = await completeDeviceLinkAsResponder(pending, privateKeyHex, xpub);
+      const posted = await completeDeviceLinkAsResponder(offer, privateKeyHex, xpub);
       if (!posted.ok) {
         setError(posted.error);
         setBusy(false);
         return;
       }
-      const peerPk = pending.initiator && pending.initiator.pubkeyHex;
-      if (peerPk && pending.nonce) {
-        void publishIdentityCrossSign({
-          hubBase: pending.hubBase,
-          privateKeyHex,
-          xpub,
-          peerPubkey: peerPk,
-          nonce: pending.nonce
-        }).catch((err: unknown) => swallowNonFatal('identity-cross-sign-publish', err));
-      }
+      const binding = { sessionId: posted.sessionId, nonce: posted.nonce, origin: posted.origin };
+      void publishIdentityCrossSign({
+        hubBase: offer.hubBase,
+        privateKeyHex,
+        xpub,
+        peerPubkey: posted.peerPubkey,
+        binding
+      }).catch((err: unknown) => swallowNonFatal('identity-cross-sign-publish', err));
       void mergeLinkedDevice({
         kind: 'device-link',
         peerFabricId: posted.peerFabricId,
-        peerXpub: pending.initiator && pending.initiator.xpub,
-        peerPubkey: peerPk,
-        nonce: pending.nonce,
-        label: pending.label || posted.label || 'Linked device',
-        hubOrigin: pending.origin || pending.hubBase,
+        peerXpub: posted.peerXpub,
+        peerPubkey: posted.peerPubkey,
+        sessionId: posted.sessionId,
+        nonce: posted.nonce,
+        label: posted.label,
+        hubOrigin: posted.origin,
         linkedAt: new Date().toISOString(),
         role: 'responder'
       }).catch((err: unknown) => swallowNonFatal('linked-devices-merge', err));
@@ -130,13 +154,13 @@ export default function DeviceLinkPrompt (props: Props): React.ReactElement | nu
         source: 'fabric-passport',
         type: FABRIC_DEVICE_LINK_RESULT,
         ok: true,
-        sessionId: pending.sessionId,
+        sessionId: posted.sessionId,
         peerFabricId: posted.peerFabricId
       });
       chrome.runtime.sendMessage({
         type: FABRIC_RUNTIME_DEVICE_LINK_COMPLETE,
         ok: true,
-        sessionId: pending.sessionId
+        sessionId: posted.sessionId
       });
       clearPending();
     } catch (e: unknown) {
@@ -144,41 +168,44 @@ export default function DeviceLinkPrompt (props: Props): React.ReactElement | nu
     } finally {
       setBusy(false);
     }
-  }, [pending, privateKeyHex, xpub, needsUnlock, tabId, clearPending]);
+  }, [pending, offer, armed, privateKeyHex, xpub, needsUnlock, tabId, clearPending]);
 
   if (!pending) return null;
-
-  const peerId = pending.initiator && pending.initiator.id;
 
   return (
     <Modal open size="small" closeOnDimmerClick={false}>
       <Modal.Header>Link this device</Modal.Header>
       <Modal.Content>
         <p>
-          Link this Passport identity to GoonCitizen Android or desktop (separate seeds).
-          After both approve, those apps sync chat over Fabric. This is not website
-          login. Approve only if you started this on the other device.
+          Link this Passport identity to another device of yours (separate seeds).
+          After both approve, the two keys act as one identity. This is not website
+          login. Approve only if you started this on the other device and its key
+          fingerprint below matches the one it shows.
         </p>
         {needsUnlock || !privateKeyHex ? (
           <Message warning>
             Unlock your identity in Passport (password), then click Approve again.
           </Message>
         ) : null}
-        <p><strong>Hub</strong><br />{pending.origin || pending.hubBase}</p>
-        {pending.label ? <p><strong>Offer label</strong><br />{pending.label}</p> : null}
-        {peerId ? (
-          <p style={{ wordBreak: 'break-all', fontSize: '0.85em' }}>
-            <strong>Peer Fabric id</strong><br />{peerId}
-          </p>
+        {checking ? <Message info>Checking the link…</Message> : null}
+        {offer ? (
+          <>
+            <p><strong>Key fingerprint</strong><br /><code>{offer.fingerprint}</code></p>
+            <p><strong>Hub</strong><br />{offer.origin}</p>
+            {offer.label ? <p><strong>Offer label</strong><br />{offer.label}</p> : null}
+            <p style={{ wordBreak: 'break-all', fontSize: '0.85em' }}>
+              <strong>Fabric id</strong><br />{offer.initiator.id}
+            </p>
+            <p style={{ wordBreak: 'break-all', fontSize: '0.85em' }}>
+              <strong>Session</strong><br />{offer.sessionId}
+            </p>
+          </>
         ) : null}
-        <p style={{ wordBreak: 'break-all', fontSize: '0.85em' }}>
-          <strong>Session</strong><br />{pending.sessionId}
-        </p>
         {error ? <Message negative>{error}</Message> : null}
       </Modal.Content>
       <Modal.Actions>
         <Button onClick={reject} disabled={busy}>Ignore</Button>
-        <Button primary onClick={() => void approve()} disabled={busy || !privateKeyHex}>
+        <Button primary onClick={() => void approve()} disabled={busy || !privateKeyHex || !offer || !armed}>
           {busy ? 'Linking…' : 'Approve & link'}
         </Button>
       </Modal.Actions>

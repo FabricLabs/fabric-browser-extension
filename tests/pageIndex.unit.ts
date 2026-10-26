@@ -75,6 +75,34 @@ describe('pageIndex (legacy web page chunk index)', () => {
     assert.strictEqual(rec && rec.providers.length, 2);
   });
 
+  it('a fresh PageIndex keeps stored telemetry when it persists first', async () => {
+    const store = new MemoryPageIndexStore();
+    const seed = new DocumentOfferBook();
+    seed.recordInventoryLatency('s1', 100, { hops: 1 });
+    await store.putMeta('provider-telemetry', seed.exportTelemetry());
+    const rec = await new PageIndex(store).persistTelemetry();
+    assert.deepStrictEqual(rec.providers.map((p) => p.sellerId), ['s1']);
+    const stored = await store.getMeta<{ providers: Array<{ sellerId: string }> }>('provider-telemetry');
+    assert.deepStrictEqual(stored!.providers.map((p) => p.sellerId), ['s1']);
+  });
+
+  it('retries the telemetry restore after a failed read', async () => {
+    const store = new MemoryPageIndexStore();
+    const seed = new DocumentOfferBook();
+    seed.recordInventoryLatency('s1', 100);
+    await store.putMeta('provider-telemetry', seed.exportTelemetry());
+    const getMeta = store.getMeta.bind(store);
+    let fail = true;
+    (store as unknown as { getMeta: typeof getMeta }).getMeta = async <T>(k: string) => {
+      if (fail) { fail = false; throw new Error('storage busy'); }
+      return getMeta<T>(k);
+    };
+    const index = new PageIndex(store);
+    await assert.rejects(index.persistTelemetry(), /storage busy/);
+    const rec = await index.persistTelemetry();
+    assert.deepStrictEqual(rec.providers.map((p) => p.sellerId), ['s1']);
+  });
+
   it('telemetry export round-trips through a fresh book (core-compatible shape)', () => {
     const a = new DocumentOfferBook();
     a.recordInventoryLatency('s1', 100, { hops: 1 });

@@ -409,7 +409,15 @@ export class FederationMember {
       });
       const done = core.Federation.finalizeWithdrawal({ descriptor: record.descriptor, psbtBase64: merged.psbtBase64 });
       const sent = await this.request('POST', `/services/federations/${record.id}/transactions`, { txHex: done.txHex });
-      await this.post(core.Federation.broadcastMessage(record.id, w.requestId, String(sent.txid || done.txid)));
+      const txid = String(sent.txid || done.txid).toLowerCase();
+      w.status = 'broadcast';
+      w.txid = txid;
+      w.error = null;
+      try {
+        await this.post(core.Federation.broadcastMessage(record.id, w.requestId, txid));
+      } catch (err: unknown) {
+        w.error = `sent, but the broadcast notice failed: ${err instanceof Error ? err.message : String(err)}`;
+      }
       return true;
     } catch (err: unknown) {
       w.error = err instanceof Error ? err.message : String(err);

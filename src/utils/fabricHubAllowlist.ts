@@ -3,12 +3,16 @@
  * Mirrors `@fabric/http/functions/fabricHubAllowlist` for the extension bundle.
  *
  * Default network hubs are **HTTPS-only**. Cleartext production origins require
- * an explicit `opts.extra` allowlist entry. Loopback `http://` remains allowed.
+ * an explicit `opts.extra` allowlist entry. A loopback Hub counts only when it is
+ * the active Fabric node in Passport settings (`opts.activeHub`): any local
+ * process can listen on a loopback port.
  *
  * Operator opt-in (no hardcoded preview hosts): pass exact origins or HTTPS
  * suffixes (`*.example.com`) via `opts.extra`, or store them under
  * {@link FABRIC_HUB_ALLOWLIST_STORAGE_KEY} in `chrome.storage.local`.
  */
+
+import { FABRIC_STATE_STORAGE_KEY } from '../constants/fabricExtension';
 
 export const DEFAULT_FABRIC_HUB_ORIGINS = [
   'https://hub.fabric.pub',
@@ -122,6 +126,59 @@ export async function loadFabricHubAllowlistExtras (): Promise<string[]> {
   return [];
 }
 
+function activeHubUrl (hubAddress: string): string {
+  const raw = String(hubAddress || '').trim();
+  return /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
+}
+
+/** Origin of the active Fabric node in Passport settings, or null. */
+export function activeFabricHubFromState (state: unknown): string | null {
+  if (!state || typeof state !== 'object') return null;
+  const settings = (state as Record<string, unknown>).settings as Record<string, unknown> | undefined;
+  const nodes = settings?.fabricNodes as Array<{ isActive?: boolean; hubAddress?: string }> | undefined;
+  if (!Array.isArray(nodes)) return null;
+  const active = nodes.find((n) => n && n.isActive && typeof n.hubAddress === 'string' && n.hubAddress.trim());
+  return active && active.hubAddress ? normalizeHubOrigin(activeHubUrl(active.hubAddress)) : null;
+}
+
+/** Allowlist extras plus the active Fabric node, read from extension storage. */
+export async function loadFabricHubGateOptions (): Promise<FabricHubGateOptions> {
+  const extra = await loadFabricHubAllowlistExtras();
+  let activeHub: string | null = null;
+  try {
+    if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+      const bag = await chrome.storage.local.get(FABRIC_STATE_STORAGE_KEY);
+      activeHub = activeFabricHubFromState(bag && bag[FABRIC_STATE_STORAGE_KEY]);
+    }
+  } catch {
+    activeHub = null;
+  }
+  return { extra, activeHub };
+}
+
+/** Runtime message: content script asks the background for {@link loadFabricHubGateOptions}. */
+export const FABRIC_RUNTIME_HUB_GATE_OPTIONS = 'FABRIC_HUB_GATE_OPTIONS';
+
+/**
+ * Content-script twin of {@link loadFabricHubGateOptions}: the background reads the
+ * active node so Passport state never loads into a page's renderer. Without an
+ * answer, no loopback Hub is allowed.
+ */
+export async function requestFabricHubGateOptions (): Promise<FabricHubGateOptions> {
+  const extra = await loadFabricHubAllowlistExtras();
+  let activeHub: string | null = null;
+  try {
+    if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
+      const res = await chrome.runtime.sendMessage({ type: FABRIC_RUNTIME_HUB_GATE_OPTIONS });
+      const raw = res && typeof res.activeHub === 'string' ? res.activeHub : null;
+      activeHub = raw ? normalizeHubOrigin(raw) : null;
+    }
+  } catch {
+    activeHub = null;
+  }
+  return { extra, activeHub };
+}
+
 /** Save operator allowlist tokens; returns the tokens that parsed. */
 export async function saveFabricHubAllowlistExtras (raw: string | string[]): Promise<string[]> {
   const parts = Array.isArray(raw) ? raw : String(raw || '').split(/[\s,]+/);
@@ -143,13 +200,22 @@ export function lanHubPermissionPattern (token: string): string | null {
   return `${entry.origin.replace(/:\d+$/, '')}/*`;
 }
 
+export type FabricHubGateOptions = {
+  extra?: string[];
+  /** Origin of the active Fabric node; the only loopback Hub allowed. */
+  activeHub?: string | null;
+};
+
 export function isAllowedFabricHub (
   hubBase: string,
-  opts: { extra?: string[]; allowLoopback?: boolean } = {}
+  opts: FabricHubGateOptions = {}
 ): boolean {
   const origin = normalizeHubOrigin(hubBase);
   if (!origin) return false;
-  if (opts.allowLoopback !== false && isLoopbackHubOrigin(origin)) return true;
+  if (isLoopbackHubOrigin(origin)) {
+    const active = opts.activeHub ? normalizeHubOrigin(activeHubUrl(opts.activeHub)) : null;
+    return !!active && active === origin;
+  }
   const entries = [
     ...parseAllowlistEntries([...DEFAULT_FABRIC_HUB_ORIGINS]),
     ...parseAllowlistEntries(opts.extra)
@@ -159,7 +225,7 @@ export function isAllowedFabricHub (
 
 export function assertAllowedFabricHub (
   hubBase: string,
-  opts: { extra?: string[]; allowLoopback?: boolean } = {}
+  opts: FabricHubGateOptions = {}
 ): { ok: true; hubBase: string } | { ok: false; error: string } {
   const origin = normalizeHubOrigin(hubBase);
   if (!origin) return { ok: false, error: 'invalid hub origin' };

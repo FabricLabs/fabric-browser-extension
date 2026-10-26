@@ -155,6 +155,36 @@ describe('Passport federation member', () => {
     assert.strictEqual(bob.get(created.id)!.withdrawals[w.requestId].status, 'pending');
   });
 
+  it('keeps a sent withdrawal as broadcast when the notice post fails', async () => {
+    const hub = fakeHub();
+    let failNotice = false;
+    const fetch = async (url: string, init: any = {}) => {
+      if (failNotice && init.method === 'POST' && new URL(url).pathname === '/services/federations/messages') {
+        failNotice = false;
+        return { ok: false, status: 503, json: async () => ({ message: 'unavailable' }) };
+      }
+      const res = await hub.fetch(url, init);
+      if (init.method === 'POST' && /\/transactions$/.test(new URL(url).pathname)) failNotice = true;
+      return res;
+    };
+    const alice = new FederationMember({ hubBase: 'https://hub.example', privateKeyHex: priv(), fetch: hub.fetch });
+    const bob = new FederationMember({ hubBase: 'https://hub.example', privateKeyHex: priv(), fetch });
+    const created = await alice.create({ threshold: 2, members: [bob.pubkey] });
+    await bob.sync();
+    await bob.respond(created.id, true);
+    hub.fund(created.id, 100000);
+    const w = await alice.requestWithdrawal(created.id, { destinationAddress: coreDest(), amountSats: 40000, feeSats: 500 });
+    await bob.sync();
+    await bob.approve(created.id, w.requestId);
+    const mine = bob.get(created.id)!.withdrawals[w.requestId];
+    assert.strictEqual(hub.sent.length, 1);
+    assert.strictEqual(mine.status, 'broadcast');
+    assert.match(String(mine.txid), /^[0-9a-f]{64}$/);
+    assert.match(String(mine.error), /broadcast notice failed/);
+    await bob.sync();
+    assert.strictEqual(hub.sent.length, 1);
+  });
+
   it('refuses frames that do not check out', async () => {
     const hub = fakeHub();
     const alice = new FederationMember({ hubBase: 'https://hub.example', privateKeyHex: priv(), fetch: hub.fetch });

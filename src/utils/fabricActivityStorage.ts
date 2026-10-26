@@ -47,27 +47,34 @@ export async function touchFabricActivity (ts: number = Date.now()): Promise<voi
   }
 }
 
+/**
+ * Last activity in epoch ms; `null` when nothing is stored, `0` when only an invalid
+ * stamp is stored (callers must treat it as expired, i.e. lock).
+ */
 export async function readFabricActivityMs (): Promise<number | null> {
+  let invalid = false;
   if (typeof chrome === 'undefined' || !chrome.storage) {
     try {
       const v = localStorage.getItem(DEV_LS_KEY);
-      if (v) {
+      if (v != null) {
         const n = parseInt(v, 10);
         const ts = positiveEpochMs(n);
         if (ts != null) return ts;
+        invalid = true;
       }
     } catch (err: unknown) {
       swallowNonFatal('fabric-activity-read-dev-ls', err);
     }
-    return null;
+    return invalid ? 0 : null;
   }
   try {
     if (chrome.storage.session) {
       const s = await chrome.storage.session.get(FABRIC_LAST_ACTIVITY_MS);
       const v = s[FABRIC_LAST_ACTIVITY_MS];
-      if (typeof v === 'number') {
-        const ts = positiveEpochMs(v);
+      if (v != null) {
+        const ts = typeof v === 'number' ? positiveEpochMs(v) : null;
         if (ts != null) return ts;
+        invalid = true;
       }
     }
   } catch (err: unknown) {
@@ -76,12 +83,13 @@ export async function readFabricActivityMs (): Promise<number | null> {
   try {
     const l = await chrome.storage.local.get(FABRIC_LAST_ACTIVITY_MS);
     const v = l[FABRIC_LAST_ACTIVITY_MS];
-    if (typeof v === 'number') {
-      const ts = positiveEpochMs(v);
+    if (v != null) {
+      const ts = typeof v === 'number' ? positiveEpochMs(v) : null;
       if (ts != null) return ts;
+      invalid = true;
     }
   } catch (err: unknown) {
     swallowNonFatal('fabric-activity-read-local', err);
   }
-  return null;
+  return invalid ? 0 : null;
 }

@@ -70,7 +70,7 @@ describe('fabricHttp402 (402 payment headers)', () => {
     assert.strictEqual(u, fromL402);
   });
 
-  it('decodes a Hub document-offer listing at markup without leaking cost basis', () => {
+  it('decodes a Hub document-offer listing with its listed price and cost basis', () => {
     const payload = {
       v: 1,
       scheme: 'fabric-http-document-payment',
@@ -95,10 +95,6 @@ describe('fabricHttp402 (402 payment headers)', () => {
     assert.ok(decoded);
     assert.strictEqual(decoded?.documentExchange?.offerType, 'FABRIC_DOCUMENT_OFFER');
     assert.strictEqual(decoded?.documentOffer?.purchasePriceSats, 110);
-    const shown = `Document price: ${Math.round(Number(decoded?.documentOffer?.purchasePriceSats)).toLocaleString('en-US')} sats`;
-    assert.ok(shown.includes('110'));
-    assert.ok(!shown.includes('100'));
-    assert.ok(!shown.toLowerCase().includes('cost'));
     assert.strictEqual(
       decoded?.documentOffer && 'costBasisSats' in (decoded.documentOffer as object)
         ? (decoded.documentOffer as { costBasisSats?: number }).costBasisSats

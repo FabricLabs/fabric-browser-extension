@@ -214,6 +214,26 @@ export function verifyDesktopSiteLogin (uri: unknown, expected: {
   return { ok: true, identity: verified.identity, signer: verified.signer };
 }
 
+/** Longest site-supplied purpose text a prompt shows. */
+export const MAX_SITE_PURPOSE_CHARS = 140;
+
+const HIDDEN_OR_REORDERING = /[\u0000-\u001f\u007f-\u009f\u00ad\u061c\u115f\u1160\u180e\u200b-\u200f\u202a-\u202e\u2060-\u206f\u3164\ufe00-\ufe0f\ufeff\uffa0\ufff9-\ufffb]/g;
+
+/**
+ * Site-supplied text as a prompt may show it: no control, invisible, or
+ * direction-changing characters, whitespace collapsed, at most
+ * {@link MAX_SITE_PURPOSE_CHARS}. Null when nothing is left.
+ */
+export function sanitizeSitePurpose (text: unknown): string | null {
+  if (typeof text !== 'string') return null;
+  const flat = text.normalize('NFKC').replace(HIDDEN_OR_REORDERING, ' ').replace(/\s+/g, ' ').trim();
+  if (!flat) return null;
+  const chars = Array.from(flat);
+  return chars.length > MAX_SITE_PURPOSE_CHARS
+    ? `${chars.slice(0, MAX_SITE_PURPOSE_CHARS - 1).join('')}…`
+    : flat;
+}
+
 /** Short fingerprint for prompts. */
 export function shortKey (hex: string | null | undefined): string {
   const s = String(hex || '');

@@ -14,12 +14,16 @@ import {
 } from '../src/utils/fabricDeviceLinkFetch';
 import {
   completeDeviceLinkAsResponder,
+  countersignDeviceLink,
+  keyFingerprint,
   startDeviceLinkAsInitiator,
-  tickDeviceLinkAsInitiator
+  tickDeviceLinkAsInitiator,
+  verifyPendingDeviceLink
 } from '../src/utils/fabricDeviceLinkSign';
 import { REVOKE_TYPE, SIGN_TYPE } from '../src/utils/identityCrossSign';
 import { publishIdentityCrossSignKind } from '../src/utils/identityCrossSignPublish';
 import {
+  linkBindingOf,
   mergeLinkedDevice,
   readLinkedDevices,
   removeLinkedDevice
@@ -66,88 +70,123 @@ describe('device-link flow (Passport client ↔ Hub protocol)', function () {
     stub.restore();
   });
 
-  it('runs initiator offer → responder accept → initiator countersign → cross-sign → revoke', async function () {
-    const alice = leaf(new Key());
-    const bob = leaf(new Key());
-    assert.notStrictEqual(alice.ident.id, bob.ident.id);
-
+  async function offerFrom (alice: ReturnType<typeof leaf>) {
     const offer = await startDeviceLinkAsInitiator({
       privateKeyHex: alice.privateKeyHex,
       xpub: alice.xpub,
       hubBase: HUB,
       label: 'Passport'
     });
-    assert.strictEqual(offer.ok, true);
-    if (!offer.ok) return;
-    assert.ok(offer.sessionId);
-    assert.match(offer.protocolUrl, /^fabric:\/\/link\?/);
-    assert.ok(offer.httpsUrl.includes('#device-link='));
+    assert.strictEqual(offer.ok, true, offer.ok === false ? offer.error : '');
+    if (!offer.ok) throw new Error('offer');
+    return offer;
+  }
 
-    const pendingTick = await tickDeviceLinkAsInitiator({
+  function tickOpts (
+    alice: ReturnType<typeof leaf>,
+    offer: Awaited<ReturnType<typeof offerFrom>>,
+    countersigned: string | null = null
+  ) {
+    return {
       privateKeyHex: alice.privateKeyHex,
       xpub: alice.xpub,
       sessionId: offer.sessionId,
       hubBase: offer.hubBase,
       origin: offer.origin,
       nonce: offer.nonce,
-      label: offer.label
-    });
+      label: offer.label,
+      countersigned
+    };
+  }
+
+  it('runs offer → verified prompt → responder accept → confirmed countersign → cross-sign → revoke', async function () {
+    const alice = leaf(new Key());
+    const bob = leaf(new Key());
+    assert.notStrictEqual(alice.ident.id, bob.ident.id);
+
+    const offer = await offerFrom(alice);
+    assert.match(offer.protocolUrl, /^fabric:\/\/link\?/);
+    assert.ok(offer.httpsUrl.includes('#device-link='));
+
+    const pendingTick = await tickDeviceLinkAsInitiator(tickOpts(alice, offer));
     assert.strictEqual(pendingTick.ok, true);
     if (pendingTick.ok) assert.strictEqual(pendingTick.status, 'pending');
 
     const fetched = await fetchPendingDeviceLink(HUB, offer.sessionId);
     assert.strictEqual(fetched.ok, true);
     if (!fetched.ok) return;
-    assert.strictEqual(fetched.status, 'pending');
     assert.strictEqual(fetched.initiator.id, String(alice.ident.id));
 
-    const accepted = await completeDeviceLinkAsResponder(fetched, bob.privateKeyHex, bob.xpub);
-    assert.strictEqual(accepted.ok, true);
+    const shown = await verifyPendingDeviceLink(fetched);
+    assert.strictEqual(shown.ok, true, shown.ok === false ? shown.error : '');
+    if (!shown.ok) return;
+    assert.strictEqual(shown.offer.origin, HUB);
+    assert.strictEqual(shown.offer.initiator.pubkeyHex, alice.fabric.pubkey);
+    assert.strictEqual(shown.offer.fingerprint, keyFingerprint(alice.fabric.pubkey));
+
+    const accepted = await completeDeviceLinkAsResponder(shown.offer, bob.privateKeyHex, bob.xpub);
+    assert.strictEqual(accepted.ok, true, accepted.ok === false ? accepted.error : '');
     if (!accepted.ok) return;
     assert.strictEqual(accepted.status, 'accepted');
     assert.strictEqual(accepted.peerFabricId, String(alice.ident.id));
+    assert.strictEqual(accepted.peerPubkey, alice.fabric.pubkey);
 
-    const linked = await tickDeviceLinkAsInitiator({
+    const asking = await tickDeviceLinkAsInitiator(tickOpts(alice, offer));
+    assert.strictEqual(asking.ok, true, asking.ok === false ? asking.error : '');
+    if (!asking.ok || asking.status !== 'accepted' || !('responder' in asking)) throw new Error('expected accepted');
+    assert.strictEqual(asking.responder.id, String(bob.ident.id));
+    assert.strictEqual(asking.responder.pubkeyHex, bob.fabric.pubkey);
+    assert.strictEqual(stub.sessions.get(offer.sessionId)?.status, 'accepted', 'a tick never countersigns');
+
+    const countersigned = await countersignDeviceLink({
       privateKeyHex: alice.privateKeyHex,
       xpub: alice.xpub,
-      sessionId: offer.sessionId,
-      hubBase: offer.hubBase,
-      origin: offer.origin,
-      nonce: offer.nonce,
-      label: offer.label
+      hubBase: HUB,
+      accepted: asking
     });
-    assert.strictEqual(linked.ok, true);
-    if (!linked.ok) return;
-    assert.strictEqual(linked.status, 'linked');
-    assert.strictEqual(linked.peerFabricId, String(bob.ident.id));
-    assert.ok(linked.peerPubkey);
+    assert.strictEqual(countersigned.ok, true, countersigned.ok === false ? countersigned.error : '');
+
+    const unasked = await tickDeviceLinkAsInitiator(tickOpts(alice, offer));
+    assert.strictEqual(unasked.ok, false, 'linked is reported only for the responder this Passport countersigned');
+
+    const linked = await tickDeviceLinkAsInitiator(tickOpts(alice, offer, asking.responder.id));
+    assert.strictEqual(linked.ok, true, linked.ok === false ? linked.error : '');
+    if (!linked.ok || linked.status !== 'linked' || !('responder' in linked)) throw new Error('expected linked');
+    const binding = { sessionId: linked.sessionId, nonce: linked.nonce, origin: linked.origin };
 
     const signed = await publishIdentityCrossSignKind({
       hubBase: HUB,
       privateKeyHex: alice.privateKeyHex,
       xpub: alice.xpub,
-      peerPubkey: String(linked.peerPubkey),
-      nonce: offer.nonce
+      peerPubkey: linked.responder.pubkeyHex,
+      binding
     });
     assert.strictEqual(signed.ok, true);
     assert.strictEqual(stub.crossSigns[0].type, SIGN_TYPE);
+    assert.strictEqual(stub.crossSigns[0].sessionId, offer.sessionId);
+    assert.strictEqual(stub.crossSigns[0].origin, HUB);
 
     await mergeLinkedDevice({
       kind: 'device-link',
       peerFabricId: String(bob.ident.id),
-      peerPubkey: String(linked.peerPubkey),
-      nonce: offer.nonce,
+      peerPubkey: linked.responder.pubkeyHex,
+      sessionId: linked.sessionId,
+      nonce: linked.nonce,
+      hubOrigin: linked.origin,
       label: 'Passport',
       role: 'initiator'
     });
-    assert.strictEqual((await readLinkedDevices()).length, 1);
+    const rows = await readLinkedDevices();
+    assert.strictEqual(rows.length, 1);
+    assert.deepStrictEqual(linkBindingOf(rows[0]), binding);
+    assert.strictEqual(linkBindingOf({ kind: 'device-link', nonce: offer.nonce, hubOrigin: HUB }), null);
 
     const revoked = await publishIdentityCrossSignKind({
       hubBase: HUB,
       privateKeyHex: alice.privateKeyHex,
       xpub: alice.xpub,
-      peerPubkey: String(linked.peerPubkey),
-      nonce: offer.nonce,
+      peerPubkey: linked.responder.pubkeyHex,
+      binding,
       kind: REVOKE_TYPE
     });
     assert.strictEqual(revoked.ok, true);
@@ -160,16 +199,88 @@ describe('device-link flow (Passport client ↔ Hub protocol)', function () {
     if (alreadyLinked.ok) assert.strictEqual(alreadyLinked.status, 'linked');
   });
 
+  it('refuses an offer whose initiator key, id, or label was changed by the Hub', async function () {
+    const alice = leaf(new Key());
+    const mallory = leaf(new Key());
+    const offer = await offerFrom(alice);
+    const session = stub.sessions.get(offer.sessionId);
+    if (!session) throw new Error('session');
+    const fetched = await fetchPendingDeviceLink(HUB, offer.sessionId);
+    if (!fetched.ok) throw new Error(fetched.error);
+
+    session.initiator.xpub = mallory.xpub;
+    session.initiator.pubkeyHex = mallory.fabric.pubkey;
+    const swappedKey = await verifyPendingDeviceLink(fetched);
+    assert.strictEqual(swappedKey.ok, false);
+
+    session.initiator.xpub = alice.xpub;
+    session.initiator.pubkeyHex = alice.fabric.pubkey;
+    const named = await verifyPendingDeviceLink({
+      ...fetched,
+      initiator: { id: String(mallory.ident.id), xpub: mallory.xpub }
+    });
+    assert.strictEqual(named.ok, false);
+    if (!named.ok) assert.match(named.error, /another device/);
+
+    session.label = 'Passport-2';
+    const relabeled = await verifyPendingDeviceLink(fetched);
+    assert.strictEqual(relabeled.ok, false);
+  });
+
+  it('refuses an offer served for another Hub origin', async function () {
+    const alice = leaf(new Key());
+    const offer = await offerFrom(alice);
+    const session = stub.sessions.get(offer.sessionId);
+    if (!session) throw new Error('session');
+    session.origin = 'https://hub.fabric.pub';
+    const fetched = await fetchPendingDeviceLink(HUB, offer.sessionId);
+    if (!fetched.ok) throw new Error(fetched.error);
+    const checked = await verifyPendingDeviceLink(fetched);
+    assert.strictEqual(checked.ok, false);
+  });
+
+  it('refuses to approve when the offer changed after the prompt', async function () {
+    const alice = leaf(new Key());
+    const bob = leaf(new Key());
+    const offer = await offerFrom(alice);
+    const fetched = await fetchPendingDeviceLink(HUB, offer.sessionId);
+    if (!fetched.ok) throw new Error(fetched.error);
+    const shown = await verifyPendingDeviceLink(fetched);
+    if (!shown.ok) throw new Error(shown.error);
+    const stale = { ...shown.offer, initiator: { ...shown.offer.initiator, pubkeyHex: bob.fabric.pubkey } };
+    const refused = await completeDeviceLinkAsResponder(stale, bob.privateKeyHex, bob.xpub);
+    assert.strictEqual(refused.ok, false);
+    if (!refused.ok) assert.match(refused.error, /changed/);
+    assert.strictEqual(stub.sessions.get(offer.sessionId)?.status, 'pending');
+  });
+
+  it('refuses an accepted session whose responder signature does not check out', async function () {
+    const alice = leaf(new Key());
+    const bob = leaf(new Key());
+    const mallory = leaf(new Key());
+    const offer = await offerFrom(alice);
+    const fetched = await fetchPendingDeviceLink(HUB, offer.sessionId);
+    if (!fetched.ok) throw new Error(fetched.error);
+    const shown = await verifyPendingDeviceLink(fetched);
+    if (!shown.ok) throw new Error(shown.error);
+    const accepted = await completeDeviceLinkAsResponder(shown.offer, bob.privateKeyHex, bob.xpub);
+    assert.strictEqual(accepted.ok, true);
+    const session = stub.sessions.get(offer.sessionId);
+    if (!session || !session.responder) throw new Error('session');
+    session.responder.xpub = mallory.xpub;
+    session.responder.pubkeyHex = mallory.fabric.pubkey;
+    const tick = await tickDeviceLinkAsInitiator(tickOpts(alice, offer));
+    assert.strictEqual(tick.ok, false);
+  });
+
   it('refuses self-link and invalid hub bases', async function () {
     const alice = leaf(new Key());
-    const self = await completeDeviceLinkAsResponder({
-      sessionId: 'aa'.repeat(24),
-      hubBase: HUB,
-      origin: HUB,
-      nonce: 'ab'.repeat(32),
-      label: 'Passport',
-      initiator: { id: String(alice.ident.id), xpub: alice.xpub, pubkeyHex: alice.fabric.pubkey }
-    }, alice.privateKeyHex, alice.xpub);
+    const own = await offerFrom(alice);
+    const ownPending = await fetchPendingDeviceLink(HUB, own.sessionId);
+    if (!ownPending.ok) throw new Error(ownPending.error);
+    const ownShown = await verifyPendingDeviceLink(ownPending);
+    if (!ownShown.ok) throw new Error(ownShown.error);
+    const self = await completeDeviceLinkAsResponder(ownShown.offer, alice.privateKeyHex, alice.xpub);
     assert.strictEqual(self.ok, false);
     if (!self.ok) assert.match(self.error, /itself/);
 
@@ -241,12 +352,14 @@ describe('device-link flow (Passport client ↔ Hub protocol)', function () {
     const fetched = await fetchPendingDeviceLink(HUB, offer.sessionId);
     assert.strictEqual(fetched.ok, true);
     if (!fetched.ok) return;
+    const shown = await verifyPendingDeviceLink(fetched);
+    if (!shown.ok) throw new Error(shown.error);
 
     stub.restore();
     (globalThis as { fetch: typeof fetch }).fetch = (async () => {
       return { ok: false, status: 500, json: async () => ({ error: 'hub down' }) } as Response;
     }) as typeof fetch;
-    const failed = await completeDeviceLinkAsResponder(fetched, bob.privateKeyHex, bob.xpub);
+    const failed = await completeDeviceLinkAsResponder(shown.offer, bob.privateKeyHex, bob.xpub);
     assert.strictEqual(failed.ok, false);
     if (!failed.ok) assert.match(failed.error, /hub down|HTTP 500/);
   });

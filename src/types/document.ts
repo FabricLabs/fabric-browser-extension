@@ -134,6 +134,7 @@ export class FabricDocument {
   private keys = new Map<number, string>();
   private ciphertexts = new Map<number, Uint8Array>();
   private plaintexts = new Map<number, Uint8Array>();
+  private rootCheck: { root: string; ok: Promise<boolean> } | null = null;
 
   private constructor (record: DocumentRecord) {
     this.record = record;
@@ -246,7 +247,27 @@ export class FabricDocument {
     return toHex(await sha256(bytes)) === leaf.blobHashHex;
   }
 
+  /** True when the blob list is complete, indexed 0..n-1, and commits to `merkleRootHex`. */
+  async verifyRoot (): Promise<boolean> {
+    const { blobs, blobTotal, merkleRootHex } = this.record;
+    if (!this.rootCheck || this.rootCheck.root !== merkleRootHex) {
+      const check = async (): Promise<boolean> => {
+        if (!blobs.length || blobs.length !== blobTotal) return false;
+        const ordered = blobs.slice().sort((a, b) => a.index - b.index);
+        if (!ordered.every((b, i) => b.index === i)) return false;
+        try {
+          return (await documentMerkleRootHex(ordered)) === merkleRootHex;
+        } catch (_) {
+          return false;
+        }
+      };
+      this.rootCheck = { root: merkleRootHex, ok: check() };
+    }
+    return this.rootCheck.ok;
+  }
+
   async acceptBytes (index: number, bytes: Uint8Array): Promise<boolean> {
+    if (!(await this.verifyRoot())) return false;
     if (!(await this.verify(index, bytes))) return false;
     this.ciphertexts.set(index, bytes);
     if (!this.record.sealed) this.plaintexts.set(index, bytes);
@@ -257,6 +278,7 @@ export class FabricDocument {
   async openBlob (index: number, keyHex: string, ciphertext?: Uint8Array): Promise<Uint8Array> {
     const leaf = this.blob(index);
     if (!leaf) throw new Error('unknown blob index');
+    if (!(await this.verifyRoot())) throw new Error('blob list does not match the document root');
     const ct = ciphertext || this.ciphertexts.get(index);
     if (!ct) throw new Error('ciphertext not held');
     if (leaf.paymentHashHex && toHex(await sha256(fromHex(keyHex))) !== leaf.paymentHashHex) {

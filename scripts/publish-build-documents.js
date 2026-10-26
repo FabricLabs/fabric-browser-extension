@@ -43,10 +43,19 @@ function printHelp () {
 Env: FABRIC_HUB_RPC_URL, FABRIC_HUB_URL, FABRIC_HUB_ADMIN_TOKEN,
      FABRIC_PLAYNET_PRODUCTION, FABRIC_HUB_RPC_TIMEOUT_MS
 
-  With FABRIC_HUB_ADMIN_TOKEN (or ~/.fabric/hub-admin-token), CreateDocument
-  uses filePath ingest (no multi-MiB base64). Without a token, contentBase64
-  is used and needs @fabric/http JSON body limit ≥12mb (default after RSI cut).
+  On a loopback Hub with FABRIC_HUB_ADMIN_TOKEN (or ~/.fabric/hub-admin-token),
+  CreateDocument uses filePath ingest (no multi-MiB base64). A remote Hub, or no
+  token, gets contentBase64, which needs @fabric/http JSON body limit ≥12mb
+  (default after RSI cut); remote Hubs only see FABRIC_HUB_ADMIN_TOKEN.
 `);
+}
+
+function parsePrice (v) {
+  const n = Number(v);
+  if (v == null || String(v).trim() === '' || !Number.isFinite(n)) {
+    throw new Error('invalid --price value: ' + v);
+  }
+  return Math.max(0, Math.floor(n));
 }
 
 function parseArgs (argv) {
@@ -73,11 +82,11 @@ function parseArgs (argv) {
     } else if (a === '--all') {
       opts.latestOnly = false;
     } else if (a === '--price' || a === '--purchasePriceSats') {
-      opts.price = Math.max(0, Math.floor(Number(argv[++i])));
+      opts.price = parsePrice(argv[++i]);
     } else if (a === '--host') {
       opts.host = argv[++i];
     } else if (a.startsWith('--price=')) {
-      opts.price = Math.max(0, Math.floor(Number(a.slice('--price='.length))));
+      opts.price = parsePrice(a.slice('--price='.length));
     } else if (a.startsWith('--host=')) {
       opts.host = a.slice('--host='.length);
     } else if (a.startsWith('-')) {

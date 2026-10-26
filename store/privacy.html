@@ -98,7 +98,7 @@
       Passport does not collect health information, location, general browsing history, page HTML, cookies from unrelated sites, or advertising identifiers.
     </p>
     <p>
-      The content script runs on HTTPS pages (and listed loopback Hub ports) so a Fabric site can postMessage a login or device-link request. It does not scrape the page. It ignores messages that are not Fabric site-login, device-link, or Hub mesh-bridge messages.
+      The content script runs on HTTPS pages and on loopback addresses (localhost, 127.0.0.1, [::1], any port) so a Fabric site can postMessage a login or device-link request. It does not scrape the page. It ignores messages that are not Fabric site-login, device-link, or Hub mesh-bridge messages.
     </p>
 
     <h2>3. Information sent to other computers</h2>
@@ -109,7 +109,7 @@
       <li>Chrome / Google as part of installing or updating the extension from the Chrome Web Store. Fabric Labs does not receive that telemetry.</li>
     </ol>
     <p>
-      Cleartext http:// is allowed only for loopback (localhost / 127.0.0.1) so you can develop against a local Hub. Public hubs must be HTTPS.
+      Public hubs must be HTTPS. Cleartext http:// is allowed for loopback (localhost / 127.0.0.1 / [::1]) so you can develop against a local Hub, and for a Hub on your local network that you add by exact origin under Trusted hubs — Passport then asks Chrome for access to that one host (optional http://*/* host permission, granted per host) and talks to it only after you accept. Traffic to such a Hub is not encrypted in transit; add only Hubs on networks you trust.
     </p>
     <p>
       We do not sell user data. We do not use user data for advertising, credit-worthiness, or lending. We do not transfer user data to data brokers.

@@ -23,7 +23,7 @@ import {
 import { evaluateDeviceLinkPageRequest, fetchPendingDeviceLink } from './utils/fabricDeviceLinkFetch';
 import {
   assertAllowedFabricHub,
-  loadFabricHubAllowlistExtras
+  requestFabricHubGateOptions
 } from './utils/fabricHubAllowlist';
 import { installFabric402FetchInterceptor } from './content/fabric402FetchPatch';
 import { swallowNonFatal } from './utils/nonFatal';
@@ -105,8 +105,8 @@ window.addEventListener('message', (event: MessageEvent) => {
     return;
   }
 
-  void loadFabricHubAllowlistExtras().then((extra) => {
-    const hubGate = assertAllowedFabricHub(hubBase, { extra });
+  void requestFabricHubGateOptions().then((gate) => {
+    const hubGate = assertAllowedFabricHub(hubBase, gate);
     if (!hubGate.ok) {
       window.postMessage({
         source: 'fabric-passport',
@@ -182,13 +182,13 @@ window.addEventListener('message', (event: MessageEvent) => {
   const declaredOrigin = typeof data.origin === 'string' ? data.origin.trim() : event.origin;
   if (!sessionId || !hubRaw) return;
 
-  void loadFabricHubAllowlistExtras().then((extra) => {
+  void requestFabricHubGateOptions().then((gate) => {
     const pageGate = evaluateDeviceLinkPageRequest({
       sessionId,
       hubRaw,
       declaredOrigin,
       pageOrigin: event.origin,
-      extra
+      ...gate
     });
     if (!pageGate.ok) {
       window.postMessage({

@@ -5,13 +5,8 @@
  * Passport key with the peer device. Does not copy a mnemonic.
  */
 
-import { buildClientSignedLoginBody } from './fabricSiteLoginSign';
-import {
-  buildCrossSignMessage,
-  buildRevokeMessage,
-  REVOKE_TYPE,
-  SIGN_TYPE
-} from './identityCrossSign';
+import { REVOKE_TYPE, SIGN_TYPE, signCrossSign } from './identityCrossSign';
+import type { CrossSignBinding } from './identityCrossSign';
 import { swallowNonFatal } from './nonFatal';
 
 function bases (origin: string): string[] {
@@ -24,33 +19,29 @@ function bases (origin: string): string[] {
 
 export type CrossSignKind = typeof SIGN_TYPE | typeof REVOKE_TYPE;
 
+/**
+ * Sign for the device-link session in `binding` (its id, nonce, and the Hub
+ * origin it was made on) and POST to `hubBase`.
+ */
 export async function publishIdentityCrossSignKind (opts: {
   hubBase: string;
   privateKeyHex: string;
   xpub: string;
   peerPubkey: string;
-  nonce: string;
+  binding: CrossSignBinding;
   kind?: CrossSignKind;
 }): Promise<{ ok: true } | { ok: false; error: string }> {
   const kind = opts.kind || SIGN_TYPE;
-  const probe = buildClientSignedLoginBody('fabric:device-link:id-probe', opts.privateKeyHex, opts.xpub);
-  const localPubkey = probe.pubkeyHex;
-  const message = kind === REVOKE_TYPE
-    ? buildRevokeMessage(opts.nonce, localPubkey, opts.peerPubkey)
-    : buildCrossSignMessage(opts.nonce, localPubkey, opts.peerPubkey);
-  if (!message) return { ok: false, error: 'invalid cross-sign fields' };
-  const signed = buildClientSignedLoginBody(message, opts.privateKeyHex, opts.xpub);
-  const body = {
-    type: kind,
-    '@type': kind,
-    localPubkey,
-    peerPubkey: opts.peerPubkey,
-    nonce: opts.nonce,
-    createdAt: new Date().toISOString(),
-    signature: signed.signature,
-    pubkeyHex: signed.pubkeyHex,
-    identity: signed.identity
-  };
+  let body: Record<string, unknown>;
+  try {
+    body = signCrossSign(
+      { privateKeyHex: opts.privateKeyHex, xpub: opts.xpub },
+      { ...opts.binding, peerPubkey: opts.peerPubkey },
+      kind
+    );
+  } catch (err: unknown) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
   let last = 'no hub';
   for (const url of bases(opts.hubBase)) {
     try {
@@ -78,7 +69,7 @@ export async function publishIdentityCrossSign (opts: {
   privateKeyHex: string;
   xpub: string;
   peerPubkey: string;
-  nonce: string;
+  binding: CrossSignBinding;
 }): Promise<void> {
   await publishIdentityCrossSignKind(opts);
 }

@@ -9,7 +9,7 @@ Security posture and leftover work: [SECURITY.md](SECURITY.md), [docs/OUTSTANDIN
 
 Chrome Web Store listing pack (copy-paste answers, privacy policy, icons, screenshots): [docs/CHROME_WEB_STORE.md](docs/CHROME_WEB_STORE.md). Toolbar and store icons are the Fabric lettermark (serif **f** on royal purple `#4C1D95`) from `@fabric/http` `npm run make:icons`. Render listing graphics with `npm run store:assets`. Build the upload zip with `npm run package`.
 
-### Playnet / local publish
+## Playnet / local publish
 With a local Hub (or production playnet) reachable over HTTP JSON-RPC:
 
 ```bash
@@ -20,7 +20,7 @@ npm run playnet:publish                 # package + Documents + downloads sync
 npm run playnet:publish -- --production # Documents → https://hub.fabric.pub
 ```
 
-`publish:builds` runs Hub `CreateDocument` + `PublishDocument` so peers see the zip on inventory (set `FABRIC_HUB_ADMIN_TOKEN` for efficient `filePath` ingest). `sync:hub-downloads` copies into the sibling Hub static FileBrowser (`FABRIC_HUB_ROOT` / `--hub-root` if not `../hub.fabric.pub`).
+`publish:builds` runs Hub `CreateDocument` + `PublishDocument` so peers see the zip on inventory (on a loopback Hub, set `FABRIC_HUB_ADMIN_TOKEN` for efficient `filePath` ingest). `sync:hub-downloads` copies into the sibling Hub static FileBrowser (`FABRIC_HUB_ROOT` / `--hub-root` if not `../hub.fabric.pub`).
 
 ## Features
 Additional extension features and configurations can be accessed in the settings page on the top-right corner of the first home-page

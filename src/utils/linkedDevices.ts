@@ -13,6 +13,7 @@ export type LinkedDevice = {
   peerXpub?: string;
   peerPubkey?: string;
   pubkey?: string;
+  sessionId?: string;
   nonce?: string;
   label?: string;
   hubOrigin?: string;
@@ -32,6 +33,26 @@ function storage (): typeof chrome.storage.local | null {
 export function peerIdOf (device: LinkedDevice | null | undefined): string {
   if (!device) return '';
   return String(device.peerFabricId || device.peerPubkey || device.pubkey || '');
+}
+
+/**
+ * Device-link session a revoke must name (`sessionId`, `nonce`, Hub `origin`), or
+ * null for a device linked before links were bound to a session — link it again.
+ */
+export function linkBindingOf (
+  device: LinkedDevice | null | undefined
+): { sessionId: string; nonce: string; origin: string } | null {
+  if (!device) return null;
+  const sessionId = String(device.sessionId || '').toLowerCase();
+  const nonce = String(device.nonce || '').toLowerCase();
+  let origin = '';
+  try {
+    origin = new URL(String(device.hubOrigin || '')).origin;
+  } catch {
+    return null;
+  }
+  if (!/^[a-f0-9]{48}$/.test(sessionId) || !/^[a-f0-9]{64}$/.test(nonce)) return null;
+  return { sessionId, nonce, origin };
 }
 
 export async function readLinkedDevices (): Promise<LinkedDevice[]> {

@@ -15,6 +15,8 @@ export const TELEMETRY_VERSION = 1 as const;
 export const HOP_PENALTY_MS = 50;
 export const SCORE_MAX = 1000;
 export const SCORE_UNKNOWN = 0;
+/** Core `MAX_DOCUMENT_BLOBS`: peer-advertised blob counts and indexes above it are refused. */
+export const MAX_DOCUMENT_BLOBS = 8192;
 
 export interface OfferRow {
   documentId: string;
@@ -78,6 +80,16 @@ const HEX64 = /^[0-9a-f]{64}$/;
 function hex64 (value: unknown): string | null {
   const s = String(value == null ? '' : value).trim().toLowerCase();
   return HEX64.test(s) ? s : null;
+}
+
+function blobTotalOrNull (value: unknown): number | null {
+  const n = Number(value);
+  return Number.isInteger(n) && n >= 1 && n <= MAX_DOCUMENT_BLOBS ? n : null;
+}
+
+function blobIndexOrNull (value: unknown): number | null {
+  const n = Number(value);
+  return Number.isInteger(n) && n >= 0 && n < MAX_DOCUMENT_BLOBS ? n : null;
 }
 
 function asRecord (value: unknown): Record<string, unknown> | null {
@@ -305,10 +317,12 @@ export class DocumentOfferBook {
         for (const b0 of blobs) {
           const b = asRecord(b0);
           if (!b) continue;
+          const blobIndex = blobIndexOrNull(b.index);
+          if (blobIndex == null) continue;
           const row: OfferRow = {
             ...base,
-            blobIndex: Number(b.index),
-            blobTotal: Number(b.total != null ? b.total : blobs.length),
+            blobIndex,
+            blobTotal: blobTotalOrNull(b.total != null ? b.total : blobs.length),
             rateSats: Number(b.rateSats != null ? b.rateSats : rateSats) || 0,
             contentHashHex: contentHashHexFromObject(b) || contentHashHex,
             blobHashHex: hex64(b.blobHashHex),
@@ -318,10 +332,12 @@ export class DocumentOfferBook {
           out.push(row);
         }
       } else {
+        const blobIndex = it.blobIndex != null ? blobIndexOrNull(it.blobIndex) : null;
+        if (it.blobIndex != null && blobIndex == null) continue;
         const row: OfferRow = {
           ...base,
-          blobIndex: it.blobIndex != null ? Number(it.blobIndex) : null,
-          blobTotal: it.blobTotal != null ? Number(it.blobTotal) : null,
+          blobIndex,
+          blobTotal: it.blobTotal != null ? blobTotalOrNull(it.blobTotal) : null,
           rateSats,
           contentHashHex,
           blobHashHex: hex64(it.blobHashHex),

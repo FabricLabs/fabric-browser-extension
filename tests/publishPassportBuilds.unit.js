@@ -10,6 +10,8 @@ const {
   listBuildArtifacts,
   pickPrimaryZip,
   hubBase,
+  isLoopbackHub,
+  loadAdminToken,
   DEFAULT_HUB,
   PRODUCTION_HUB,
   ZIP_NAME_RE
@@ -24,6 +26,43 @@ describe('publishPassportBuilds', function () {
     assert.strictEqual(hubBase({}), DEFAULT_HUB);
     assert.strictEqual(hubBase({ production: true }), PRODUCTION_HUB);
     assert.strictEqual(hubBase({ host: 'http://127.0.0.1:9999/' }), 'http://127.0.0.1:9999');
+  });
+
+  it('treats only loopback hosts as local Hubs', function () {
+    assert.ok(isLoopbackHub(DEFAULT_HUB));
+    assert.ok(isLoopbackHub('http://localhost:8080'));
+    assert.ok(isLoopbackHub('http://[::1]:8080'));
+    assert.ok(!isLoopbackHub(PRODUCTION_HUB));
+    assert.ok(!isLoopbackHub('http://127.0.0.1.example.com'));
+    assert.ok(!isLoopbackHub('not a url'));
+  });
+
+  it('reads the local admin-token file only when allowed', function () {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'passport-home-'));
+    const saved = {
+      HOME: process.env.HOME,
+      USERPROFILE: process.env.USERPROFILE,
+      FABRIC_HUB_ADMIN_TOKEN: process.env.FABRIC_HUB_ADMIN_TOKEN,
+      FABRIC_ADMIN_TOKEN: process.env.FABRIC_ADMIN_TOKEN
+    };
+    try {
+      fs.mkdirSync(path.join(home, '.fabric'));
+      fs.writeFileSync(path.join(home, '.fabric', 'hub-admin-token'), 'local-token\n');
+      process.env.HOME = home;
+      delete process.env.USERPROFILE;
+      delete process.env.FABRIC_HUB_ADMIN_TOKEN;
+      delete process.env.FABRIC_ADMIN_TOKEN;
+      assert.strictEqual(loadAdminToken({}), 'local-token');
+      assert.strictEqual(loadAdminToken({ allowFile: false }), '');
+      process.env.FABRIC_HUB_ADMIN_TOKEN = 'explicit';
+      assert.strictEqual(loadAdminToken({ allowFile: false }), 'explicit');
+    } finally {
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+      fs.rmSync(home, { recursive: true, force: true });
+    }
   });
 
   it('lists and picks the newest fabric-passport zip', function () {

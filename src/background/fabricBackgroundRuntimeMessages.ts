@@ -17,8 +17,11 @@ import {
 } from '../constants/siteLogin';
 import {
   completeWithDesktop,
+  checkSenderFrame,
   queueFabricMessage,
   queueHubLogin,
+  readPendingSiteLogin,
+  siteLoginPromptOpen,
   writePendingSiteLogin,
   type PendingSiteLoginRow
 } from './fabricSiteLoginRuntime';
@@ -41,7 +44,11 @@ import {
 import { attemptPayBolt11ViaActiveFabricNode } from './passportBolt11Pay';
 import { swallowNonFatal } from '../utils/nonFatal';
 import { validateQueuedDeviceLinkOffer } from '../utils/fabricDeviceLinkFetch';
-import { assertAllowedFabricHub, loadFabricHubAllowlistExtras } from '../utils/fabricHubAllowlist';
+import {
+  assertAllowedFabricHub,
+  loadFabricHubGateOptions,
+  FABRIC_RUNTIME_HUB_GATE_OPTIONS
+} from '../utils/fabricHubAllowlist';
 import { originOfSender } from '../utils/fabricSiteMessage';
 
 type PendingDeviceLinkRow = {
@@ -309,8 +316,8 @@ export function handleFabricRuntimeMessage (
       sendResponse({ ok: false, error: 'origin_mismatch' });
       return false;
     }
-    void loadFabricHubAllowlistExtras().then((extra) => {
-      const gate = assertAllowedFabricHub(expectedOrigin, { extra });
+    void loadFabricHubGateOptions().then((gateOptions) => {
+      const gate = assertAllowedFabricHub(expectedOrigin, gateOptions);
       if (!gate.ok) {
         sendResponse({ ok: false, error: 'hub_not_allowed' });
         return;
@@ -428,6 +435,11 @@ export function handleFabricRuntimeMessage (
 
   /** Content script: queue a site login (legacy `/sessions` challenge or a page `fabric:` request) for the popup. */
   if ((m.type === FABRIC_RUNTIME_SITE_LOGIN_REQUEST || m.type === FABRIC_RUNTIME_FABRIC_MESSAGE) && sender.tab) {
+    const frame = checkSenderFrame(sender);
+    if (!frame.ok) {
+      sendResponse({ ok: false, error: frame.error });
+      return false;
+    }
     const queued = m.type === FABRIC_RUNTIME_FABRIC_MESSAGE
       ? queueFabricMessage(m, sender)
       : queueHubLogin(m, sender);
@@ -436,17 +448,23 @@ export function handleFabricRuntimeMessage (
       return false;
     }
     const row: PendingSiteLoginRow = queued.row;
-    void writePendingSiteLogin(row).then(() => {
-      showFabricNotification('Fabric Passport', `Sign-in request from ${row.origin}`);
-      // Best-effort: focus the extension action so the user opens the popup.
-      try {
-        if (chrome.action?.openPopup) {
-          void chrome.action.openPopup().catch((err: unknown) => swallowNonFatal('site-login-open-popup', err));
-        }
-      } catch (err: unknown) {
-        swallowNonFatal('site-login-open-popup', err);
+    void readPendingSiteLogin().then((current) => {
+      if (siteLoginPromptOpen(current)) {
+        sendResponse({ ok: false, error: 'busy' });
+        return;
       }
-      sendResponse({ ok: true });
+      return writePendingSiteLogin(row).then(() => {
+        showFabricNotification('Fabric Passport', `Sign-in request from ${row.origin}`);
+        // Best-effort: focus the extension action so the user opens the popup.
+        try {
+          if (chrome.action?.openPopup) {
+            void chrome.action.openPopup().catch((err: unknown) => swallowNonFatal('site-login-open-popup', err));
+          }
+        } catch (err: unknown) {
+          swallowNonFatal('site-login-open-popup', err);
+        }
+        sendResponse({ ok: true });
+      });
     }).catch((e: unknown) => {
       sendResponse({ ok: false, error: String(e) });
     });
@@ -479,8 +497,23 @@ export function handleFabricRuntimeMessage (
     return true;
   }
 
+  /** Content script: which loopback Hub (the active node) the page gates may allow. */
+  if (m.type === FABRIC_RUNTIME_HUB_GATE_OPTIONS) {
+    void loadFabricHubGateOptions().then((gate) => sendResponse({ activeHub: gate.activeHub || null }));
+    return true;
+  }
+
   /** Content script: queue a mutual device-link offer for the popup to approve (responder). */
   if (m.type === FABRIC_RUNTIME_DEVICE_LINK_REQUEST) {
+    const frame = checkSenderFrame(sender);
+    if (!frame.ok) {
+      sendResponse({ ok: false, error: frame.error });
+      return false;
+    }
+    if (originOfSender(sender) !== (typeof m.pageOrigin === 'string' ? m.pageOrigin.trim() : '')) {
+      sendResponse({ ok: false, error: 'origin_mismatch' });
+      return false;
+    }
     const queued = validateQueuedDeviceLinkOffer(m);
     if (!queued.ok) {
       sendResponse({ ok: false, error: queued.error });

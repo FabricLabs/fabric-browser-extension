@@ -23,6 +23,8 @@ jobs:
     steps:
       - name: Checkout branch
         uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Install Node.js
         uses: actions/setup-node@v7
@@ -36,6 +38,10 @@ jobs:
         with:
           path: ~/.cache/ms-playwright
           key: ${{ runner.os }}-playwright-${{ hashFiles('package-lock.json') }}
+
+      # Node 26.12.1 bundles npm 11; package.json engines and .npmrc allow-git need npm 12.
+      - name: Install npm 12
+        run: npm install -g npm@12.2.1
 
       - name: Install dependencies
         run: npm ci

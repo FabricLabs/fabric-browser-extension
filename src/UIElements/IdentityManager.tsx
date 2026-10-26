@@ -48,7 +48,9 @@ import {
   DEFAULT_DEVICE_LINK_HUB,
   startDeviceLinkAsInitiator,
   tickDeviceLinkAsInitiator,
-  cancelDeviceLinkSession
+  countersignDeviceLink,
+  cancelDeviceLinkSession,
+  keyFingerprint
 } from '../utils/fabricDeviceLinkSign';
 import { normalizeDesktopSignerBase, requestDesktopLink } from '../utils/fabricDesktopSigner';
 import { publishIdentityCrossSign, publishIdentityCrossSignKind } from '../utils/identityCrossSignPublish';
@@ -58,6 +60,7 @@ import {
   mergeLinkedDevice,
   removeLinkedDevice,
   peerIdOf,
+  linkBindingOf,
   type LinkedDevice
 } from '../utils/linkedDevices';
 
@@ -796,9 +799,14 @@ const IdentityManager = () => {
     }
   }, []);
 
+  const signingIdentity: Identity | null = selectedIdentity
+    ?? identities.find(i => i.isCurrent)
+    ?? identities.find(i => i.hasPrivateKey)
+    ?? null;
+
   const handleStartDeviceLink = useCallback(async (hubOverride?: string) => {
-    const pk = selectedIdentity?.privateKeyHex;
-    const xp = selectedIdentity?.xpub;
+    const pk = signingIdentity?.privateKeyHex;
+    const xp = signingIdentity?.xpub;
     if (!pk || !xp) {
       setDeviceLinkError('Unlock your Passport identity before creating a link offer.');
       return;
@@ -839,82 +847,121 @@ const IdentityManager = () => {
       });
     }
     let attempts = 0;
+    let inFlight = false;
+    let asked = false;
+    let countersigned: string | null = null;
+    const stop = (message: string | null) => {
+      clearDeviceLinkPoll();
+      setDeviceLinkOffer(null);
+      setDeviceLinkBusy(false);
+      if (message) setDeviceLinkError(message);
+    };
     deviceLinkPollRef.current = setInterval(() => {
+      if (inFlight) return;
       attempts += 1;
       if (attempts > 240) {
-        clearDeviceLinkPoll();
         void cancelDeviceLinkSession(started.hubBase, started.sessionId, {
           pollSecret: started.pollSecret
         });
-        setDeviceLinkBusy(false);
-        setDeviceLinkError('Timed out — scan a fresh QR. Offers last about 10 minutes.');
-        setDeviceLinkOffer(null);
+        stop('Timed out — scan a fresh QR. Offers last about 10 minutes.');
         return;
       }
+      inFlight = true;
       void (async () => {
-        const tick = await tickDeviceLinkAsInitiator({
-          privateKeyHex: pk,
-          xpub: xp,
-          sessionId: started.sessionId,
-          hubBase: started.hubBase,
-          origin: started.origin,
-          nonce: started.nonce,
-          label: started.label
-        });
-        if (!tick.ok) return;
-        if (tick.status !== 'linked') return;
-        clearDeviceLinkPoll();
-        if (tick.peerPubkey && tick.nonce) {
+        try {
+          const tick = await tickDeviceLinkAsInitiator({
+            privateKeyHex: pk,
+            xpub: xp,
+            sessionId: started.sessionId,
+            hubBase: started.hubBase,
+            origin: started.origin,
+            nonce: started.nonce,
+            label: started.label,
+            countersigned
+          });
+          if (!tick.ok) {
+            if (asked) stop(tick.error);
+            return;
+          }
+          if (tick.status === 'accepted' && 'responder' in tick) {
+            if (asked) return;
+            asked = true;
+            const approved = window.confirm(
+              `Link this Passport with the device whose key fingerprint is ${keyFingerprint(tick.responder.pubkeyHex)} ` +
+              `(via ${tick.origin})?\n\nApprove only if the other device shows this fingerprint.`
+            );
+            if (!approved) {
+              void cancelDeviceLinkSession(started.hubBase, started.sessionId, {
+                pollSecret: started.pollSecret
+              });
+              stop('Link declined. Nothing was signed.');
+              return;
+            }
+            const signed = await countersignDeviceLink({
+              privateKeyHex: pk,
+              xpub: xp,
+              hubBase: started.hubBase,
+              accepted: tick
+            });
+            if (!signed.ok) {
+              stop(signed.error);
+              return;
+            }
+            countersigned = tick.responder.id;
+            return;
+          }
+          if (tick.status !== 'linked' || !('responder' in tick)) return;
+          clearDeviceLinkPoll();
+          const binding = { sessionId: tick.sessionId, nonce: tick.nonce, origin: tick.origin };
           void publishIdentityCrossSign({
             hubBase: started.hubBase,
             privateKeyHex: pk,
             xpub: xp,
-            peerPubkey: tick.peerPubkey,
-            nonce: tick.nonce
+            peerPubkey: tick.responder.pubkeyHex,
+            binding
           }).catch((err: unknown) => swallowNonFatal('identity-cross-sign-publish', err));
-        }
-        if (tick.peerFabricId) {
           await mergeLinkedDevice({
             kind: 'device-link',
-            peerFabricId: tick.peerFabricId,
-            peerXpub: tick.peerXpub || undefined,
-            peerPubkey: tick.peerPubkey || undefined,
+            peerFabricId: tick.responder.id,
+            peerXpub: tick.responder.xpub,
+            peerPubkey: tick.responder.pubkeyHex,
+            sessionId: tick.sessionId,
             nonce: tick.nonce,
             label: tick.label || 'Linked device',
-            hubOrigin: started.origin,
+            hubOrigin: tick.origin,
             linkedAt: new Date().toISOString(),
             role: 'initiator'
           });
           refreshLinkedDevices();
+          stop(null);
+        } finally {
+          inFlight = false;
         }
-        setDeviceLinkOffer(null);
-        setDeviceLinkBusy(false);
       })();
     }, 1500);
-  }, [selectedIdentity, clearDeviceLinkPoll, deviceLinkHubBase, refreshLinkedDevices, deviceLinkOffer]);
+  }, [signingIdentity, clearDeviceLinkPoll, deviceLinkHubBase, refreshLinkedDevices, deviceLinkOffer]);
 
   const handleRevokeLinkedDevice = useCallback(async (device: LinkedDevice) => {
-    const pk = selectedIdentity?.privateKeyHex;
-    const xp = selectedIdentity?.xpub;
+    const pk = signingIdentity?.privateKeyHex;
+    const xp = signingIdentity?.xpub;
     if (!pk || !xp) {
       setDeviceLinkError('Unlock your Passport identity before revoking a device.');
       return;
     }
-    const nonce = device.nonce;
+    const binding = linkBindingOf(device);
     const peerPubkey = device.peerPubkey || device.pubkey;
-    if (!nonce || !peerPubkey) {
-      setDeviceLinkError('No pairing nonce — complete fabric://link again before revoking.');
+    if (!binding || !peerPubkey) {
+      setDeviceLinkError('This device was linked with an older version. Link it again, then revoke.');
       return;
     }
     setDeviceLinkBusy(true);
     setDeviceLinkError(null);
-    const hubBase = device.hubOrigin || deviceLinkHubBase();
     const posted = await publishIdentityCrossSignKind({
-      hubBase,
+      hubBase: binding.origin,
       privateKeyHex: pk,
       xpub: xp,
       peerPubkey,
-      nonce,
+      binding,
       kind: REVOKE_TYPE
     });
     if (!posted.ok) {
@@ -925,7 +972,7 @@ const IdentityManager = () => {
     await removeLinkedDevice(peerIdOf(device));
     refreshLinkedDevices();
     setDeviceLinkBusy(false);
-  }, [selectedIdentity, deviceLinkHubBase, refreshLinkedDevices]);
+  }, [signingIdentity, refreshLinkedDevices]);
 
   const performAutoLock = useCallback(() => {
     setIdentities(prev => {
@@ -999,7 +1046,7 @@ const IdentityManager = () => {
         performAutoLock();
         lastUserActivityRef.current = Date.now();
       } else {
-        lastUserActivityRef.current = stored ?? Date.now();
+        lastUserActivityRef.current = stored || Date.now();
       }
     })();
     return () => {
@@ -4131,13 +4178,15 @@ const IdentityManager = () => {
                     <List divided>
                       {linkedDevices.map((d) => {
                         const pid = peerIdOf(d);
+                        const current = !!linkBindingOf(d);
+                        const peerKey = d.peerPubkey || d.pubkey || '';
                         return (
                           <List.Item key={pid || d.linkedAt || d.label}>
                             <List.Content floated="right">
                               <Button
                                 size="mini"
                                 negative
-                                disabled={deviceLinkBusy || !selectedIdentity?.privateKeyHex}
+                                disabled={deviceLinkBusy || !signingIdentity?.privateKeyHex}
                                 onClick={() => void handleRevokeLinkedDevice(d)}
                               >
                                 Revoke
@@ -4145,8 +4194,14 @@ const IdentityManager = () => {
                             </List.Content>
                             <List.Header>{d.label || d.kind || 'Device'}</List.Header>
                             <List.Description style={{ wordBreak: 'break-all', fontSize: '0.85em' }}>
+                              {peerKey ? <><code>{keyFingerprint(peerKey)}</code>{' · '}</> : null}
                               {pid || '—'}
                               {d.hubOrigin ? ` · ${d.hubOrigin}` : ''}
+                              {current ? null : (
+                                <div style={{ color: '#f2c037' }}>
+                                  Linked with an older version — link this device again.
+                                </div>
+                              )}
                             </List.Description>
                           </List.Item>
                         );
@@ -4161,8 +4216,8 @@ const IdentityManager = () => {
                 <List.Header>Desktop apps on this computer</List.Header>
                 <List.Description>
                   <DesktopSignersPanel
-                    pubkey={selectedIdentity?.publicKeyHex || null}
-                    disabled={deviceLinkBusy || !selectedIdentity?.privateKeyHex}
+                    pubkey={signingIdentity?.publicKeyHex || null}
+                    disabled={deviceLinkBusy || !signingIdentity?.privateKeyHex}
                     onLink={(base) => void handleStartDeviceLink(base)}
                   />
                 </List.Description>
@@ -4189,11 +4244,11 @@ const IdentityManager = () => {
                     primary
                     size="small"
                     loading={deviceLinkBusy}
-                    disabled={deviceLinkBusy || !selectedIdentity?.privateKeyHex}
+                    disabled={deviceLinkBusy || !signingIdentity?.privateKeyHex}
                     onClick={() => void handleStartDeviceLink()}
                     content={deviceLinkBusy ? 'Waiting for peer…' : 'Add a device'}
                   />
-                  {!selectedIdentity?.privateKeyHex ? (
+                  {!signingIdentity?.privateKeyHex ? (
                     <p style={{ marginTop: '0.5em', color: 'rgba(255,200,120,0.95)' }}>
                       Unlock this identity to create or revoke a link.
                     </p>
@@ -4510,10 +4565,6 @@ const IdentityManager = () => {
   }, [state, refreshArcNotifications]);
 
   const currentIdentityId = identities.find(i => i.isCurrent)?.id ?? null;
-  const siteLoginIdentity: Identity | null = selectedIdentity
-    ?? identities.find(i => i.isCurrent)
-    ?? identities.find(i => i.hasPrivateKey)
-    ?? null;
   useEffect(() => {
     setWalletTxs([]);
   }, [currentIdentityId]);
@@ -4795,13 +4846,13 @@ const IdentityManager = () => {
       )}
 
       <SiteLoginPrompt
-        privateKeyHex={siteLoginIdentity?.privateKeyHex || null}
-        xpub={siteLoginIdentity?.xpub || null}
-        onUnlock={(password) => unlockIdentity(siteLoginIdentity, password)}
+        privateKeyHex={signingIdentity?.privateKeyHex || null}
+        xpub={signingIdentity?.xpub || null}
+        onUnlock={(password) => unlockIdentity(signingIdentity, password)}
         needsUnlock={
-          !!siteLoginIdentity?.hasPrivateKey &&
-          !siteLoginIdentity?.privateKeyHex &&
-          !!walletCryptos[siteLoginIdentity.id]
+          !!signingIdentity?.hasPrivateKey &&
+          !signingIdentity?.privateKeyHex &&
+          !!walletCryptos[signingIdentity.id]
         }
       />
       <DeviceLinkPrompt

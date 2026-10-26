@@ -43,7 +43,7 @@ Sign in to Fabric websites with your own cryptographic identity. Create, restore
 ```
 Fabric Passport is a Chromium identity wallet for the Fabric network. Create or restore a cryptographic identity on this computer, then use it to sign in to Fabric websites and to link other devices (Passport, GoonCitizen desktop, or Android) as one cluster.
 
-Keys never leave the extension unless you export a backup. Site login and device-link prompts only sign after you approve. Public hubs must be HTTPS; loopback http:// is for a Hub you run locally.
+Keys never leave the extension unless you export a backup. Site login and device-link prompts only sign after you approve. Public hubs must be HTTPS; cleartext http:// is for a Hub you run locally (loopback) or one on your local network that you add under Trusted hubs and grant access to.
 
 What you can do
 • Create a new identity (seed + password) or restore from an existing seed
@@ -195,10 +195,15 @@ After Connect & register, adds the public X-Fabric-Identity header (id1… bech3
 Fabric sites and Hubs are not a single domain. The content script only handles Fabric postMessage (site login, device link, Hub mesh-bridge). Host access is also required so declarativeNetRequest can attach X-Fabric-Identity on whatever Hub origin the user trusted. We do not scrape pages or collect a general browsing history.
 ```
 
-### Every `http://localhost…` and `http://127.0.0.1…` host permission
-Paste the **same** text for each loopback pattern (Chrome lists them separately; match patterns cannot wildcard ports):
+### Loopback host permissions `http://localhost/*`, `http://127.0.0.1/*`, `http://[::1]/*`
+Paste the **same** text for each loopback pattern (a port-less pattern matches every port):
 ```
 Loopback-only access so a developer or operator can use a Fabric Hub, GoonCitizen LiveRelay, or the Passport test harness on this machine (cleartext HTTP is refused for public hubs). The content script still only acts on Fabric postMessage. Not used to reach the public internet over HTTP.
+```
+
+### Optional host permission `http://*/*`
+```
+Optional, never granted at install. When the user adds a Fabric Hub on their local network by exact http:// origin under Trusted hubs, Passport requests access to that one host (e.g. http://192.168.1.20/*) and talks to it only if the user accepts. No content script runs there and no other http:// host is reached. Public hubs must use HTTPS.
 ```
 
 ---

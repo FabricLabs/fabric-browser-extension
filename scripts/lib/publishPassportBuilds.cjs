@@ -104,10 +104,29 @@ function hubBase (opts = {}) {
     .replace(/\/+$/, '') || DEFAULT_HUB;
 }
 
+/**
+ * @param {string} base Hub origin
+ * @returns {boolean}
+ */
+function isLoopbackHub (base) {
+  try {
+    const h = new URL(String(base || '')).hostname.toLowerCase();
+    return h === 'localhost' || h === '127.0.0.1' || h === '[::1]' || h === '::1';
+  } catch (_) {
+    return false;
+  }
+}
+
+/**
+ * @param {Object} [opts]
+ * @param {boolean} [opts.allowFile=true] also read `~/.fabric/hub-admin-token` (the local Hub's token)
+ * @returns {string}
+ */
 function loadAdminToken (opts = {}) {
   if (opts.adminToken) return String(opts.adminToken).trim();
   const fromEnv = String(process.env.FABRIC_HUB_ADMIN_TOKEN || process.env.FABRIC_ADMIN_TOKEN || '').trim();
   if (fromEnv) return fromEnv;
+  if (opts.allowFile === false) return '';
   const home = process.env.HOME || process.env.USERPROFILE || '';
   if (!home) return '';
   try {
@@ -182,21 +201,24 @@ function hubRpc (baseUrl, method, params, opts = {}) {
 
 /**
  * Create + publish one artifact on Hub Documents.
- * Uses `filePath` + adminToken for local ingest (small JSON-RPC body). Does **not**
- * fall back to multi-MiB contentBase64 — that hits Hub's body-parser limit (413).
+ * A loopback Hub gets `filePath` + adminToken (small JSON-RPC body; the Hub reads
+ * the file from this disk). A remote Hub cannot read that path, so it gets
+ * contentBase64 and only an explicitly configured admin token, never the local
+ * `~/.fabric/hub-admin-token`. Large bodies may still hit its body-parser limit (413).
  * @param {object} artifact
  * @param {Object} [opts]
  * @returns {Promise<object>}
  */
 async function publishArtifact (artifact, opts = {}) {
   const host = hubBase(opts);
+  const loopback = isLoopbackHub(host);
   const st = fs.statSync(artifact.path);
   const sha256 = crypto.createHash('sha256').update(fs.readFileSync(artifact.path)).digest('hex');
-  const adminToken = loadAdminToken(opts);
+  const adminToken = loadAdminToken({ ...opts, allowFile: loopback });
   const size = st.size;
-  // Keep tiny fixtures on contentBase64; real Passport zips always use filePath.
+  // Keep tiny fixtures on contentBase64; real Passport zips use filePath on a local Hub.
   const BASE64_OK_MAX = 256 * 1024;
-  const preferFilePath = opts.forceBase64 !== true && (!!adminToken || size > BASE64_OK_MAX);
+  const preferFilePath = loopback && opts.forceBase64 !== true && (!!adminToken || size > BASE64_OK_MAX);
 
   if (preferFilePath && !adminToken) {
     const err = new Error(
@@ -301,6 +323,7 @@ module.exports = {
   listBuildArtifacts,
   pickPrimaryZip,
   hubBase,
+  isLoopbackHub,
   loadAdminToken,
   hubRpc,
   publishArtifact
