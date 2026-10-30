@@ -36,19 +36,19 @@ Must match `src/manifest.json` `"name"`. Not `@fabric/passport` (npm name stays 
 
 ### Summary (manifest description, ≤132 characters — already in the zip)
 ```
-Sign in to Fabric websites with your own cryptographic identity. Create, restore, and link devices — keys stay on this computer.
+Sign in to Fabric websites with your own cryptographic identity. Create, restore, and link signers — each key stays where it is.
 ```
 
 ### Detailed description
 ```
-Fabric Passport is a Chromium identity wallet for the Fabric network. Create or restore a cryptographic identity on this computer, then use it to sign in to Fabric websites and to link other devices (Passport, GoonCitizen desktop, or Android) as one cluster.
+Fabric Passport is a Chromium identity wallet for the Fabric network. Create or restore a cryptographic identity on this computer, then use it to sign in to Fabric websites and to link other signers (another Passport, Fabric Hub, or GoonCitizen). Each keeps its own key; a linked signer may ask you to sign, and you approve each request.
 
-Keys never leave the extension unless you export a backup. Site login and device-link prompts only sign after you approve. Public hubs must be HTTPS; cleartext http:// is for a Hub you run locally (loopback) or one on your local network that you add under Trusted hubs and grant access to.
+Keys never leave the extension unless you export a backup. Sign-in, linking, and signing requests only sign after you approve. Public hubs must be HTTPS; cleartext http:// is for a Hub you run locally (loopback) or one on your local network that you add under Trusted hubs and grant access to.
 
 What you can do
 • Create a new identity (seed + password) or restore from an existing seed
 • Sign in to Fabric sites with Passport: each sign-in names the site your browser shows, and you approve it
-• Create or accept a device-link offer (fabric://link) and publish IdentityCrossSign
+• Link signers by comparing a six-digit code, choose what each may ask for, and answer their requests from a notification
 • Connect & register with a Fabric Hub you choose (default https://hub.fabric.pub)
 • Optional Bitcoin addresses and Hub wallet actions derived from the same identity
 
@@ -81,7 +81,7 @@ Language: English. Category: Productivity. Content rating: not mature.
 | Marquee (optional) | `store/promo/marquee-1400x560.png` | 1400×560 |
 | Promo video | omit until you have a YouTube walkthrough | — |
 
-Screenshots are listing boards that reproduce the real popup copy (onboarding, security warning, site login, device link, Connect & register). Replace with live captures from a load-unpacked build if you prefer; keep 1280×800, square corners, no padding.
+Screenshots are listing boards that reproduce the real popup copy (onboarding, security warning, site login, linking, Connect & register). Screenshot 4 still draws the retired device-link screen; redraw it as Linked signers before the next upload. Replace with live captures from a load-unpacked build if you prefer; keep 1280×800, square corners, no padding.
 
 ### Homepage URL
 ```
@@ -111,7 +111,7 @@ All regions.
 
 ### Single purpose
 ```
-Let the user hold a Fabric cryptographic identity in Chromium and use it to sign in to Fabric websites and link their other Fabric devices. Bitcoin addresses shown in the wallet are derived from that same identity; they are not a second product.
+Let the user hold a Fabric cryptographic identity in Chromium and use it to sign in to Fabric websites and link the other signers they use (another Passport, Fabric Hub, GoonCitizen). Bitcoin addresses shown in the wallet are derived from that same identity; they are not a second product.
 ```
 
 ### Remote code
@@ -128,8 +128,8 @@ Check **Yes** / collected for:
 
 - **Personally identifiable information** — Fabric public key / identity id; labels the user types. Use: **core extension functionality**.
 - **Financial and payment information** — Bitcoin addresses / xpub; optional Lightning pay through the user’s Hub. Use: **core extension functionality**.
-- **Authentication information** — encrypted seed, password verifier, session/device-link approval state. Use: **core extension functionality**.
-- **Web history** — only Hub origins the user Connects to, and the origin of a Fabric login/link prompt they see. Not a log of all browsing. Use: **core extension functionality**.
+- **Authentication information** — sealed master key, the signers you linked and what each may ask for, pending sign-in and signing requests. Use: **core extension functionality**.
+- **Web history** — only Hub origins the user Connects to, the origin of a Fabric sign-in prompt they see, and the origin of a page that answered with a Lightning invoice (HTTP 402). Not a log of all browsing. Use: **core extension functionality**.
 - **User activity** — last-activity timestamp; coarse byte/request counts on those trusted Hub origins (in-memory / local). Use: **core extension functionality**.
 
 Leave **unchecked** (not collected): Health, Personal communications, Location, Website content.
@@ -157,17 +157,17 @@ Paste into each dashboard field. Remove a permission from the manifest instead o
 
 ### `storage`
 ```
-Stores the encrypted identity, settings, trusted Hub origins, and pending sign-in / device-link challenges and linked desktop apps on this profile. Wallet material is encrypted at rest (AES-GCM). Nothing is synced to Fabric Labs.
+Stores the sealed identity, settings, trusted Hub origins, pending sign-in challenges, signing and payment requests, and the signers the user linked on this profile. The master key is sealed at rest (PBKDF2 + AES-GCM); lists that widen what Passport trusts carry a MAC keyed from it. Nothing is synced to Fabric Labs.
 ```
 
 ### `tabs`
 ```
-After the user approves or ignores a site-login or device-link prompt, Passport messages the originating tab (chrome.tabs.sendMessage) so the page can continue. We do not read browsing history or inject into arbitrary tabs from the toolbar.
+After the user approves or ignores a sign-in prompt, Passport messages the originating tab (chrome.tabs.sendMessage) so the page can continue. We do not read browsing history or inject into arbitrary tabs from the toolbar.
 ```
 
 ### `notifications`
 ```
-Shows an optional Chromium notification when the connected Fabric Hub delivers a user-facing message (for example a mesh registration or payment result). The user can disable Chrome notifications at the OS / browser level.
+Tells the user when something waits for them: a site asks to sign in, a linked signer asks for a signature, or a page asks for a Lightning payment. Clicking it opens the Passport popup, where the user approves or declines. Also shows mesh registration and payment results. The user can disable Chrome notifications at the OS / browser level.
 ```
 
 ### `offscreen`
@@ -177,7 +177,7 @@ Keeps a Hub WebRTC signaling helper alive in an offscreen document (chrome.offsc
 
 ### `alarms`
 ```
-A 5-minute keepalive alarm re-syncs Hub mesh registration from storage if the service worker was asleep. Not used for tracking.
+A 5-minute keepalive alarm re-syncs Hub mesh registration from storage if the service worker was asleep, and a one-minute alarm locks Passport after the idle time the user set. Not used for tracking.
 ```
 
 ### `webRequest`
@@ -187,18 +187,18 @@ Observes request counts and Content-Length totals only for origins the user adde
 
 ### `declarativeNetRequest`
 ```
-After Connect & register, adds the public X-Fabric-Identity header (id1… bech32, no private key) on requests to those trusted Hub origins so the Hub can recognize this wallet. Rules are removed when the origin is no longer trusted.
+After Connect & register, adds the public X-Fabric-Identity header (id1… bech32, no private key) on requests that trusted Hub's own pages make to it, so the Hub can recognize this wallet. Rules are removed when the origin is no longer trusted.
 ```
 
 ### Host permission `https://*/*`
 ```
-Fabric sites and Hubs are not a single domain. The content script only handles Fabric postMessage (site login, device link, Hub mesh-bridge). Host access is also required so declarativeNetRequest can attach X-Fabric-Identity on whatever Hub origin the user trusted. We do not scrape pages or collect a general browsing history.
+Fabric sites and Hubs are not a single domain. The content script only handles Fabric postMessage (sign-in, Hub mesh-bridge) and reports HTTP 402 Lightning invoices to the popup. Host access is also required so declarativeNetRequest can attach X-Fabric-Identity on whatever Hub origin the user trusted. We do not scrape pages or collect a general browsing history.
 ```
 
 ### Loopback host permissions `http://localhost/*`, `http://127.0.0.1/*`, `http://[::1]/*`
 Paste the **same** text for each loopback pattern (a port-less pattern matches every port):
 ```
-Loopback-only access so a developer or operator can use a Fabric Hub, GoonCitizen LiveRelay, or the Passport test harness on this machine, and so Passport can ask a linked Fabric Hub or GoonCitizen desktop app to sign a sign-in after the user approves it there (cleartext HTTP is refused for public hubs). The content script still only acts on Fabric postMessage. Not used to reach the public internet over HTTP.
+Loopback-only access so a developer or operator can use a Fabric Hub, GoonCitizen LiveRelay, or the Passport test harness on this machine, and so Passport can exchange signed delegation messages with a Fabric Hub or GoonCitizen app the user linked (cleartext HTTP is refused for public hubs). The content script still only acts on Fabric postMessage. Not used to reach the public internet over HTTP.
 ```
 
 ### Optional host permission `http://*/*`
@@ -221,9 +221,9 @@ Optional, never granted at install. When the user adds a Fabric Hub on their loc
 
 ## Reviewer notes (optional “comments to reviewer”)
 ```
-Fabric Passport is a local identity wallet for Fabric (hub.fabric.pub). Single purpose: hold a user-controlled key and sign Fabric site-login / device-link challenges after an in-extension approval.
+Fabric Passport is a local identity wallet for Fabric (hub.fabric.pub). Single purpose: hold a user-controlled key and sign Fabric sign-in challenges and requests from signers the user linked, each after an in-extension approval.
 
-Broad https://*/* is so any Fabric site can postMessage a login request; the content script ignores everything else. webRequest + declarativeNetRequest apply only after the user Connects to a Hub.
+Broad https://*/* is so any Fabric site can postMessage a sign-in challenge; the content script ignores everything else. webRequest + declarativeNetRequest apply only after the user Connects to a Hub.
 
 No remote code. Bundled WASM is secp256k1. Privacy policy: https://hub.fabric.pub/passport-privacy.html
 

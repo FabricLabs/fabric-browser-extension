@@ -1,7 +1,11 @@
 'use strict';
 
 import { FABRIC_MESH_HUB_REGISTRATION_KEY, FABRIC_STATE_STORAGE_KEY } from '../constants/fabricExtension';
+import { privateGet } from '../utils/privateStore';
 import { handleFabricRuntimeMessage } from './fabricBackgroundRuntimeMessages';
+import { forgetParticipant, registerDelegationBackground } from './delegation';
+import { readFabricActivityMs } from '../utils/fabricActivityStorage';
+import { forgetMaster } from '../utils/passportVault';
 import { dropTabPending } from './fabricSiteLoginRuntime';
 import { initIdentityOutband } from './identityOutband';
 import { swallowNonFatal } from '../utils/nonFatal';
@@ -60,15 +64,13 @@ function registrationHubAddress (reg: unknown): string | null {
  */
 async function extractMeshHubAddress (): Promise<string | null> {
   try {
-    const regBag = await chrome.storage.local.get(FABRIC_MESH_HUB_REGISTRATION_KEY);
-    const fromReg = registrationHubAddress(regBag[FABRIC_MESH_HUB_REGISTRATION_KEY]);
+    const fromReg = registrationHubAddress(await privateGet(FABRIC_MESH_HUB_REGISTRATION_KEY));
     if (fromReg) return fromReg;
   } catch (err: unknown) {
     swallowNonFatal('mesh-hub-storage', err);
   }
   try {
-    const data = await chrome.storage.local.get(FABRIC_STATE_STORAGE_KEY);
-    return extractActiveFabricHub(data[FABRIC_STATE_STORAGE_KEY]);
+    return extractActiveFabricHub(await privateGet(FABRIC_STATE_STORAGE_KEY));
   } catch (err: unknown) {
     swallowNonFatal('fabric-state-storage', err);
     return null;
@@ -141,11 +143,53 @@ export function registerFabricBackground (): void {
     });
   });
 
+  registerDelegationBackground();
+  const AUTO_LOCK_ALARM = 'fabric_passport_autolock';
+  // The popup's own timer only runs while it is open; this one locks a master
+  // left open in session storage after the popup closed. 0 minutes = never.
+  const autoLockMinutes = async (): Promise<number> => {
+    const state = await privateGet(FABRIC_STATE_STORAGE_KEY) as { settings?: { autoLockTimer?: unknown } } | undefined;
+    const minutes = Number(state && state.settings && state.settings.autoLockTimer);
+    return Number.isFinite(minutes) && minutes >= 0 ? minutes : 15;
+  };
+  try {
+    chrome.alarms.get(AUTO_LOCK_ALARM, (existing) => {
+      if (!existing) chrome.alarms.create(AUTO_LOCK_ALARM, { periodInMinutes: 1 });
+    });
+    chrome.alarms.onAlarm.addListener((alarm) => {
+      if (alarm.name !== AUTO_LOCK_ALARM) return;
+      void (async () => {
+        const minutes = await autoLockMinutes();
+        if (minutes <= 0) return;
+        const last = await readFabricActivityMs();
+        if (last != null && Date.now() - last < minutes * 60_000) return;
+        await forgetMaster();
+        forgetParticipant();
+      })().catch((err: unknown) => swallowNonFatal('passport-autolock', err));
+    });
+  } catch (err: unknown) {
+    swallowNonFatal('passport-autolock-alarm', err);
+  }
+
+  try {
+    const idle = (chrome as { idle?: { onStateChanged?: { addListener: (cb: (state: string) => void) => void } } }).idle;
+    if (idle && idle.onStateChanged) {
+      idle.onStateChanged.addListener((state) => {
+        if (state !== 'locked') return;
+        void forgetMaster().catch((err: unknown) => swallowNonFatal('passport-idle-lock', err));
+        forgetParticipant();
+      });
+    }
+  } catch (err: unknown) {
+    swallowNonFatal('passport-idle-lock', err);
+  }
+
   chrome.tabs.onRemoved.addListener((tabId) => {
     void dropTabPending(tabId).catch((err: unknown) => swallowNonFatal('passport-drop-tab', err));
   });
 
   chrome.storage.onChanged.addListener((changes, area) => {
+    if (area === 'session' && changes['fabric.private.changed']) void syncMeshFromStorage();
     if (area !== 'local') return;
     if (!changes[FABRIC_STATE_STORAGE_KEY] && !changes[FABRIC_MESH_HUB_REGISTRATION_KEY]) return;
     void syncMeshFromStorage();

@@ -6,26 +6,52 @@
  */
 
 import { FABRIC_MESH_HUB_REGISTRATION_KEY } from '../constants/fabricExtension';
+import { privateGet, privateRemove, privateSet } from '../utils/privateStore';
 import {
-  FABRIC_RUNTIME_DESKTOP_SIGN,
+  FABRIC_RUNTIME_DELEGATE_SIGN_IN,
   FABRIC_RUNTIME_PASSPORT_ANSWER,
   FABRIC_RUNTIME_PASSPORT_CHALLENGE,
   FABRIC_RUNTIME_PASSPORT_LIST
 } from '../constants/siteLogin';
 import {
   answerPassport,
-  checkSenderFrame,
-  completeWithDesktop,
+  completeWithDelegate,
+  mayNotifySignIn,
   queuePassportChallenge,
   readPendingPassport
 } from './fabricSiteLoginRuntime';
 import {
-  FABRIC_PENDING_DEVICE_LINK_KEY,
-  FABRIC_RUNTIME_DEVICE_LINK_CLEAR,
-  FABRIC_RUNTIME_DEVICE_LINK_COMPLETE,
-  FABRIC_RUNTIME_DEVICE_LINK_GET,
-  FABRIC_RUNTIME_DEVICE_LINK_REQUEST
-} from '../constants/deviceLink';
+  DELEGATION_ANSWER,
+  DELEGATION_ASK,
+  DELEGATION_DISCOVER,
+  DELEGATION_FORGET,
+  DELEGATION_PAIR_CANCEL,
+  DELEGATION_PAIR_CONFIRM,
+  DELEGATION_PAIR_HUB,
+  DELEGATION_PAIR_INVITATION,
+  DELEGATION_PAIR_LOCAL,
+  DELEGATION_PAIRING_GET,
+  DELEGATION_POLL,
+  DELEGATION_REVOKE,
+  DELEGATION_STATE,
+  SIGN_IN_NOTIFICATION_PREFIX
+} from '../constants/delegation';
+import {
+  answerRequest,
+  ask,
+  cancelPairing,
+  confirmPairing,
+  delegationState,
+  discover,
+  forgetSigner,
+  pairHub,
+  pairInvitation,
+  pairLocal,
+  pairingView,
+  pollMailboxes,
+  refreshBadge,
+  revokeGrant
+} from './delegation';
 import { findMessageTypeDescriptor, summarizeNotifiablePayload, INVENTORY_RESPONSE, type NotificationPriority } from '../fabric/messageTypes';
 import { getPageIndex } from '../services/pageIndex';
 import { getMarketAgent, configureMarketAgent, tickMarketAgent, persistMarketAgent } from '../services/marketRuntime';
@@ -35,29 +61,40 @@ import {
   mergeTrustedNodeOrigin,
   reapplyIdentityOutbandRules
 } from './identityOutband';
-import { attemptPayBolt11ViaActiveFabricNode } from './passportBolt11Pay';
+import { dismissPayment, payPayment, pendingPayments, receivePaymentRequest } from './paymentRequests';
+import {
+  FABRIC_PAYMENT_DISMISS,
+  FABRIC_PAYMENT_PAY,
+  FABRIC_PAYMENTS_LIST,
+  FABRIC_RUNTIME_PAYMENT_REQUIRED
+} from '../constants/fabric402';
 import { swallowNonFatal } from '../utils/nonFatal';
-import { validateQueuedDeviceLinkOffer } from '../utils/fabricDeviceLinkFetch';
 import {
   assertAllowedFabricHub,
-  loadFabricHubGateOptions,
-  FABRIC_RUNTIME_HUB_GATE_OPTIONS
+  loadFabricHubGateOptions
 } from '../utils/fabricHubAllowlist';
 import { originOfSender } from '../utils/fabricSiteMessage';
 
-type PendingDeviceLinkRow = {
-  sessionId: string;
-  hubBase: string;
-  origin: string;
-  nonce: string;
-  label: string;
-  initiator: { id: string; xpub: string; pubkeyHex?: string };
-  pageOrigin: string;
-  createdAt: number;
-  tabId?: number;
-};
-
 const NOTIFY_ID_MESH = 'fabric-mesh-line';
+
+const str = (v: unknown): string => (typeof v === 'string' ? v : '');
+
+/** Linked-signer messages; Passport's own pages only. */
+const DELEGATION_HANDLERS: Record<string, (m: Record<string, unknown>) => Promise<unknown>> = {
+  [DELEGATION_STATE]: () => delegationState(),
+  [DELEGATION_DISCOVER]: () => discover(),
+  [DELEGATION_PAIR_LOCAL]: (m) => pairLocal(str(m.base)),
+  [DELEGATION_PAIR_HUB]: (m) => pairHub(str(m.hub)),
+  [DELEGATION_PAIR_INVITATION]: (m) => pairInvitation(str(m.invitation)),
+  [DELEGATION_PAIR_CONFIRM]: (m) => confirmPairing(m.scopes),
+  [DELEGATION_PAIR_CANCEL]: () => cancelPairing(),
+  [DELEGATION_PAIRING_GET]: async () => ({ ok: true, pairing: pairingView() }),
+  [DELEGATION_REVOKE]: (m) => revokeGrant(str(m.hash)),
+  [DELEGATION_FORGET]: (m) => forgetSigner(str(m.pubkey)),
+  [DELEGATION_ANSWER]: (m) => answerRequest({ hash: str(m.hash), action: str(m.action), frame: str(m.frame) || null }),
+  [DELEGATION_ASK]: (m) => ask({ target: str(m.target), request: str(m.request), purpose: str(m.purpose) || undefined }),
+  [DELEGATION_POLL]: () => pollMailboxes()
+};
 
 /**
  * The only messages a content script (any web page's frame) may send. Settings,
@@ -68,10 +105,8 @@ export const CONTENT_SCRIPT_MESSAGES: ReadonlySet<string> = new Set([
   'CONTENT_SCRIPT_LOADED',
   'FABRIC_HUB_REGISTER_MESH',
   'FABRIC_HUB_UNREGISTER_MESH',
-  'FABRIC_PAY_BOLT11_FROM_PASSPORT',
   FABRIC_RUNTIME_PASSPORT_CHALLENGE,
-  FABRIC_RUNTIME_HUB_GATE_OPTIONS,
-  FABRIC_RUNTIME_DEVICE_LINK_REQUEST
+  FABRIC_RUNTIME_PAYMENT_REQUIRED
 ]);
 
 /** True for this extension's own pages (popup, options, offscreen), even when opened in a tab. */
@@ -297,22 +332,16 @@ export function handleFabricRuntimeMessage (
   /** Trusted: sent from extension popup (chrome-extension://…/popup.html). */
   if (m.type === 'FABRIC_MESH_REGISTER_FROM_POPUP' && typeof m.hubAddress === 'string') {
     const hubAddress = m.hubAddress.trim();
-    void chrome.storage.local.set({
-      [FABRIC_MESH_HUB_REGISTRATION_KEY]: {
-        hubAddress,
-        registeredAt: Date.now(),
-        source: 'popup'
-      }
-    }, () => {
-      void syncMeshFromStorage().then(() => sendResponse({ ok: true }));
-    });
+    void privateSet(FABRIC_MESH_HUB_REGISTRATION_KEY, {
+      hubAddress,
+      registeredAt: Date.now(),
+      source: 'popup'
+    }).then(() => syncMeshFromStorage()).then(() => sendResponse({ ok: true }));
     return true;
   }
 
   if (m.type === 'FABRIC_MESH_UNREGISTER_FROM_POPUP') {
-    void chrome.storage.local.remove(FABRIC_MESH_HUB_REGISTRATION_KEY, () => {
-      void syncMeshFromStorage().then(() => sendResponse({ ok: true }));
-    });
+    void privateRemove(FABRIC_MESH_HUB_REGISTRATION_KEY).then(() => syncMeshFromStorage()).then(() => sendResponse({ ok: true }));
     return true;
   }
 
@@ -342,23 +371,19 @@ export function handleFabricRuntimeMessage (
         sendResponse({ ok: false, error: 'hub_not_allowed' });
         return;
       }
-      void chrome.storage.local.set({
-        [FABRIC_MESH_HUB_REGISTRATION_KEY]: {
-          hubAddress,
-          pageOrigin: expectedOrigin,
-          registeredAt: Date.now(),
-          source: 'hub_page'
-        }
-      }, () => {
-        void syncMeshFromStorage().then(() => sendResponse({ ok: true }));
-      });
+      void privateSet(FABRIC_MESH_HUB_REGISTRATION_KEY, {
+        hubAddress,
+        pageOrigin: expectedOrigin,
+        registeredAt: Date.now(),
+        source: 'hub_page'
+      }).then(() => syncMeshFromStorage()).then(() => sendResponse({ ok: true }));
     }).catch((e: unknown) => sendResponse({ ok: false, error: String(e) }));
     return true;
   }
 
   if (m.type === 'FABRIC_HUB_UNREGISTER_MESH' && typeof m.pageOrigin === 'string') {
-    void chrome.storage.local.get(FABRIC_MESH_HUB_REGISTRATION_KEY, (got) => {
-      const cur = got[FABRIC_MESH_HUB_REGISTRATION_KEY] as Record<string, unknown> | undefined;
+    void privateGet(FABRIC_MESH_HUB_REGISTRATION_KEY).then((got) => {
+      const cur = got as Record<string, unknown> | undefined;
       if (!cur) {
         sendResponse({ ok: true });
         return;
@@ -366,9 +391,7 @@ export function handleFabricRuntimeMessage (
       const src = cur.source;
       const prevOrigin = typeof cur.pageOrigin === 'string' ? cur.pageOrigin : null;
       if (src === 'hub_page' && prevOrigin === m.pageOrigin) {
-        void chrome.storage.local.remove(FABRIC_MESH_HUB_REGISTRATION_KEY, () => {
-          void syncMeshFromStorage().then(() => sendResponse({ ok: true }));
-        });
+        void privateRemove(FABRIC_MESH_HUB_REGISTRATION_KEY).then(() => syncMeshFromStorage()).then(() => sendResponse({ ok: true }));
         return;
       }
       sendResponse({ ok: false, error: 'not_owner' });
@@ -429,14 +452,31 @@ export function handleFabricRuntimeMessage (
     return false;
   }
 
-  if (m.type === 'FABRIC_PAY_BOLT11_FROM_PASSPORT' && typeof m.bolt11 === 'string') {
-    const bolt11 = m.bolt11.trim();
-    void attemptPayBolt11ViaActiveFabricNode(bolt11).then((r) => {
+  /** Content script: a page answered 402 with an invoice; queue it for the popup. */
+  if (m.type === FABRIC_RUNTIME_PAYMENT_REQUIRED && !fromExtension) {
+    void receivePaymentRequest(m, sender, refreshBadge)
+      .then((queued) => sendResponse({ ok: queued }))
+      .catch((e) => sendResponse({ ok: false, error: String(e) }));
+    return true;
+  }
+
+  if (m.type === FABRIC_PAYMENTS_LIST && fromExtension) {
+    void pendingPayments().then((requests) => sendResponse({ ok: true, requests }))
+      .catch((e) => sendResponse({ ok: false, error: String(e) }));
+    return true;
+  }
+
+  if (m.type === FABRIC_PAYMENT_PAY && fromExtension && typeof m.id === 'string') {
+    void payPayment(m.id, refreshBadge).then((r) => {
       showFabricNotification(r.ok ? 'Passport payment' : 'Passport payment failed', r.message);
       sendResponse(r);
-    }).catch((e) => {
-      sendResponse({ ok: false, message: String(e instanceof Error ? e.message : e) });
-    });
+    }).catch((e) => sendResponse({ ok: false, message: String(e instanceof Error ? e.message : e) }));
+    return true;
+  }
+
+  if (m.type === FABRIC_PAYMENT_DISMISS && fromExtension && typeof m.id === 'string') {
+    void dismissPayment(m.id, refreshBadge).then(() => sendResponse({ ok: true }))
+      .catch((e) => sendResponse({ ok: false, error: String(e) }));
     return true;
   }
 
@@ -460,14 +500,20 @@ export function handleFabricRuntimeMessage (
         sendResponse(queued);
         return;
       }
-      showFabricNotification('Fabric Passport', `Sign-in request from ${queued.row.origin}`);
+      // No popup opens on its own (P-06): the notification and badge show the
+      // sign-in, and a click on either opens it.
       try {
-        if (chrome.action?.openPopup) {
-          void chrome.action.openPopup().catch((err: unknown) => swallowNonFatal('passport-open-popup', err));
-        }
+        if (mayNotifySignIn(queued.row.origin)) chrome.notifications.create(`${SIGN_IN_NOTIFICATION_PREFIX}${queued.row.key}`, {
+          type: 'basic',
+          iconUrl: 'icons/icon128.png',
+          title: 'Sign-in request',
+          message: `${queued.row.origin} asks you to sign in. Click to review.`,
+          priority: 2
+        });
       } catch (err: unknown) {
-        swallowNonFatal('passport-open-popup', err);
+        swallowNonFatal('passport-sign-in-notify', err);
       }
+      void refreshBadge();
       sendResponse({ ok: true });
     }).catch((e: unknown) => {
       sendResponse({ ok: false, error: String(e instanceof Error ? e.message : e) });
@@ -491,98 +537,19 @@ export function handleFabricRuntimeMessage (
     return true;
   }
 
-  /** Popup: a pinned desktop app answers the pending sign-in; delivered from here so closing the popup is fine. */
-  if (m.type === FABRIC_RUNTIME_DESKTOP_SIGN && fromExtension) {
-    void completeWithDesktop(m)
+  /** Popup: a linked signer answers the pending sign-in; delivered from here so closing the popup is fine. */
+  if (m.type === FABRIC_RUNTIME_DELEGATE_SIGN_IN && fromExtension) {
+    void completeWithDelegate(m)
       .then((out) => sendResponse(out))
       .catch((e: unknown) => sendResponse({ ok: false, error: String(e instanceof Error ? e.message : e) }));
     return true;
   }
 
   /** Content script: which loopback Hub (the active node) the page gates may allow. */
-  if (m.type === FABRIC_RUNTIME_HUB_GATE_OPTIONS) {
-    void loadFabricHubGateOptions().then((gate) => sendResponse({ activeHub: gate.activeHub || null }));
-    return true;
-  }
-
-  /** Content script: queue a mutual device-link offer for the popup to approve (responder). */
-  if (m.type === FABRIC_RUNTIME_DEVICE_LINK_REQUEST && !fromExtension && sender.tab) {
-    const frame = checkSenderFrame(sender);
-    if (!frame.ok) {
-      sendResponse({ ok: false, error: frame.error });
-      return false;
-    }
-    if (originOfSender(sender) !== (typeof m.pageOrigin === 'string' ? m.pageOrigin.trim() : '')) {
-      sendResponse({ ok: false, error: 'origin_mismatch' });
-      return false;
-    }
-    const queued = validateQueuedDeviceLinkOffer(m);
-    if (!queued.ok) {
-      sendResponse({ ok: false, error: queued.error });
-      return false;
-    }
-    const sessionId = typeof m.sessionId === 'string' ? m.sessionId.trim() : '';
-    const hubBase = typeof m.hubBase === 'string' ? m.hubBase.trim() : '';
-    const origin = typeof m.origin === 'string' ? m.origin.trim() : '';
-    const nonce = typeof m.nonce === 'string' ? m.nonce.trim() : '';
-    const label = typeof m.label === 'string' ? m.label.trim() : 'device';
-    const pageOrigin = typeof m.pageOrigin === 'string' ? m.pageOrigin.trim() : '';
-    const initiator = m.initiator && typeof m.initiator === 'object'
-      ? (m.initiator as { id?: string; xpub?: string; pubkeyHex?: string })
-      : null;
-    if (!initiator || typeof initiator.id !== 'string' || typeof initiator.xpub !== 'string') {
-      sendResponse({ ok: false, error: 'invalid_device_link' });
-      return false;
-    }
-    const row: PendingDeviceLinkRow = {
-      sessionId,
-      hubBase,
-      origin,
-      nonce,
-      label,
-      initiator: {
-        id: initiator.id,
-        xpub: initiator.xpub,
-        pubkeyHex: typeof initiator.pubkeyHex === 'string' ? initiator.pubkeyHex : undefined
-      },
-      pageOrigin,
-      createdAt: Date.now(),
-      tabId: sender.tab?.id
-    };
-    const persist = chrome.storage.session
-      ? chrome.storage.session.set({ [FABRIC_PENDING_DEVICE_LINK_KEY]: row })
-      : chrome.storage.local.set({ [FABRIC_PENDING_DEVICE_LINK_KEY]: row });
-    void Promise.resolve(persist).then(() => {
-      showFabricNotification('Fabric Passport', `Device-link offer from ${origin}`);
-      try {
-        if (chrome.action?.openPopup) {
-          void chrome.action.openPopup().catch((err: unknown) => swallowNonFatal('device-link-open-popup', err));
-        }
-      } catch (err: unknown) {
-        swallowNonFatal('device-link-open-popup', err);
-      }
-      sendResponse({ ok: true });
-    }).catch((e: unknown) => {
-      sendResponse({ ok: false, error: String(e) });
-    });
-    return true;
-  }
-
-  if (m.type === FABRIC_RUNTIME_DEVICE_LINK_GET) {
-    const store = chrome.storage.session || chrome.storage.local;
-    void store.get(FABRIC_PENDING_DEVICE_LINK_KEY, (got) => {
-      const pending = got[FABRIC_PENDING_DEVICE_LINK_KEY] as PendingDeviceLinkRow | undefined;
-      sendResponse({
-        pending: pending || null,
-        tabId: pending && typeof pending.tabId === 'number' ? pending.tabId : undefined
-      });
-    });
-    return true;
-  }
-
-  if (m.type === FABRIC_RUNTIME_DEVICE_LINK_CLEAR || m.type === FABRIC_RUNTIME_DEVICE_LINK_COMPLETE) {
-    const store = chrome.storage.session || chrome.storage.local;
-    void store.remove(FABRIC_PENDING_DEVICE_LINK_KEY, () => sendResponse({ ok: true }));
+  if (fromExtension && typeof m.type === 'string' && DELEGATION_HANDLERS[m.type]) {
+    void DELEGATION_HANDLERS[m.type](m)
+      .then((out) => sendResponse(out))
+      .catch((e: unknown) => sendResponse({ ok: false, error: e instanceof Error ? e.message : String(e) }));
     return true;
   }
 

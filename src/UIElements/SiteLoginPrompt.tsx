@@ -4,22 +4,30 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Button, Checkbox, Dropdown, Form, Input, Message, Modal, Radio } from 'semantic-ui-react';
 import {
   FABRIC_PENDING_PASSPORT_KEY,
-  FABRIC_RUNTIME_DESKTOP_SIGN,
+  FABRIC_RUNTIME_DELEGATE_SIGN_IN,
   FABRIC_RUNTIME_PASSPORT_ANSWER,
   FABRIC_RUNTIME_PASSPORT_LIST
 } from '../constants/siteLogin';
 import {
-  buildDesktopSignRequest,
   consentedDisclosures,
-  deriveAccountKeys,
   describeDisclosures,
   sanitizeSitePurpose,
   shortKey,
   signPassportAssertion,
+  siteIdentityKey,
   type PassportDisclosure
 } from '../utils/fabricSiteMessage';
-import { pinsForChallenge, readDesktopPins, type DesktopPin } from '../utils/fabricDesktopSigner';
+import {
+  DEFAULT_FABRIC_HUB_ORIGINS,
+  isAllowedFabricHub,
+  loadFabricHubGateOptions,
+  type FabricHubGateOptions
+} from '../utils/fabricHubAllowlist';
+import { describeSite } from '../utils/siteIdentity';
+import { readSignedInSites, rememberSignIn, type SignedInSite } from '../utils/signedInSites';
 import type { PendingPassportRow } from '../background/fabricSiteLoginRuntime';
+import { passportSigners, useDelegationState } from './delegationApi';
+import SiteName from './SiteName';
 import { useArmDelay } from './useArmDelay';
 
 export type AccountChoice = {
@@ -73,11 +81,20 @@ async function send<T> (message: Record<string, unknown>): Promise<T | null> {
   }
 }
 
+/** Which of this Passport's identities a site sees unless the user picks another. */
+export function defaultSiteIdentity (origin: string, sites: Record<string, SignedInSite>, gate: FabricHubGateOptions): 'main' | 'pairwise' {
+  const seen = sites[origin];
+  if (seen && seen.identity === 'main') return 'main';
+  if (!seen && isAllowedFabricHub(origin, gate)) return 'main';
+  return 'pairwise';
+}
+
 /**
  * Approves Passport sign-ins queued by the background, oldest first. Signs
- * with the identity of the chosen account on the chosen network (fixed when
- * the site names one), or asks a pinned desktop app to. Wallet and escrow keys
- * are shared only when the site asked and the user ticks them.
+ * with this site's own identity (or the account identity) of the chosen
+ * account on the chosen network (fixed when the site names one), or asks a
+ * linked signer that lets Passport ask it. Wallet and escrow keys are shared
+ * only when the site asked and the user ticks them.
  */
 export default function SiteLoginPrompt (props: Props): React.ReactElement | null {
   const { masterXprv, current, accounts, networks, needsUnlock, onUnlock } = props;
@@ -86,8 +103,11 @@ export default function SiteLoginPrompt (props: Props): React.ReactElement | nul
   const [busy, setBusy] = useState(false);
   const [waitingOn, setWaitingOn] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [pins, setPins] = useState<DesktopPin[]>([]);
-  const [choice, setChoice] = useState<string>('passport');
+  const [choice, setChoice] = useState<string>('pairwise');
+  const [sites, setSites] = useState<Record<string, SignedInSite>>({});
+  const [gate, setGate] = useState<FabricHubGateOptions>({});
+  const { state: delegation } = useDelegationState();
+  const signers = useMemo(() => passportSigners(delegation), [delegation]);
   const [accountIndex, setAccountIndex] = useState<number>(current.account);
   const [network, setNetwork] = useState<string>(current.network);
   const [ticked, setTicked] = useState<PassportDisclosure[]>([]);
@@ -122,24 +142,35 @@ export default function SiteLoginPrompt (props: Props): React.ReactElement | nul
     if (!pending) return;
     setError(null);
     setTicked([]);
-    setChoice('passport');
     setAccountIndex(current.account);
     setNetwork(pending.network || current.network);
     let cancelled = false;
-    void readDesktopPins().then((found) => {
-      if (!cancelled) setPins(pinsForChallenge(found, pending.network));
+    void Promise.all([
+      masterXprv ? readSignedInSites(masterXprv).catch(() => ({})) : Promise.resolve({}),
+      loadFabricHubGateOptions()
+    ]).then(([found, g]) => {
+      if (cancelled) return;
+      setSites(found);
+      setGate(g);
+      setChoice(defaultSiteIdentity(pending.origin, found, g));
     });
     return () => { cancelled = true; };
-  }, [pending?.key, pending?.requestId]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [pending?.key, pending?.requestId, masterXprv]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const passportPubkey = useMemo(() => {
-    if (!masterXprv) return null;
+  const identityPubkey = useCallback((pairwise: boolean): string | null => {
+    if (!masterXprv || !pending) return null;
     try {
-      return String(deriveAccountKeys(masterXprv, { account: accountIndex, network: effectiveNetwork }).identity.pubkey);
+      return siteIdentityKey(masterXprv, { account: accountIndex, network: effectiveNetwork }, pending.origin, pairwise).pubkey;
     } catch {
       return null;
     }
-  }, [masterXprv, accountIndex, effectiveNetwork]);
+  }, [masterXprv, pending, accountIndex, effectiveNetwork]);
+
+  const site = useMemo(() => {
+    if (!pending) return null;
+    const known = [...DEFAULT_FABRIC_HUB_ORIGINS, ...(gate.extra || []), ...Object.keys(sites)];
+    return describeSite(pending.origin, known, Object.keys(sites));
+  }, [pending, gate, sites]);
 
   const answer = useCallback(async (row: PendingPassportRow, payload: Record<string, unknown>) => {
     const res = await send<{ ok: boolean; error?: string }>({
@@ -168,40 +199,31 @@ export default function SiteLoginPrompt (props: Props): React.ReactElement | nul
     setError(null);
     const disclose = consentedDisclosures(pending.request, ticked);
     try {
-      const pin = pins.find((p) => p.base === choice) || null;
-      if (pin) {
-        const wrapped = buildDesktopSignRequest({
-          challenge: pending.challenge,
-          origin: pending.origin,
-          masterXprv,
-          device: { account: pin.device.account, network: pin.device.network },
-          disclose
-        });
-        if (wrapped.device !== pin.device.pubkey) {
-          setError('This Passport account is not the one linked to that desktop app. Link it again under Devices.');
-          return;
-        }
-        setWaitingOn(pin.name || pin.base);
+      const signer = signers.find((x) => x.pubkey === choice) || null;
+      if (signer) {
+        setWaitingOn(signer.name);
         const res = await send<{ ok: boolean; error?: string }>({
-          type: FABRIC_RUNTIME_DESKTOP_SIGN,
+          type: FABRIC_RUNTIME_DELEGATE_SIGN_IN,
           key: pending.key,
           requestId: pending.requestId,
-          base: pin.base,
-          signRequestUri: wrapped.uri,
-          expiresAt: wrapped.expiresAt
+          target: signer.pubkey,
+          disclose
         });
         setWaitingOn(null);
         if (!res || res.ok !== true) {
-          setError((res && typeof res.error === 'string') ? res.error : 'the desktop app did not answer');
+          setError((res && typeof res.error === 'string') ? res.error : `${signer.name} did not answer`);
           return;
         }
+        await rememberSignIn(masterXprv, pending.origin, 'linked').catch(() => undefined);
       } else {
+        const pairwise = choice !== 'main';
         const signed = signPassportAssertion({
           challenge: pending.challenge,
           origin: pending.origin,
           masterXprv,
           account: accountIndex,
           network: effectiveNetwork,
+          pairwise,
           disclose
         });
         const failure = await answer(pending, { ok: true, assertion: signed.uri });
@@ -209,14 +231,16 @@ export default function SiteLoginPrompt (props: Props): React.ReactElement | nul
           setError(failure);
           return;
         }
+        await rememberSignIn(masterXprv, pending.origin, pairwise ? 'pairwise' : 'main').catch(() => undefined);
       }
       pull();
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
+      setWaitingOn(null);
       setBusy(false);
     }
-  }, [pending, armed, masterXprv, needsUnlock, ticked, pins, choice, accountIndex, effectiveNetwork, answer, pull]);
+  }, [pending, armed, masterXprv, needsUnlock, ticked, signers, choice, accountIndex, effectiveNetwork, answer, pull]);
 
   const unlock = useCallback(async () => {
     if (!onUnlock) return;
@@ -232,11 +256,13 @@ export default function SiteLoginPrompt (props: Props): React.ReactElement | nul
   const options = accountOptions(current, accounts);
   const networkChoices = (networks && networks.length ? networks : [current.network]);
   const disclose = consentedDisclosures(pending.request, ticked);
-  const usingDesktop = choice !== 'passport';
+  const usingSigner = choice !== 'main' && choice !== 'pairwise';
+  const ownKey = identityPubkey(true);
+  const mainKey = identityPubkey(false);
 
   return (
     <Modal open size="small" closeOnDimmerClick={false}>
-      <Modal.Header>Sign in to {pending.origin.replace(/^https:\/\//, '')}</Modal.Header>
+      <Modal.Header>Sign in to {site ? site.registrable : pending.origin}</Modal.Header>
       <Modal.Content>
         <p>
           This site is asking you to sign in with Fabric. The answer works only
@@ -257,10 +283,8 @@ export default function SiteLoginPrompt (props: Props): React.ReactElement | nul
             </Form.Field>
           </Form>
         ) : null}
-        <p>
-          <strong>Site</strong><br />{pending.origin}
-          {pending.tabTitle ? <><br /><span style={{ fontSize: '0.85em' }}>Tab: {pending.tabTitle}</span></> : null}
-        </p>
+        {site ? <SiteName site={site} /> : null}
+        {pending.tabTitle ? <p style={{ fontSize: '0.85em' }}>Tab: {pending.tabTitle}</p> : null}
         {purpose ? (
           <p>
             <strong>Message from the site (not verified)</strong><br />
@@ -268,35 +292,41 @@ export default function SiteLoginPrompt (props: Props): React.ReactElement | nul
           </p>
         ) : null}
         <p style={{ fontSize: '0.85em' }}>
-          {pending.siteAuthor
-            ? <>Challenge signed with site key <code>{shortKey(pending.siteAuthor)}</code></>
-            : 'Challenge not signed by the site'}
-          {left != null ? ` · expires in ${left}s` : ''}
-          {queue.length > 1 ? ` · ${queue.length - 1} more waiting` : ''}
+          {left != null ? `Expires in ${left}s` : ''}
+          {queue.length > 1 ? `${left != null ? ' · ' : ''}${queue.length - 1} more waiting` : ''}
         </p>
         <Form>
           <Form.Field><label>Sign in as</label></Form.Field>
           <Form.Field>
             <Radio
-              label={`This Passport${passportPubkey ? ` (${shortKey(passportPubkey)})` : ''}`}
+              label={`A separate identity for this site${ownKey ? ` (${shortKey(ownKey)})` : ''}`}
               name="passport-signer"
-              value="passport"
-              checked={!usingDesktop}
-              onChange={() => setChoice('passport')}
+              value="pairwise"
+              checked={choice === 'pairwise'}
+              onChange={() => setChoice('pairwise')}
             />
           </Form.Field>
-          {pins.map((p) => (
-            <Form.Field key={p.base}>
+          <Form.Field>
+            <Radio
+              label={`My main identity${mainKey ? ` (${shortKey(mainKey)})` : ''} — sites that share it can tell it's you`}
+              name="passport-signer"
+              value="main"
+              checked={choice === 'main'}
+              onChange={() => setChoice('main')}
+            />
+          </Form.Field>
+          {signers.map((x) => (
+            <Form.Field key={x.pubkey}>
               <Radio
-                label={`${p.name || p.signer} on ${p.base.replace(/^https?:\/\//, '')} (${shortKey(p.pubkey)}) — approve on the desktop`}
+                label={`${x.name} (${shortKey(x.pubkey)}) — approve it there`}
                 name="passport-signer"
-                value={p.base}
-                checked={choice === p.base}
-                onChange={() => setChoice(p.base)}
+                value={x.pubkey}
+                checked={choice === x.pubkey}
+                onChange={() => setChoice(x.pubkey)}
               />
             </Form.Field>
           ))}
-          {!usingDesktop ? (
+          {!usingSigner ? (
             <Form.Group widths="equal">
               <Form.Field>
                 <label>Account</label>

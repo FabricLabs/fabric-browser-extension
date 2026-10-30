@@ -48,7 +48,7 @@
 
     <h2>1. What this extension is</h2>
     <p>
-      Fabric Passport is a local cryptographic identity wallet. It lets you create or restore a Fabric identity, sign in to Fabric websites (client-signed Hub sessions), mutually link devices, and use Bitcoin keys derived from that identity against a Fabric Hub you choose.
+      Fabric Passport is a local cryptographic identity wallet. It lets you create or restore a Fabric identity, sign in to Fabric websites (you approve each sign-in for the site your browser shows), link other signers (another Passport, Fabric Hub, or GoonCitizen) that each keep their own key and may ask you to sign, and use Bitcoin keys derived from that identity against a Fabric Hub you choose.
     </p>
     <p>
       Fabric Labs does not operate a cloud account for Passport. There is no Passport signup with us. We do not receive your seed phrase, wallet password, or private keys.
@@ -89,7 +89,7 @@
         </tr>
         <tr>
           <td>Web history (narrow)</td>
-          <td>Origins of Fabric Hubs you Connect &amp; register; origin + session id of a site-login or device-link you are asked to approve</td>
+          <td>Origins of Fabric Hubs you Connect &amp; register; the origin of a sign-in you are asked to approve; the signers you linked and what each may ask for; payment requests sites made</td>
           <td>Shown to you in the approval UI; Hub origin list stays local unless you use that Hub</td>
         </tr>
       </tbody>
@@ -98,14 +98,15 @@
       Passport does not collect health information, location, general browsing history, page HTML, cookies from unrelated sites, or advertising identifiers.
     </p>
     <p>
-      The content script runs on HTTPS pages and on loopback addresses (localhost, 127.0.0.1, [::1], any port) so a Fabric site can postMessage a login or device-link request. It does not scrape the page. It ignores messages that are not Fabric site-login, device-link, or Hub mesh-bridge messages.
+      The content script runs on HTTPS pages and on loopback addresses (localhost, 127.0.0.1, [::1], any port) so a Fabric site can hand it a sign-in challenge, and so it can report a Lightning invoice a page's request answered with HTTP 402. It does not scrape the page. It ignores messages that are not Passport sign-in, payment, or Hub mesh-bridge messages.
     </p>
 
     <h2>3. Information sent to other computers</h2>
     <p>Passport talks to the network only when you use a feature that needs it:</p>
     <ol>
-      <li>A Fabric Hub you choose (default public hub <a href="https://hub.fabric.pub">https://hub.fabric.pub</a>, or a local/self-hosted Hub, or another allowlisted HTTPS hub). Examples: network status, WebRTC peer registration, client-signed session signatures, device-link signatures, optional Bitcoin or Lightning calls through that Hub’s HTTP API.</li>
-      <li>The website that asked you to sign in, only after you click Approve &amp; sign (or Approve &amp; link). The payload is a BIP340 signature plus public identity material — not your seed.</li>
+      <li>A Fabric Hub you choose (default public hub <a href="https://hub.fabric.pub">https://hub.fabric.pub</a>, or a local/self-hosted Hub, or another allowlisted HTTPS hub). Examples: network status, WebRTC peer registration, signed messages to and from your linked signers (the Hub only carries them), optional Bitcoin or Lightning calls through that Hub’s HTTP API.</li>
+      <li>The website that asked you to sign in, only after you click Sign in. The payload is a BIP340 signature plus public identity material — not your seed.</li>
+      <li>A signer you linked (another Passport, or Fabric Hub or GoonCitizen on this computer or through a trusted Hub): the signed messages that link you, what you allow it to ask for, and your answers to its requests. Linking shows the same six-digit code in both places, and nothing is signed for it until you approve each request.</li>
       <li>Chrome / Google as part of installing or updating the extension from the Chrome Web Store. Fabric Labs does not receive that telemetry.</li>
     </ol>
     <p>

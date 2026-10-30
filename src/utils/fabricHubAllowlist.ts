@@ -1,5 +1,5 @@
 /**
- * Allowed Hub HTTP origins for device links (`fabric://link`) and Hub calls from Passport.
+ * Allowed Hub HTTP origins for linked-signer rendezvous and mailboxes and Hub calls from Passport.
  * Mirrors `@fabric/http/functions/fabricHubAllowlist` for the extension bundle.
  *
  * Default network hubs are **HTTPS-only**. Cleartext production origins require
@@ -8,11 +8,13 @@
  * process can listen on a loopback port.
  *
  * Operator opt-in (no hardcoded preview hosts): pass exact origins or HTTPS
- * suffixes (`*.example.com`) via `opts.extra`, or store them under
- * {@link FABRIC_HUB_ALLOWLIST_STORAGE_KEY} in `chrome.storage.local`.
+ * suffixes (`*.example.com`) via `opts.extra`, or save them (sealed with the
+ * unlocked master) under {@link FABRIC_HUB_ALLOWLIST_STORAGE_KEY}.
  */
 
 import { FABRIC_STATE_STORAGE_KEY } from '../constants/fabricExtension';
+import { privateGet } from './privateStore';
+import { readTrustedList, writeTrustedList } from './trustedLists';
 
 export const DEFAULT_FABRIC_HUB_ORIGINS = [
   'https://hub.fabric.pub',
@@ -21,7 +23,7 @@ export const DEFAULT_FABRIC_HUB_ORIGINS = [
   'https://goon.vc'
 ] as const;
 
-/** chrome.storage.local key: string | string[] of origins and optional `*.suffix`. */
+/** Private-store key: sealed list of origins and optional `*.suffix`. */
 export const FABRIC_HUB_ALLOWLIST_STORAGE_KEY = 'fabric.hub.allowlist';
 
 export function normalizeHubOrigin (raw: string): string | null {
@@ -107,19 +109,13 @@ function originMatchesAllowlistEntries (origin: string, entries: AllowlistEntry[
 }
 
 /**
- * Load operator allowlist tokens from extension storage (exact origins and/or `*.suffix`).
+ * Load operator allowlist tokens (exact origins and/or `*.suffix`). The list is
+ * sealed with the unlocked master (`trustedLists`): while Passport is locked, or
+ * when anything else wrote it, only the built-in Hubs count.
  */
 export async function loadFabricHubAllowlistExtras (): Promise<string[]> {
   try {
-    if (typeof chrome === 'undefined' || !chrome.storage || !chrome.storage.local) return [];
-    const bag = await chrome.storage.local.get(FABRIC_HUB_ALLOWLIST_STORAGE_KEY);
-    const raw = bag && bag[FABRIC_HUB_ALLOWLIST_STORAGE_KEY];
-    if (Array.isArray(raw)) {
-      return raw.map((s) => String(s || '').trim()).filter(Boolean);
-    }
-    if (typeof raw === 'string' && raw.trim()) {
-      return raw.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
-    }
+    return await readTrustedList(FABRIC_HUB_ALLOWLIST_STORAGE_KEY);
   } catch {
     /* ignore storage failures — fail closed to defaults */
   }
@@ -146,33 +142,7 @@ export async function loadFabricHubGateOptions (): Promise<FabricHubGateOptions>
   const extra = await loadFabricHubAllowlistExtras();
   let activeHub: string | null = null;
   try {
-    if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-      const bag = await chrome.storage.local.get(FABRIC_STATE_STORAGE_KEY);
-      activeHub = activeFabricHubFromState(bag && bag[FABRIC_STATE_STORAGE_KEY]);
-    }
-  } catch {
-    activeHub = null;
-  }
-  return { extra, activeHub };
-}
-
-/** Runtime message: content script asks the background for {@link loadFabricHubGateOptions}. */
-export const FABRIC_RUNTIME_HUB_GATE_OPTIONS = 'FABRIC_HUB_GATE_OPTIONS';
-
-/**
- * Content-script twin of {@link loadFabricHubGateOptions}: the background reads the
- * active node so Passport state never loads into a page's renderer. Without an
- * answer, no loopback Hub is allowed.
- */
-export async function requestFabricHubGateOptions (): Promise<FabricHubGateOptions> {
-  const extra = await loadFabricHubAllowlistExtras();
-  let activeHub: string | null = null;
-  try {
-    if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
-      const res = await chrome.runtime.sendMessage({ type: FABRIC_RUNTIME_HUB_GATE_OPTIONS });
-      const raw = res && typeof res.activeHub === 'string' ? res.activeHub : null;
-      activeHub = raw ? normalizeHubOrigin(raw) : null;
-    }
+    activeHub = activeFabricHubFromState(await privateGet(FABRIC_STATE_STORAGE_KEY));
   } catch {
     activeHub = null;
   }
@@ -183,9 +153,7 @@ export async function requestFabricHubGateOptions (): Promise<FabricHubGateOptio
 export async function saveFabricHubAllowlistExtras (raw: string | string[]): Promise<string[]> {
   const parts = Array.isArray(raw) ? raw : String(raw || '').split(/[\s,]+/);
   const kept = parts.map((s) => String(s || '').trim()).filter((s) => !!parseAllowlistToken(s));
-  if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-    await chrome.storage.local.set({ [FABRIC_HUB_ALLOWLIST_STORAGE_KEY]: kept });
-  }
+  await writeTrustedList(FABRIC_HUB_ALLOWLIST_STORAGE_KEY, kept);
   return kept;
 }
 

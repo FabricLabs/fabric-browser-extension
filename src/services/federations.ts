@@ -17,6 +17,7 @@
  */
 
 import { Buffer } from 'buffer';
+import { swallowNonFatal } from '../utils/nonFatal';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const core = require('../utils/loadFabricFederation');
@@ -307,9 +308,10 @@ export class FederationMember {
 
   /**
    * Create a federation of this identity and `members` (compressed pubkeys),
-   * optionally with the mailbox Hub as a member, and invite them.
+   * optionally with the mailbox Hub as a member, and invite them. `invite` is
+   * the signed invitation frame, for asking linked signers directly.
    */
-  async create (opts: { name?: string; threshold: number; members: string[]; includeHub?: boolean }): Promise<FederationRecord> {
+  async create (opts: { name?: string; threshold: number; members: string[]; includeHub?: boolean }): Promise<FederationRecord & { invite: string }> {
     const hub = await this.hub();
     const validators = [this.pubkey, ...(opts.members || []).map((m) => String(m || '').trim().toLowerCase()).filter(Boolean)];
     if (opts.includeHub) {
@@ -329,8 +331,8 @@ export class FederationMember {
       url: (opts.includeHub && pubkey === hub.pubkey) ? this.hubBase : null
     }));
     const body = core.Federation.inviteMessage({ descriptor, name: opts.name ? String(opts.name).trim().slice(0, 120) : null, members: hints });
-    await this.post(body);
-    return this.state.records[body.federationId];
+    const invite = await this.post(body);
+    return { ...this.state.records[body.federationId], invite };
   }
 
   async respond (federationId: string, accept: boolean): Promise<FederationRecord> {
@@ -431,13 +433,46 @@ export class FederationMember {
     return record;
   }
 
-  /** Sign a body, hand it to the Hub, and apply it here. */
-  private async post (body: object): Promise<void> {
+  /**
+   * Answer a linked signer's federation request (a `DELEGATION_REQUEST` with
+   * scope `federation`): join the shared wallet an invite names, or sign the
+   * withdrawal it asks for. Returns the signed answer frame, which also goes
+   * to the Hub like any member message.
+   */
+  async answerDelegated (innerUri: string): Promise<string> {
+    const T = messageTypes();
+    const decoded = core.fabricUri.decodeFabricUri(innerUri, { allowedTypes: ['CONTRACT_MESSAGE'] });
+    if (!decoded || !decoded.ok || !decoded.signed || !decoded.author) throw new Error('not a signed federation message');
+    const body = JSON.parse(String(decoded.message.data || ''));
+    this.receive(innerUri);
+    if (body.type === T.invite) {
+      const descriptor = core.Federation.verifyInvite(body, String(decoded.author).toLowerCase());
+      const record = this.require(core.Federation.descriptorId(descriptor));
+      if (record.publisher.slice(2) === this.xonly) throw new Error('you created this shared wallet');
+      return this.post(core.Federation.responseMessage(record.id, true));
+    }
+    if (body.type === T.withdrawal) {
+      const record = this.require(String(body.federationId || ''));
+      if (record.status !== 'accepted') throw new Error('join this shared wallet first');
+      const w = record.withdrawals[String(body.requestId || '').toLowerCase()];
+      if (!w) throw new Error('unknown withdrawal request');
+      if (w.status !== 'pending') throw new Error('this withdrawal is already on chain');
+      const signed = core.Federation.signWithdrawal({ psbtBase64: w.psbtBase64, privateKey: this.secret });
+      const uri = await this.post(core.Federation.signatureMessage(record.id, w.requestId, signed.signatures));
+      await this.maybeFinalize(record, w);
+      return uri;
+    }
+    throw new Error('Passport answers shared-wallet invitations and withdrawals only');
+  }
+
+  /** Sign a body, hand it to the Hub, apply it here, and return the frame. */
+  private async post (body: object): Promise<string> {
     const msg = core.Message.fromVector(['CONTRACT_MESSAGE', JSON.stringify(body)]);
     msg.signWithKey(this.key);
     const uri = core.fabricUri.encodeFabricUri(msg);
     await this.request('POST', '/services/federations/messages', { fabric: uri });
     this.receive(uri);
+    return uri;
   }
 
   private async request (method: 'GET' | 'POST', path: string, body?: object): Promise<any> {
@@ -453,5 +488,28 @@ export class FederationMember {
       throw new Error(data && data.message ? String(data.message) : `Hub answered HTTP ${res.status}`);
     }
     return data;
+  }
+}
+
+const STORAGE_PREFIX = 'fabric_federations:';
+
+/** The member for this cosigner key on `hubBase`, with its saved state. */
+export async function loadFederationMember (hubBase: string, privateKeyHex: string): Promise<FederationMember> {
+  const probe = new FederationMember({ hubBase, privateKeyHex });
+  let state: FederationMemberState | null = null;
+  try {
+    const got = await chrome.storage.local.get(STORAGE_PREFIX + probe.pubkey);
+    state = ((got && got[STORAGE_PREFIX + probe.pubkey]) as FederationMemberState | undefined) || null;
+  } catch (err: unknown) {
+    swallowNonFatal('federations-load', err);
+  }
+  return state ? new FederationMember({ hubBase, privateKeyHex, state }) : probe;
+}
+
+export async function saveFederationMember (member: FederationMember): Promise<void> {
+  try {
+    await chrome.storage.local.set({ [STORAGE_PREFIX + member.pubkey]: member.export() });
+  } catch (err: unknown) {
+    swallowNonFatal('federations-save', err);
   }
 }

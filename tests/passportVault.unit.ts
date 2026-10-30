@@ -1,7 +1,10 @@
 'use strict';
 
 import assert from 'assert';
+import fs from 'fs';
+import path from 'path';
 import {
+  checkedView,
   createVault,
   cosignerPrivateKeyHex,
   currentView,
@@ -15,8 +18,10 @@ import {
   recallMaster,
   rememberMaster,
   renameAccount,
+  resealVault,
   switchAccount,
   unlockVault,
+  vaultNeedsReseal,
   vaultAccounts,
   vaultBackup,
   vaultIdentities,
@@ -27,6 +32,12 @@ import {
 const core = require('../src/utils/loadFabricPassport');
 
 const LOCK = 'correct horse battery';
+
+function sealedBlob (): { sealJson: (value: unknown, password: string, opts: Record<string, unknown>) => Record<string, unknown> } {
+  const roots = [process.env.FABRIC_CORE, path.resolve(__dirname, '../node_modules/@fabric/core')].filter(Boolean) as string[];
+  const root = roots.find((r) => fs.existsSync(path.join(r, 'functions', 'sealedBlob.js'))) as string;
+  return require(path.join(path.resolve(root), 'functions', 'sealedBlob.js'));
+}
 
 describe('passportVault', function () {
   this.timeout(20000);
@@ -114,6 +125,53 @@ describe('passportVault', function () {
     assert.deepStrictEqual(Object.keys(pub[0]).sort(), ['account', 'id', 'isCurrent', 'name', 'network', 'publicKeyHex']);
   });
 
+  it('refuses a cache whose wallet was swapped once the master is open', function () {
+    const master = masterFromSeedPhrase(generateSeedPhrase());
+    const vault = createVault({ master, lockPassword: LOCK });
+    const stranger = core.accountKeys.deriveAccount(masterFromSeedPhrase(generateSeedPhrase()), { account: 0, network: 'mainnet' });
+    const key = pairKey(vault.current);
+    const forged = {
+      ...vault,
+      accounts: { ...vault.accounts, [key]: { ...vault.accounts[key], wallet: { ...vault.accounts[key].wallet, segwit: { ...vault.accounts[key].wallet.segwit, xpub: stranger.wallet.segwit.xpub } } } }
+    };
+    assert.ok(checkedView(vault, master, vault.current));
+    assert.throws(() => checkedView(forged, master, forged.current), /does not match/);
+    assert.throws(() => vaultIdentities(forged, master), /does not match/);
+    assert.throws(() => unlockVault(forged, LOCK), (err: { code?: string }) => err.code === 'FABRIC_ACCOUNT_VAULT_MISMATCH');
+  });
+
+  it('re-seals a master sealed with an older PBKDF2 count, under the same password', function () {
+    const master = masterFromSeedPhrase(generateSeedPhrase());
+    const vault = createVault({ master, lockPassword: LOCK });
+    assert.strictEqual(vaultNeedsReseal(vault), false);
+    assert.strictEqual(resealVault(vault, master, LOCK), vault);
+    const seal = vault.seal as { type: string; version: number };
+    const legacy = { ...vault, seal: sealedBlob().sealJson({ xprv: master }, 'short pw', { type: seal.type, version: seal.version, iterations: 210000 }) };
+    assert.strictEqual(vaultNeedsReseal(legacy), true);
+    assert.strictEqual(unlockVault(legacy, 'short pw'), master);
+    const fresh = resealVault(legacy, master, 'short pw');
+    assert.strictEqual(vaultNeedsReseal(fresh), false);
+    assert.strictEqual(unlockVault(fresh, 'short pw'), master);
+  });
+
+  it('unlocks a vault whose account keys were reordered, as chrome.storage does', function () {
+    const master = masterFromSeedPhrase(generateSeedPhrase());
+    const vault = createVault({ master, lockPassword: LOCK });
+    const sortKeys = (value: unknown): unknown => {
+      if (Array.isArray(value)) return value.map(sortKeys);
+      if (value && typeof value === 'object') {
+        const out: Record<string, unknown> = {};
+        for (const key of Object.keys(value as Record<string, unknown>).sort()) {
+          out[key] = sortKeys((value as Record<string, unknown>)[key]);
+        }
+        return out;
+      }
+      return value;
+    };
+    const reordered = sortKeys(JSON.parse(JSON.stringify(vault)));
+    assert.strictEqual(unlockVault(reordered as ReturnType<typeof createVault>, LOCK), master);
+  });
+
   it('backs up the sealed vault only and reads it back', function () {
     const master = masterFromSeedPhrase(generateSeedPhrase());
     const vault = createVault({ master, lockPassword: LOCK });
@@ -153,6 +211,12 @@ describe('passportVault', function () {
 
       const other = createVault({ master: masterFromSeedPhrase(generateSeedPhrase()), lockPassword: LOCK });
       assert.strictEqual(await recallMaster(other), null);
+      assert.ok(!(PASSPORT_MASTER_SESSION_KEY in store));
+
+      await rememberMaster(master);
+      const key = pairKey(vault.current);
+      const forged = { ...vault, accounts: { ...vault.accounts, [key]: { ...vault.accounts[key], cosigner: { pubkey: '02' + 'ab'.repeat(32) } } } };
+      assert.strictEqual(await recallMaster(forged), null);
       assert.ok(!(PASSPORT_MASTER_SESSION_KEY in store));
 
       await rememberMaster(master);

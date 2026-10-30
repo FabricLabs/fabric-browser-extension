@@ -13,15 +13,16 @@ import {
 import {
   FederationMember,
   federationsAvailable,
-  type FederationMemberState,
+  loadFederationMember,
+  saveFederationMember as saveState,
   type FederationRecord,
   type FederationVault,
   type FederationWithdrawal,
   type HubFederationsStatus
 } from '../services/federations';
-import { swallowNonFatal } from '../utils/nonFatal';
+import { DELEGATION_ASK } from '../constants/delegation';
+import { delegationCall, useDelegationState, walletSigners } from './delegationApi';
 
-const STORAGE_PREFIX = 'fabric_federations:';
 const SYNC_EVERY_MS = 30000;
 const PUBKEY_RE = /^0[23][0-9a-f]{64}$/i;
 
@@ -40,24 +41,6 @@ function short (hex: string): string {
 
 function sats (n: number): string {
   return `${Number(n || 0).toLocaleString()} sats`;
-}
-
-async function loadState (pubkey: string): Promise<FederationMemberState | null> {
-  try {
-    const got = await chrome.storage.local.get(STORAGE_PREFIX + pubkey);
-    return ((got && got[STORAGE_PREFIX + pubkey]) as FederationMemberState | undefined) || null;
-  } catch (err: unknown) {
-    swallowNonFatal('federations-load', err);
-    return null;
-  }
-}
-
-async function saveState (member: FederationMember): Promise<void> {
-  try {
-    await chrome.storage.local.set({ [STORAGE_PREFIX + member.pubkey]: member.export() });
-  } catch (err: unknown) {
-    swallowNonFatal('federations-save', err);
-  }
 }
 
 export default function FederationsPanel (props: FederationsPanelProps) {
@@ -84,9 +67,7 @@ export default function FederationsPanel (props: FederationsPanelProps) {
     if (!hubBase || !privateKeyHex || !federationsAvailable()) return undefined;
     (async () => {
       try {
-        const probe = new FederationMember({ hubBase, privateKeyHex });
-        const state = await loadState(probe.pubkey);
-        const m = state ? new FederationMember({ hubBase, privateKeyHex, state }) : probe;
+        const m = await loadFederationMember(hubBase, privateKeyHex);
         if (cancelled) return;
         memberRef.current = m;
         setMember(m);
@@ -175,11 +156,12 @@ export default function FederationsPanel (props: FederationsPanelProps) {
         <div>
           <Button size='mini' inverted color='grey' icon='refresh' loading={busy === 'sync'} disabled={!member || !!busy} onClick={() => void sync()} title='Check the Hub for new messages' />
           <Button size='mini' primary disabled={!member} onClick={() => setCreating((c) => !c)} content={creating ? 'Close' : 'New'} />
+          <SharedWalletButton member={member} busy={busy} run={run} setOpen={setOpen} />
         </div>
       </div>
       <p style={{ color: 'rgba(255,255,255,0.6)', fontSize: '0.78em', margin: '0 0 0.6em' }}>
-        Shared Bitcoin vaults: spending needs signatures from enough members. Passport signs with this identity&apos;s key;
-        Hubs and other Passports can be members too.
+        Shared Bitcoin vaults: spending needs signatures from enough members. Passport signs with this
+        identity&apos;s co-signing key, never its identity key; Hubs and other Passports can be members too.
       </p>
 
       {err ? <Message negative size='mini' content={err} onDismiss={() => setErr(null)} /> : null}
@@ -358,7 +340,7 @@ function CreateFederationForm (props: {
     <Form inverted size='mini' style={{ marginBottom: '0.8em' }} onSubmit={() => valid && props.onCreate({ name: name.trim(), threshold: k, members, includeHub })}>
       <Form.Input label='Name' value={name} onChange={(_, d) => setName(String(d.value))} />
       <Form.TextArea
-        label='Other members (their Fabric identity pubkeys, 02/03…, one per line)'
+        label='Other members (their co-signing keys, 02/03…, one per line)'
         rows={3}
         value={membersText}
         onChange={(_, d) => setMembersText(String(d.value))}
@@ -375,5 +357,47 @@ function CreateFederationForm (props: {
       </p>
       <Button size='mini' primary type='submit' loading={props.busy} disabled={!valid || props.busy} content='Create and invite' />
     </Form>
+  );
+}
+
+function SharedWalletButton (props: {
+  member: FederationMember | null;
+  busy: string | null;
+  run: (label: string, fn: (m: FederationMember) => Promise<unknown>, done?: string) => void;
+  setOpen: (id: string) => void;
+}): React.ReactElement | null {
+  const { state } = useDelegationState();
+  const signers = walletSigners(state);
+  if (!props.member || !signers.length) return null;
+  const n = 1 + signers.length;
+  const threshold = Math.floor(n / 2) + 1;
+  return (
+    <Button
+      size='mini'
+      disabled={!!props.busy}
+      loading={props.busy === 'shared'}
+      title={`A ${threshold}-of-${n} wallet with your linked signers that allow shared wallets`}
+      onClick={() => void props.run('shared', async (m) => {
+        const r = await m.create({
+          name: 'Linked signers',
+          threshold,
+          members: signers.map((s) => s.cosigner)
+        });
+        props.setOpen(r.id);
+        const missed: string[] = [];
+        for (const s of signers) {
+          const asked = await delegationCall(DELEGATION_ASK, {
+            target: s.pubkey,
+            request: r.invite,
+            purpose: `Join the shared wallet "Linked signers" (${threshold} of ${n})`
+          });
+          if (!asked.ok) missed.push(`${s.name}: ${asked.error || 'not reachable'}`);
+        }
+        if (missed.length) {
+          throw new Error(`Shared wallet created, but not every linked signer was asked; they can still join from their Hub. ${missed.join('; ')}`);
+        }
+      }, 'Shared wallet created; each linked signer was asked to join.')}
+      content='Shared wallet with linked signers'
+    />
   );
 }

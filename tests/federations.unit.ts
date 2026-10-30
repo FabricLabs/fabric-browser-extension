@@ -138,6 +138,30 @@ describe('Passport federation member', () => {
     assert.strictEqual(again.list().length, 1);
   });
 
+  it('answers a linked signer\'s invite and withdrawal from the frames alone', async () => {
+    const hub = fakeHub();
+    const alice = new FederationMember({ hubBase: 'https://hub.example', privateKeyHex: priv(), fetch: hub.fetch });
+    const bob = new FederationMember({ hubBase: 'https://hub.example', privateKeyHex: priv(), fetch: hub.fetch });
+    const created = await alice.create({ name: 'Linked signers', threshold: 2, members: [bob.pubkey] });
+    assert.match(created.invite, /^fabric:/);
+
+    const joined = await bob.answerDelegated(created.invite);
+    assert.match(joined, /^fabric:/);
+    assert.strictEqual(bob.get(created.id)!.status, 'accepted');
+    await assert.rejects(alice.answerDelegated(created.invite), /you created/);
+
+    hub.fund(created.id, 60000);
+    const w = await alice.requestWithdrawal(created.id, { destinationAddress: coreDest(), amountSats: 20000, feeSats: 400 });
+    const request = hub.frames.map((f) => f.fabric).find((uri) => {
+      const d = core.fabricUri.decodeFabricUri(uri, { allowedTypes: ['CONTRACT_MESSAGE'] });
+      return JSON.parse(d.message.data).type === core.Federation.MESSAGE_TYPES.withdrawal;
+    })!;
+    await bob.sync();
+    await bob.answerDelegated(request);
+    assert.strictEqual(hub.sent.length, 1);
+    assert.strictEqual(bob.get(created.id)!.withdrawals[w.requestId].status, 'broadcast');
+  });
+
   it('leaves broadcasting to a member Hub', async () => {
     const hub = fakeHub({ member: true });
     const alice = new FederationMember({ hubBase: 'https://hub.example', privateKeyHex: priv(), fetch: hub.fetch });

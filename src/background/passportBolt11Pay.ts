@@ -1,6 +1,7 @@
 'use strict';
 
 import { FABRIC_STATE_STORAGE_KEY } from '../constants/fabricExtension';
+import { privateGet } from '../utils/privateStore';
 
 function extractActiveHubAddress (state: unknown): string | null {
   if (!state || typeof state !== 'object') return null;
@@ -35,10 +36,7 @@ export async function attemptPayBolt11ViaActiveFabricNode (bolt11: string): Prom
   const b = String(bolt11 || '').trim();
   if (!b.startsWith('ln')) return { ok: false, message: 'Not a valid BOLT11 invoice.' };
 
-  const bag = await new Promise<Record<string, unknown>>((resolve) => {
-    chrome.storage.local.get(FABRIC_STATE_STORAGE_KEY, resolve);
-  });
-  const hub = extractActiveHubAddress(bag[FABRIC_STATE_STORAGE_KEY]);
+  const hub = extractActiveHubAddress(await privateGet(FABRIC_STATE_STORAGE_KEY));
   if (!hub) {
     return {
       ok: false,

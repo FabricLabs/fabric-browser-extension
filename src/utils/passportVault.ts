@@ -6,20 +6,26 @@
  * data of every pair used so far). One seed per Passport; accounts and
  * networks are derivation paths under it:
  *
- * - identity `m/44'/F'/n'/0/0` signs Fabric messages and Passport assertions;
+ * - identity `m/7777'/F'/n'/0/0` signs Fabric messages and Passport
+ *   assertions; a site Passport has not signed in to before sees its own
+ *   pairwise key at `m/7777'/F'/n'/0/<index from the origin>` instead;
  * - wallet `m/84'/B'/n'` (new addresses) and `m/44'/B'/n'` (watched);
- * - cosigner `m/87'/B'/n'/0/0` signs federation withdrawals.
+ * - cosigner `m/87'/B'/n'/0/0` signs federation withdrawals and is the key
+ *   grants disclose to linked signers.
  *
  * Unlocking opens the master into memory (and `chrome.storage.session`, which
- * content scripts cannot read, until auto-lock). No mnemonic, plaintext key,
- * or derivation path setting is ever stored.
+ * content scripts cannot read, until auto-lock), checks the cached public data
+ * against it, and re-seals a master that is not yet Argon2id. No
+ * mnemonic, plaintext key, or derivation path setting is ever stored.
  */
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const core = require('./loadFabricPassport');
 
 export const ACCOUNT_NETWORKS: readonly string[] = Object.freeze(['mainnet', 'testnet', 'testnet4', 'signet', 'regtest']);
-export const LOCK_PASSWORD_MIN = 8;
+export const LOCK_PASSWORD_MIN = 12;
+/** Historical PBKDF2 count. New seals are Argon2id; unlock re-seals anything else. */
+export const SEAL_ITERATIONS = 600000;
 export const MAX_ACCOUNT_INDEX = 0x7fffffff;
 export const MAX_ACCOUNT_LABEL = 64;
 /** `chrome.storage.session` key holding the open master while unlocked. */
@@ -56,7 +62,7 @@ export type VaultIdentity = {
   id: string;
   bech32: string;
   publicKeyHex: string;
-  /** Identity key xpub (current pair, unlocked only); for device links. */
+  /** Identity key xpub (current pair, unlocked only). */
   xpub: string;
   privateKeyHex?: string;
   name: string;
@@ -164,10 +170,103 @@ export function createVault (params: { master: string; lockPassword: string; acc
   });
 }
 
+/**
+ * Copy `value` into `template`'s key order. chrome.storage returns objects with
+ * sorted keys; the account check compares JSON text, so the saved order has to
+ * match the order the account was derived in.
+ */
+function orderLike (template: unknown, value: unknown): unknown {
+  if (Array.isArray(value)) {
+    const tpl = Array.isArray(template) ? template : [];
+    return value.map((item, i) => orderLike(tpl[i], item));
+  }
+  if (!value || typeof value !== 'object' || !template || typeof template !== 'object' || Array.isArray(template)) {
+    return value;
+  }
+  const tpl = template as Record<string, unknown>;
+  const src = value as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+  for (const key of Object.keys(tpl)) {
+    if (Object.prototype.hasOwnProperty.call(src, key)) out[key] = orderLike(tpl[key], src[key]);
+  }
+  for (const key of Object.keys(src)) {
+    if (!Object.prototype.hasOwnProperty.call(out, key)) out[key] = src[key];
+  }
+  return out;
+}
+
+/** Cached accounts rewritten into the key order a fresh derivation uses. */
+function vaultInDerivedOrder (vault: AccountVault, master: string): AccountVault {
+  const keys = accountKeys() as {
+    deriveAccount?: (master: string, pair: AccountPair) => unknown;
+    accountPublicView?: (derived: unknown, label?: string) => unknown;
+  };
+  if (typeof keys.deriveAccount !== 'function' || typeof keys.accountPublicView !== 'function') return vault;
+  const accounts: AccountVault['accounts'] = {};
+  for (const [key, cached] of Object.entries(vault.accounts)) {
+    if (!cached) continue;
+    try {
+      const derived = keys.deriveAccount(master, { account: cached.account, network: cached.network });
+      accounts[key] = orderLike(keys.accountPublicView(derived, cached.label), cached) as AccountView;
+    } catch {
+      accounts[key] = cached;
+    }
+  }
+  return { ...vault, accounts };
+}
+
 /** Open the sealed master with the lock password. Throws on a wrong password. */
 export function unlockVault (vault: AccountVault, lockPassword: string): string {
   if (!isAccountVault(vault)) throw new TypeError('Passport vault required');
-  return accountKeys().unsealMaster(vault.seal, String(lockPassword ?? ''));
+  const master = accountKeys().unsealMaster(vault.seal, String(lockPassword ?? ''));
+  const keys = accountKeys();
+  const ordered = vaultInDerivedOrder(vault, master);
+  if (typeof keys.verifyVaultAccounts === 'function') keys.verifyVaultAccounts(ordered, master);
+  checkedView(ordered, master, ordered.current);
+  return master;
+}
+
+/** The sealed master uses fewer PBKDF2 iterations than new seals. */
+export function vaultNeedsReseal (vault: AccountVault): boolean {
+  if (!isAccountVault(vault)) return false;
+  const kdf = (vault.seal as { kdf?: { name?: unknown; iterations?: unknown } }).kdf;
+  const argon = accountKeys().ARGON2_MASTER === true;
+  if (argon) return !kdf || kdf.name !== 'argon2id';
+  const iterations = Number(kdf && kdf.iterations) || 210000;
+  return iterations < SEAL_ITERATIONS;
+}
+
+/**
+ * The vault with its master sealed again under Argon2id, or the same vault
+ * when it already is. Uses the password it was just opened with, so a
+ * password from before the 12-character minimum keeps working.
+ */
+export function resealVault (vault: AccountVault, master: string, lockPassword: string): AccountVault {
+  if (!vaultNeedsReseal(vault)) return vault;
+  return { ...vault, seal: accountKeys().sealMaster(master, String(lockPassword ?? '')) };
+}
+
+/**
+ * The public data of `pair` as `master` derives it, checked against the
+ * cached copy: throws when the cache was edited (an xpub swapped, say).
+ */
+export function checkedView (vault: AccountVault, master: string, pair: AccountPair): AccountView {
+  const keys = accountKeys();
+  const key = pairKey(pair);
+  const ordered = vaultInDerivedOrder(vault, master);
+  const cached = ordered.accounts[key];
+  if (typeof keys.checkCachedAccount === 'function') return keys.checkCachedAccount(key, cached, master) as AccountView;
+  const fresh = derive(master, pair);
+  const mismatch = !cached
+    || fresh.identity.pubkey !== cached.identity.pubkey
+    || (cached.cosigner && fresh.cosigner && cached.cosigner.pubkey !== fresh.cosigner.pubkey)
+    || (cached.wallet && cached.wallet.segwit && fresh.wallet.segwit.xpub !== cached.wallet.segwit.xpub);
+  if (mismatch) {
+    const err = new Error(`account vault cache does not match its master: ${key}`) as Error & { code?: string };
+    err.code = 'FABRIC_ACCOUNT_VAULT_MISMATCH';
+    throw err;
+  }
+  return cached;
 }
 
 /**
@@ -224,6 +323,15 @@ function xpubOf (key: unknown): string {
   return k && typeof k.xpub === 'string' ? k.xpub : '';
 }
 
+/** A locked popup must not derive a receive address from the cached xpub. */
+function blankWallet (wallet: PublicWallet): PublicWallet {
+  return {
+    segwit: { ...wallet.segwit, xpub: '' },
+    standard: { ...wallet.standard, xpub: '' },
+    receive: wallet.receive
+  };
+}
+
 /**
  * Every cached pair as a popup identity. With the master, the current pair
  * carries its identity private key and xpub; nothing else does.
@@ -244,10 +352,15 @@ export function vaultIdentities (vault: AccountVault | null, master: string | nu
       hasPrivateKey: true,
       account: view.account,
       network: view.network,
-      wallet: view.wallet,
+      wallet: master ? view.wallet : blankWallet(view.wallet),
       cosignerPubkey: view.cosigner ? view.cosigner.pubkey : ''
     };
     if (isCurrent && master) {
+      // Receive addresses come from this wallet: never from an unchecked cache.
+      const fresh = checkedView(vault, master, view);
+      row.wallet = fresh.wallet;
+      row.publicKeyHex = fresh.identity.pubkey;
+      row.cosignerPubkey = fresh.cosigner ? fresh.cosigner.pubkey : '';
       const key = derive(master, view).identity.key;
       const pk = privateKeyHexOf(key);
       if (pk) row.privateKeyHex = pk;
@@ -312,12 +425,9 @@ export async function recallMaster (vault: AccountVault | null): Promise<string 
   const master = typeof got[PASSPORT_MASTER_SESSION_KEY] === 'string' ? String(got[PASSPORT_MASTER_SESSION_KEY]) : '';
   if (!master) return null;
   try {
-    const view = currentView(vault);
-    if (!view || derive(master, view).identity.pubkey !== view.identity.pubkey) {
-      await area.remove(PASSPORT_MASTER_SESSION_KEY);
-      return null;
-    }
-    return accountKeys().normalizeMasterXprv(master);
+    const normalized = accountKeys().normalizeMasterXprv(master);
+    checkedView(vault, normalized, vault.current);
+    return normalized;
   } catch {
     await area.remove(PASSPORT_MASTER_SESSION_KEY);
     return null;

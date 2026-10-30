@@ -25,34 +25,44 @@ const FABRIC_HTTP_ASSETS_ALIASES = Array.from(new Set([
   path.resolve(__dirname, '../fabric-http/assets')
 ].filter((p) => fs.existsSync(p))));
 
-function fabricCoreRoots (release) {
+/** FABRIC_CORE when set (a local checkout), else the pinned `node_modules/@fabric/core`. */
+function fabricCoreRoots () {
   const roots = [];
   if (process.env.FABRIC_CORE) roots.push(path.resolve(process.env.FABRIC_CORE));
-  // Release builds stay reproducible: no sibling checkout unless FABRIC_CORE asks for one.
-  if (process.env.FABRIC_CORE || !release) roots.push(path.resolve(__dirname, '../fabric-clean'));
   roots.push(path.resolve(__dirname, 'node_modules/@fabric/core'));
   return roots;
 }
 /** Core tree for Passport sign-in and accounts (same order as `src/utils/loadFabricPassport.js`). */
-function resolveFabricPassportCoreRoot (release) {
-  for (const root of fabricCoreRoots(release)) {
+function resolveFabricPassportCoreRoot () {
+  for (const root of fabricCoreRoots()) {
     if (fs.existsSync(path.join(root, 'functions', 'passport.js')) && fs.existsSync(path.join(root, 'functions', 'accountKeys.js'))) {
       console.log(`[webpack] Passport core: ${root}`);
       return root;
     }
   }
-  throw new Error('Passport needs @fabric/core with functions/passport.js and functions/accountKeys.js (set FABRIC_CORE or clone ../fabric-clean)');
+  throw new Error('Passport needs @fabric/core with functions/passport.js and functions/accountKeys.js (set FABRIC_CORE to a core checkout)');
 }
 /** Core tree for named federations (same order as `src/utils/loadFabricFederation.js`). */
-function resolveFabricFederationCoreRoot (release) {
-  for (const root of fabricCoreRoots(release)) {
+function resolveFabricFederationCoreRoot () {
+  for (const root of fabricCoreRoots()) {
     const file = path.join(root, 'types', 'federation.js');
     if (fs.existsSync(file) && fs.readFileSync(file, 'utf8').includes('MESSAGE_TYPES')) {
       console.log(`[webpack] federations core: ${root}`);
       return root;
     }
   }
-  throw new Error('Federations need @fabric/core whose types/federation has the member messages (set FABRIC_CORE or clone ../fabric-clean)');
+  throw new Error('Federations need @fabric/core whose types/federation has the member messages (set FABRIC_CORE to a core checkout)');
+}
+/** Core tree for delegation (same order and check as `src/utils/loadFabricDelegation.js`). */
+function resolveFabricDelegationCoreRoot () {
+  for (const root of fabricCoreRoots()) {
+    const fn = path.join(root, 'functions', 'delegation.js');
+    if (fs.existsSync(fn) && fs.existsSync(path.join(root, 'types', 'delegation.js')) && fs.readFileSync(fn, 'utf8').includes('pubkeys: { initiator')) {
+      console.log(`[webpack] delegation core: ${root}`);
+      return root;
+    }
+  }
+  throw new Error('Linked signers need @fabric/core with functions/delegation.js (set FABRIC_CORE to a core checkout)');
 }
 const MiniCssExtractPlugin = require('mini-css-extract-plugin');
 const HtmlWebpackPlugin = require('html-webpack-plugin');
@@ -62,13 +72,10 @@ const TerserPlugin = require('terser-webpack-plugin');
 
 module.exports = (env, argv) => {
   const isProduction = (env && env.NODE_ENV === 'production') || process.env.NODE_ENV === 'production';
-  const release = isProduction || !!(argv && argv.mode === 'production');
-
   return {
     mode: isProduction ? 'production' : 'development',
     entry: {
       popup: './src/UIElements/popup/index.tsx',
-      contentMarker: './src/contentMarker.ts',
       content: './src/content.ts',
       background: './src/background/serviceWorkerMain.ts',
       offscreen: './src/background/offscreenMain.ts'
@@ -77,7 +84,7 @@ module.exports = (env, argv) => {
       path: path.resolve(__dirname, 'assets'),
       filename: (pathData) => {
         const n = pathData.chunk.name;
-        if (n === 'content' || n === 'contentMarker') return 'js/[name].js';
+        if (n === 'content') return 'js/[name].js';
         if (n === 'background') return 'background/serviceWorker.js';
         if (n === 'offscreen') return 'background/offscreen.js';
         return 'js/[name].[contenthash].js';
@@ -147,10 +154,12 @@ module.exports = (env, argv) => {
         '@fabric/core/constants': path.resolve(__dirname, 'node_modules/@fabric/core/constants.js'),
         '@fabric/core/types/message': path.resolve(__dirname, 'node_modules/@fabric/core/types/message.js'),
         '@fabric/http/assets': path.resolve(__dirname, 'node_modules/@fabric/http/assets'),
-        'fabric-passport-core': resolveFabricPassportCoreRoot(release),
+        'fabric-passport-core': resolveFabricPassportCoreRoot(),
         [path.resolve(__dirname, 'src/utils/loadFabricPassport.js')]: path.resolve(__dirname, 'src/utils/fabricPassportCore.browser.js'),
-        'fabric-federation-core': resolveFabricFederationCoreRoot(release),
-        [path.resolve(__dirname, 'src/utils/loadFabricFederation.js')]: path.resolve(__dirname, 'src/utils/fabricFederationCore.browser.js')
+        'fabric-federation-core': resolveFabricFederationCoreRoot(),
+        [path.resolve(__dirname, 'src/utils/loadFabricFederation.js')]: path.resolve(__dirname, 'src/utils/fabricFederationCore.browser.js'),
+        'fabric-delegation-core': resolveFabricDelegationCoreRoot(),
+        [path.resolve(__dirname, 'src/utils/loadFabricDelegation.js')]: path.resolve(__dirname, 'src/utils/fabricDelegationCore.browser.js')
       }
     },
     module: {

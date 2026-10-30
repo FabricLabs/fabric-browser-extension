@@ -9,22 +9,22 @@ Peer documents: [`@fabric/core` AUDIT.md](https://github.com/FabricLabs/fabric/b
 [`@fabric/http` AUDIT.md](https://github.com/FabricLabs/fabric-http/blob/feature/rsi/AUDIT.md),
 [`@fabric/hub` AUDIT.md](https://github.com/FabricLabs/hub.fabric.pub/blob/feature/rsi/AUDIT.md).
 
-## Status (2026-08-24)
+## Status (2026-10-30)
 
 | Area | Posture |
 |------|---------|
-| Manifest | **MV3**, `minimum_chrome_version` 109. Permissions: `storage`, `tabs`, `notifications`, `offscreen`, `alarms`, `webRequest`, `declarativeNetRequest`. Unused `scripting` / `activeTab` dropped |
+| Manifest | **MV3**, `minimum_chrome_version` 109. Permissions: `storage`, `tabs`, `notifications`, `offscreen`, `alarms`, `webRequest`, `webNavigation`, `idle`, `declarativeNetRequest`. Unused `scripting` / `activeTab` dropped |
 | Match-pattern validity | **Fixed** — no `host_permissions` / `content_scripts` / `web_accessible_resources` pattern carries an explicit port. Chrome match patterns cannot express a port and the Web Store validator rejects the upload even though Chrome is lenient at load; `http://localhost/*` + `http://127.0.0.1/*` already match every port. Regression guard: `tests/chromeStoreListing.unit.ts` |
 | Host breadth | **Accepted risk, store-review relevant** — `https://*/*` in `host_permissions` **and** `content_scripts.matches` (`document_start`, `all_frames`). See Known gaps #1 |
-| Hub trust boundary | Allowlist is `https://hub.fabric.pub`, `https://relay.goon.vc`, `https://hub.goon.vc`, plus loopback (`src/utils/fabricHubAllowlist.ts`, lockstep with `@fabric/http/functions/fabricHubAllowlist`). Users add more under **Trusted hubs** (`chrome.storage.local`); a LAN `http://` hub also needs a runtime host grant (`optional_host_permissions` `http://*/*`, requested on the Save click). Cleartext network hubs require `opts.extra`. Non-allowlisted origins are refused for Hub login, device-link, and mesh registration (`FABRIC_HUB_REGISTER_MESH` also requires the sending tab to *be* that hub) |
-| Identity signing | BIP340 Schnorr client-side; site-login and device-link challenges are built by the shared upstream helpers, never by the page |
-| Site login (`fabric:`) | Any HTTPS or loopback page may ask Passport to log in to **itself**: the page posts a `fabric:` `SiteLoginRequest`, the background rebuilds it with the origin Chrome reports for the sender (never the page's claim; a site-signed request naming another origin is refused) and answers with a signed `SiteLoginResponse`. The page verifies it with `@fabric/core` `verifySiteLoginResponse` |
-| Desktop signer | The user may answer as a linked desktop (Hub or GoonCitizen) instead. Passport wraps the request in a `FabricSignRequest` it signs and POSTs to `http://127.0.0.1:<port>/services/fabric/sign`; the desktop checks a loopback socket + Host and **no page Origin**, spends the nonce once, requires Passport in its identity cluster, and waits for a **native** dialog. Passport accepts the answer only from the desktop key it discovered |
-| Wallet at rest | **PBKDF2-SHA256, 200 000 iterations, 32-byte key + AES-GCM** for backup export/import (`src/UIElements/IdentityManager.tsx`) |
+| Hub trust boundary | Allowlist is `https://hub.fabric.pub`, `https://relay.goon.vc`, `https://hub.goon.vc`, plus loopback (`src/utils/fabricHubAllowlist.ts`, lockstep with `@fabric/http/functions/fabricHubAllowlist`). Users add more under **Trusted hubs**, stored in extension-origin IndexedDB (`src/utils/privateStore.ts`); a LAN `http://` hub also needs a runtime host grant (`optional_host_permissions` `http://*/*`, requested on the Save click). Cleartext network hubs require `opts.extra`. The Trusted hubs list carries an HMAC keyed from the unlocked master (locked = empty). Non-allowlisted origins are refused for pairing, delegation mail, and mesh registration (`FABRIC_HUB_REGISTER_MESH` also requires the sending tab to *be* that hub) |
+| Identity signing | BIP340 Schnorr client-side; sign-in assertions and delegation frames are built by the `@fabric/core` helpers from what the browser reports, never from page fields |
+| Site sign-in (Passport v2) | Any HTTPS or loopback page may ask Passport to sign in to **itself**: it posts a `PASSPORT_CHALLENGE` with a `MessagePort` after a `PASSPORT_HELLO` handshake (nothing is marked on the page, and the content script does not log). The content script forwards it only while `navigator.userActivation.isActive`. The background binds it to the origin Chrome reports, walks frame ancestors, allows one per origin at a time, rate-limits the notification, and answers only on that port. A new site gets a pairwise identity by default; the prompt names that choice. The shared account key is the opt-in |
+| Linked signers | Delegation protocol on Fabric messages (`DELEGATION_*`, core `docs/DELEGATION.md`): commit-then-reveal pairing with a six-digit code, scoped and revocable grants, and every `DELEGATION_REQUEST` shown as a notification for the user to sign or decline. Records carry an HMAC keyed from the master |
+| Wallet at rest | Master xprv sealed with **Argon2id (64 MiB, t=2, p=1) + AES-GCM** when the linked core's `sealMaster` reports `ARGON2_MASTER` (core `sealedBlob`); an older PBKDF2 seal is re-sealed on the next unlock. The lock password is at least 12 characters. Cached public keys are checked against the master on unlock, and a locked popup does not derive a receive address. The vault, signed-in sites, delegate bases, and trust lists live in extension-origin IndexedDB. Auto-lock runs from `chrome.alarms` and from `chrome.idle` state `locked` |
 | Background datastore at rest | **Weak by default** — AES-GCM with a self-generated master key stored *in plaintext beside the ciphertext* in `chrome.storage.local`. See Known gaps #2 |
 | Content-script trust | Content scripts are untrusted relative to the background; seed material never leaves the background / popup |
 | CSP | `script-src 'self' 'wasm-unsafe-eval'; object-src 'self'` — no remote code |
-| Unit tests | **126 passing** (`npm run test:unit`) — `fabric:` site login + desktop signer, device-link v2 flow, cross-sign, allowlist, ARC publish/evaluate, encrypted datastore, activity auto-lock timestamps, adversarial origins, store listing |
+| Unit tests | **154 passing** (`npm run test:unit`) — Passport v2 sign-in, delegation (pairing, grants, requests), payment requests, sealed trusted lists, vault re-seal and cache checks, allowlist, ARC publish/evaluate, encrypted datastore, activity auto-lock timestamps, adversarial origins, store listing |
 | Extension E2E | Playwright MV3 (`npm run test:extension`, `npm run test:ui`). Headless-shell cannot discover the MV3 service worker; this tree stages headed Chromium + `xvfb-run` |
 | JSON-RPC auth gate | `npm run test:ui:release-gate` — bearer + `POST /services/rpc` per [`@fabric/http` docs/RELEASE_GATE.md](https://github.com/FabricLabs/fabric-http/blob/feature/rsi/docs/RELEASE_GATE.md) |
 | npm audit (`--omit=dev`) | **16 findings (7 high / 4 moderate / 5 low)** — all transitive. See Known gaps #3 |
@@ -47,8 +47,8 @@ Peer documents: [`@fabric/core` AUDIT.md](https://github.com/FabricLabs/fabric/b
    Options, cheapest first: (a) keep it and justify in the listing; (b) narrow
    `content_scripts` to the allowlisted hubs and move general-site detection to
    `optional_host_permissions` requested on user gesture; (c) keep broad
-   injection but ship `contentMarker` only, deferring `content.js` to an
-   `optional_host_permissions` grant. **Owner decision required** — do not
+   injection of a minimal script that only answers `PASSPORT_HELLO`, deferring
+   `content.js` to an `optional_host_permissions` grant. **Owner decision required** — do not
    change unilaterally, it is a UX/product trade, and (b)/(c) break
    “log in to any Fabric site” without a runtime prompt.
 2. **Background datastore master key is not password-bound.**
@@ -58,7 +58,7 @@ Peer documents: [`@fabric/core` AUDIT.md](https://github.com/FabricLabs/fabric/b
    attacker who can read extension storage. The module docstring says as much.
    Mitigating facts: the store is documented for “mesh metadata, counters,
    non-wallet secrets”; the **wallet seed does not live here** (that is the
-   popup PBKDF2 + AES-GCM path); and
+   popup Argon2id + AES-GCM path, PBKDF2 until the linked core sets `ARGON2_MASTER`); and
    `setDatastoreMasterKeyFromBytes` is already wired through
    `fabricBackgroundRuntimeMessages.ts` so a post-unlock key can replace it.
    Remaining work is to actually call it after unlock and to migrate existing
@@ -76,30 +76,26 @@ Peer documents: [`@fabric/core` AUDIT.md](https://github.com/FabricLabs/fabric/b
      bundle. `@fabric/http` tracks a deferred `puppeteer@25.7.0` bump.
    - `@babel/core`, `webpack`, `valibot`, `bip32` — build/toolchain trees.
    Prefer upstream bumps and explicit overrides over `npm audit fix --force`.
+   This cut accepts those build-time findings and does not rewrite the lockfile.
    Re-check after each Fabric pin bump.
 4. **Page-world 402 fetch patch is not installed.**
    `installFabric402FetchInterceptor` runs in the isolated content-script world
-   because login / device-link messaging needs that world; page `fetch` is
-   therefore unpatched. Hub/UI 402 stays on extension UI prompts. The module
-   `src/content/fabric402FetchPatch.ts` exists — the limit is world isolation,
-   not a missing file.
+   because sign-in messaging needs that world; page `fetch` is therefore
+   unpatched. A 402 it does see is only reported to the background, which
+   queues it and shows it in the popup (no in-page overlay).
 5. **xpub travels in query strings.** Wallet balance / history call Hub
    `GET /services/bitcoin/xpub…`. Moving the xpub into POST bodies needs
    coordinated Hub endpoints, so this is cross-repo work.
 6. ~~**Device-link `sessionId` is not bound into attest messages.**~~ **Closed**
-   with `@fabric/http` device-link v2: the Hub picks `sessionId` + `nonce` in a
-   prepare step (`POST /device-links` without a signature; a client nonce is
-   refused), and both the offer
-   (`fabric:device-link:2:offer:<sessionId>:<nonce>:<initiatorId>:<label>:<origin>`)
-   and the link message
-   (`fabric:device-link:2:<sessionId>:<nonce>:<initiatorId>:<responderId>:<label>`)
-   name the session. Passport rebuilds both locally and refuses to sign a
-   Hub-supplied string that differs (`src/utils/fabricDeviceLinkSign.ts`);
-   GoonCitizen moved in the same cut. `tests/fabricDeviceLinkSign.unit.ts`
-   checks the bytes against the upstream builder.
-7. **Hub login redeem treats QR `sessionId` as the capability.** Passport signs
-   client-side, but possession proof is upstream (`pollSecret`, http `#69`).
-   Do not treat `Origin` headers as possession proof.
+   and superseded: device links, desktop signers, and `IdentityCrossSign` are
+   gone. Linking is the delegation protocol's offer / answer / reveal, where
+   each side commits its nonce before the code exists.
+7. ~~**Hub login redeem treats QR `sessionId` as the capability.**~~ **Closed.**
+   Passport v2 has no QR session and no `pollSecret`. A relying party issues a
+   `PASSPORT_CHALLENGE`, Passport returns a `PASSPORT_ASSERTION` on the page's
+   `MessagePort`, and the server redeems it with the binding secret from the
+   HttpOnly cookie. `Origin` is not possession proof; the signature and the
+   cookie are.
 8. **MV3 service worker lifecycle.** Long-lived mesh state must survive worker
    suspension; `alarms` + the offscreen document cover the current paths, but
    there is no systematic test that state survives a forced worker teardown.
@@ -107,26 +103,26 @@ Peer documents: [`@fabric/core` AUDIT.md](https://github.com/FabricLabs/fabric/b
    header rules.** Rule IDs and handlers must stay in sync when outband
    behaviour changes; both permissions widen the review surface.
 
-10. **Other extensions can reach the desktop local signer.** The signer refuses
-   web-page Origins but lets extension origins through, so Passport can call it.
-   Another installed extension could therefore ask too. A sign-in still needs
-   a `FabricSignRequest` signed by a device in the desktop's identity cluster,
-   and a link still needs the user to approve a native dialog naming the
-   device, so the exposure is prompts, not signatures. Pinning Passport's
-   extension id on the desktops would close it; that needs a per-browser id list.
+10. **Other extensions can reach a loopback delegate.** Hub and GoonCitizen
+   answer `/services/delegation/*` on loopback to Passport. Chrome extension
+   ids stay on the configured allowlist. A `moz-extension://` origin may start
+   pairing, and the first grant pins that exact origin; a later Firefox id is
+   refused until the user pairs again. Every request must still be a frame
+   signed by a linked key within its grant, and pairing needs the user to
+   confirm the code on both sides.
+11. ~~**The active Fabric node setting is not sealed.**~~ The vault and the
+   active-node record moved to extension-origin IndexedDB with the trust
+   lists. Payment still needs a click in the popup. The background datastore
+   key in gap 2 is the record that is still stored beside its ciphertext.
 
 ## Intentional duplicates (not consolidation targets)
 
-- `src/utils/identityCrossSign.ts` re-implements the canonical strings from
-  `@fabric/core/functions/identityCrossSign` in TypeScript **on purpose** so
-  webpack does not pull Node-only `@fabric/core` into the extension bundle.
-  Kept lockstep by `tests/identityCrossSign.unit.ts`.
 - `src/utils/fabricHubAllowlist.ts` mirrors
   `@fabric/http/functions/fabricHubAllowlist` for the same reason. The
   extension additionally cannot read `FABRIC_HUB_ALLOWLIST` from `process.env`
   at build time.
 
-Changing either to a runtime `require` of the upstream package would regress
+Changing it to a runtime `require` of the upstream package would regress
 bundle size and pull Node built-ins — treat drift, not duplication, as the bug.
 
 ## Recommendations before a public store listing
@@ -143,7 +139,7 @@ bundle size and pull Node built-ins — treat drift, not duplication, as the bug
 - [ ] Re-pin `@fabric/core` / `@fabric/http` to the tagged suite SHAs and
       re-run `npm audit --omit=dev`
 - [ ] Keep the release claim scoped: browser identity + site login +
-      device link — **not** an audited hardware-grade wallet
+      linked signers — **not** an audited hardware-grade wallet
 
 ## Disclosure
 

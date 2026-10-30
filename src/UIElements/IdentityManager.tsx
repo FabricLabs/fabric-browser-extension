@@ -21,16 +21,19 @@
 
 // Dependencies
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import { wordlists } from 'bip39';
 import { BIP32Factory } from 'bip32';
 import * as ecc from 'tiny-secp256k1';
 import * as bitcoin from 'bitcoinjs-lib';
 import { FABRIC_STATE_STORAGE_KEY } from '../constants/fabricExtension';
+import { privateGet, privateRemove, privateSet } from '../utils/privateStore';
 import { PASSPORT_EXTENSION_VERSION } from '../constants/extensionVersion';
 import { swallowNonFatal } from '../utils/nonFatal';
 import SiteLoginPrompt from './SiteLoginPrompt';
-import DeviceLinkPrompt from './DeviceLinkPrompt';
-import DesktopSignersPanel from './DesktopSignersPanel';
+import DelegationRequestPrompt from './DelegationRequestPrompt';
+import PaymentRequestPrompt from './PaymentRequestPrompt';
+import LinkedSignersPanel from './LinkedSignersPanel';
 import HubAllowlistPanel from './HubAllowlistPanel';
 import FederationsPanel from './FederationsPanel';
 import crypto from 'crypto';
@@ -42,16 +45,7 @@ import { Button, Message, Loader, Segment, Form, Input, TextArea, List, Icon, Mo
 import { FabricBackgroundMeshActions } from './FabricBackgroundMeshActions';
 import { PageIndexPanel } from './PageIndexPanel';
 import { MarketAgentPanel } from './MarketAgentPanel';
-import {
-  DEFAULT_DEVICE_LINK_HUB,
-  startDeviceLinkAsInitiator,
-  tickDeviceLinkAsInitiator,
-  countersignDeviceLink,
-  cancelDeviceLinkSession,
-  keyFingerprint
-} from '../utils/fabricDeviceLinkSign';
-import { normalizeDesktopSignerBase, requestDesktopLink, pinDesktop, type DesktopSigner } from '../utils/fabricDesktopSigner';
-import { pairingCode } from '../utils/fabricSiteMessage';
+import { DEFAULT_FABRIC_HUB_ORIGINS } from '../utils/fabricHubAllowlist';
 import {
   ACCOUNT_NETWORKS,
   LOCK_PASSWORD_MIN,
@@ -76,22 +70,13 @@ import {
   rememberMaster,
   renameAccount,
   switchAccount,
+  resealVault,
   unlockVault,
   pairKey,
   vaultAccounts,
   vaultBackup,
   vaultIdentities
 } from '../utils/passportVault';
-import { publishIdentityCrossSign, publishIdentityCrossSignKind } from '../utils/identityCrossSignPublish';
-import { REVOKE_TYPE } from '../utils/identityCrossSign';
-import {
-  readLinkedDevices,
-  mergeLinkedDevice,
-  removeLinkedDevice,
-  peerIdOf,
-  linkBindingOf,
-  type LinkedDevice
-} from '../utils/linkedDevices';
 
 // Services
 import { testFabricSignalingReachable, type FabricSignalingTestOk } from '../fabric/fabricWebRTCPeering';
@@ -595,6 +580,7 @@ const IdentityManager = () => {
   const [isFabricTestModalOpen, setIsFabricTestModalOpen] = useState<boolean>(false);
   const [signUnlockPassword, setSignUnlockPassword] = useState('');
   const [signUnlockError, setSignUnlockError] = useState<string | null>(null);
+  const [isUnlocking, setIsUnlocking] = useState(false);
   const [isSigning, setIsSigning] = useState(false);
   const [isVerifying, setIsVerifying] = useState(false);
   const [clipboardNotice, setClipboardNotice] = useState<string | null>(null);
@@ -637,45 +623,6 @@ const IdentityManager = () => {
     xpubQueryToken: DEFAULT_SETTINGS.xpubQueryToken
   });
 
-  const [linkedDevices, setLinkedDevices] = useState<LinkedDevice[]>([]);
-  const [deviceLinkBusy, setDeviceLinkBusy] = useState(false);
-  const [deviceLinkOffer, setDeviceLinkOffer] = useState<{
-    sessionId: string;
-    protocolUrl: string;
-    httpsUrl: string;
-    hubBase: string;
-    origin: string;
-    nonce: string;
-    label: string;
-    pollSecret?: string;
-  } | null>(null);
-  const [deviceLinkError, setDeviceLinkError] = useState<string | null>(null);
-  const deviceLinkPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-
-  const refreshLinkedDevices = useCallback(() => {
-    void readLinkedDevices().then(setLinkedDevices);
-  }, []);
-
-  useEffect(() => {
-    refreshLinkedDevices();
-  }, [refreshLinkedDevices]);
-
-  const deviceLinkHubBase = useCallback((): string => {
-    const active = settings.fabricNodes.find(n => n.isActive);
-    const addr = active && active.hubAddress ? active.hubAddress.replace(/\/+$/, '') : '';
-    if (addr && /^https?:\/\//i.test(addr)) return addr;
-    return DEFAULT_DEVICE_LINK_HUB;
-  }, [settings.fabricNodes]);
-
-  const clearDeviceLinkPoll = useCallback(() => {
-    if (deviceLinkPollRef.current) {
-      clearInterval(deviceLinkPollRef.current);
-      deviceLinkPollRef.current = null;
-    }
-  }, []);
-
-  useEffect(() => () => clearDeviceLinkPoll(), [clearDeviceLinkPoll]);
-
   // Create a memoized version of the wordlist
   const wordlist = useMemo(() => bip39Wordlist, []);
 
@@ -706,6 +653,8 @@ const IdentityManager = () => {
   const selectedIdentity: Identity | null = identities.find(i => pairKey(i) === selectedKey) ?? null;
   const vaultCurrent = currentView(vault);
   const locked = !!vault && !masterXprv;
+  /** Wait until the session master is recalled so an open wallet does not flash the lock screen. */
+  const showUnlockModal = storageHydrated && locked;
 
   /** The current account: the only pair whose keys are open while unlocked. */
   const signingIdentity: Identity | null = identities.find(i => i.isCurrent) ?? null;
@@ -717,217 +666,20 @@ const IdentityManager = () => {
   const hubNetwork = btcStatus && btcStatus.available ? accountNetwork(btcStatus.network) : '';
   const walletNetworkMismatch = !!(signingIdentity && hubNetwork && hubNetwork !== signingIdentity.network);
 
-  const handleStartDeviceLink = useCallback(async (desktop?: DesktopSigner) => {
-    const pk = signingIdentity?.privateKeyHex;
-    const xp = signingIdentity?.xpub;
-    const me = signingIdentity;
-    if (!pk || !xp || !me) {
-      setDeviceLinkError('Unlock your Passport identity before creating a link offer.');
-      return;
-    }
-    if (desktop && !desktop.network) {
-      setDeviceLinkError('This desktop app did not say which network it signs on. Update it, then link again.');
-      return;
-    }
-    const hubOverride = desktop ? desktop.base : undefined;
-    clearDeviceLinkPoll();
-    if (deviceLinkOffer && deviceLinkOffer.sessionId) {
-      void cancelDeviceLinkSession(deviceLinkOffer.hubBase, deviceLinkOffer.sessionId, {
-        pollSecret: deviceLinkOffer.pollSecret
-      });
-    }
-    setDeviceLinkBusy(true);
-    setDeviceLinkError(null);
-    const hubBase = hubOverride || deviceLinkHubBase();
-    const started = await startDeviceLinkAsInitiator({
-      privateKeyHex: pk,
-      xpub: xp,
-      hubBase,
-      label: 'Passport'
-    });
-    if (!started.ok) {
-      setDeviceLinkError(started.error);
-      setDeviceLinkBusy(false);
-      return;
-    }
-    setDeviceLinkOffer({
-      sessionId: started.sessionId,
-      protocolUrl: started.protocolUrl,
-      httpsUrl: started.httpsUrl,
-      hubBase: started.hubBase,
-      origin: started.origin,
-      nonce: started.nonce,
-      label: started.label,
-      pollSecret: started.pollSecret
-    });
-    if (hubOverride && normalizeDesktopSignerBase(hubOverride)) {
-      void requestDesktopLink({ base: hubOverride, sessionId: started.sessionId }).then((asked) => {
-        if (!asked.ok) setDeviceLinkError(`Desktop app did not link: ${asked.error}`);
-      });
-    }
-    let attempts = 0;
-    let inFlight = false;
-    let asked = false;
-    let countersigned: string | null = null;
-    const stop = (message: string | null) => {
-      clearDeviceLinkPoll();
-      setDeviceLinkOffer(null);
-      setDeviceLinkBusy(false);
-      if (message) setDeviceLinkError(message);
-    };
-    deviceLinkPollRef.current = setInterval(() => {
-      if (inFlight) return;
-      attempts += 1;
-      if (attempts > 240) {
-        void cancelDeviceLinkSession(started.hubBase, started.sessionId, {
-          pollSecret: started.pollSecret
-        });
-        stop('Timed out — scan a fresh QR. Offers last about 10 minutes.');
-        return;
-      }
-      inFlight = true;
-      void (async () => {
-        try {
-          const tick = await tickDeviceLinkAsInitiator({
-            privateKeyHex: pk,
-            xpub: xp,
-            sessionId: started.sessionId,
-            hubBase: started.hubBase,
-            origin: started.origin,
-            nonce: started.nonce,
-            label: started.label,
-            countersigned
-          });
-          if (!tick.ok) {
-            if (asked) stop(tick.error);
-            return;
-          }
-          if (tick.status === 'accepted' && 'responder' in tick) {
-            if (asked) return;
-            asked = true;
-            if (desktop && String(tick.responder.pubkeyHex).toLowerCase() !== desktop.pubkey) {
-              void cancelDeviceLinkSession(started.hubBase, started.sessionId, {
-                pollSecret: started.pollSecret
-              });
-              stop('Another key answered for this desktop app. Nothing was signed.');
-              return;
-            }
-            let code = '';
-            try {
-              code = pairingCode(me.publicKeyHex, tick.responder.pubkeyHex);
-            } catch (_) {
-              stop('This device cannot link with itself.');
-              return;
-            }
-            const approved = window.confirm(
-              `Pairing code: ${code}\n\n` +
-              `Link this Passport with ${desktop ? (desktop.name || desktop.signer) : 'the other device'} ` +
-              `(key ${keyFingerprint(tick.responder.pubkeyHex)}, via ${tick.origin})?\n\n` +
-              'Approve only if the other device shows the same six digits.'
-            );
-            if (!approved) {
-              void cancelDeviceLinkSession(started.hubBase, started.sessionId, {
-                pollSecret: started.pollSecret
-              });
-              stop('Link declined. Nothing was signed.');
-              return;
-            }
-            const signed = await countersignDeviceLink({
-              privateKeyHex: pk,
-              xpub: xp,
-              hubBase: started.hubBase,
-              accepted: tick
-            });
-            if (!signed.ok) {
-              stop(signed.error);
-              return;
-            }
-            countersigned = tick.responder.id;
-            return;
-          }
-          if (tick.status !== 'linked' || !('responder' in tick)) return;
-          clearDeviceLinkPoll();
-          const binding = { sessionId: tick.sessionId, nonce: tick.nonce, origin: tick.origin };
-          void publishIdentityCrossSign({
-            hubBase: started.hubBase,
-            privateKeyHex: pk,
-            xpub: xp,
-            peerPubkey: tick.responder.pubkeyHex,
-            binding
-          }).catch((err: unknown) => swallowNonFatal('identity-cross-sign-publish', err));
-          await mergeLinkedDevice({
-            kind: 'device-link',
-            peerFabricId: tick.responder.id,
-            peerXpub: tick.responder.xpub,
-            peerPubkey: tick.responder.pubkeyHex,
-            sessionId: tick.sessionId,
-            nonce: tick.nonce,
-            label: tick.label || 'Linked device',
-            hubOrigin: tick.origin,
-            linkedAt: new Date().toISOString(),
-            role: 'initiator'
-          });
-          if (desktop && desktop.network) {
-            try {
-              await pinDesktop({
-                base: desktop.base,
-                signer: desktop.signer,
-                name: desktop.name,
-                pubkey: tick.responder.pubkeyHex,
-                network: desktop.network,
-                device: { account: me.account, network: me.network, pubkey: me.publicKeyHex }
-              });
-            } catch (err: unknown) {
-              stop(`Linked, but this desktop app cannot sign in for you: ${err instanceof Error ? err.message : String(err)}`);
-              refreshLinkedDevices();
-              return;
-            }
-          }
-          refreshLinkedDevices();
-          stop(null);
-        } finally {
-          inFlight = false;
-        }
-      })();
-    }, 1500);
-  }, [signingIdentity, clearDeviceLinkPoll, deviceLinkHubBase, refreshLinkedDevices, deviceLinkOffer]);
+  /** Hubs this Passport may pair through: the active node first, then the defaults. */
+  const pairingHubs = useMemo(() => {
+    const active = settings.fabricNodes.find(n => n.isActive);
+    const first = active && /^https:\/\//i.test(active.hubAddress || '') ? [active.hubAddress.replace(/\/+$/, '')] : [];
+    return Array.from(new Set([...first, ...DEFAULT_FABRIC_HUB_ORIGINS]));
+  }, [settings.fabricNodes]);
+  const activeHubBase = useMemo(() => {
+    const active = settings.fabricNodes.find(n => n.isActive);
+    return active ? active.hubAddress.replace(/\/+$/, '') : null;
+  }, [settings.fabricNodes]);
 
-  const handleRevokeLinkedDevice = useCallback(async (device: LinkedDevice) => {
-    const pk = signingIdentity?.privateKeyHex;
-    const xp = signingIdentity?.xpub;
-    if (!pk || !xp) {
-      setDeviceLinkError('Unlock your Passport identity before revoking a device.');
-      return;
-    }
-    const binding = linkBindingOf(device);
-    const peerPubkey = device.peerPubkey || device.pubkey;
-    if (!binding || !peerPubkey) {
-      setDeviceLinkError('This device was linked with an older version. Link it again, then revoke.');
-      return;
-    }
-    setDeviceLinkBusy(true);
-    setDeviceLinkError(null);
-    const posted = await publishIdentityCrossSignKind({
-      hubBase: binding.origin,
-      privateKeyHex: pk,
-      xpub: xp,
-      peerPubkey,
-      binding,
-      kind: REVOKE_TYPE
-    });
-    if (!posted.ok) {
-      setDeviceLinkError(posted.error || 'Could not publish IdentityCrossSignRevoke');
-      setDeviceLinkBusy(false);
-      return;
-    }
-    await removeLinkedDevice(peerIdOf(device));
-    refreshLinkedDevices();
-    setDeviceLinkBusy(false);
-  }, [signingIdentity, refreshLinkedDevices]);
-
-  const performAutoLock = useCallback(() => {
+  const performAutoLock = useCallback((timedOut = false) => {
     setMasterXprv(prev => {
-      if (prev) setShowAutoLockBanner(true);
+      if (prev && timedOut) setShowAutoLockBanner(true);
       return null;
     });
     void forgetMaster();
@@ -984,7 +736,7 @@ const IdentityManager = () => {
       const shouldLock =
         minutes > 0 && stored != null && Date.now() - stored >= minutes * 60_000;
       if (shouldLock) {
-        performAutoLock();
+        performAutoLock(true);
         lastUserActivityRef.current = Date.now();
       } else {
         lastUserActivityRef.current = stored || Date.now();
@@ -1001,7 +753,7 @@ const IdentityManager = () => {
     if (!hasSk) return;
     const id = window.setInterval(() => {
       if (Date.now() - lastUserActivityRef.current >= settings.autoLockTimer * 60_000) {
-        performAutoLock();
+        performAutoLock(true);
       }
     }, 8000);
     return () => window.clearInterval(id);
@@ -1027,18 +779,24 @@ const IdentityManager = () => {
   }, [storageHydrated, settings.autoLockTimer, bumpUserActivity]);
 
   useEffect(() => {
+    if (!showUnlockModal) return undefined;
+    const root = document.documentElement;
+    const app = document.getElementById('fabric-root');
+    root.classList.add('passport-locked');
+    if (app) app.setAttribute('inert', '');
+    window.scrollTo(0, 0);
+    const field = document.getElementById('passport-lock-password');
+    if (field instanceof HTMLElement) field.focus();
+    return () => {
+      root.classList.remove('passport-locked');
+      if (app) app.removeAttribute('inert');
+    };
+  }, [showUnlockModal]);
+
+  useEffect(() => {
     const initializeStorage = async () => {
       try {
-        let savedState;
-        if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-          const result = await chrome.storage.local.get(STORAGE_KEY);
-          savedState = result[STORAGE_KEY];
-        } else {
-          savedState = localStorage.getItem(STORAGE_KEY);
-          if (savedState) {
-            savedState = JSON.parse(savedState);
-          }
-        }
+        const savedState = await privateGet(STORAGE_KEY);
 
         if (savedState) {
           try {
@@ -1053,11 +811,7 @@ const IdentityManager = () => {
           } catch (error) {
             console.error('Failed to parse saved state:', error);
             // Clear corrupted data
-            if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-              await chrome.storage.local.remove(STORAGE_KEY);
-            } else {
-              localStorage.removeItem(STORAGE_KEY);
-            }
+            await privateRemove(STORAGE_KEY);
           }
         }
       } catch (error) {
@@ -1080,11 +834,7 @@ const IdentityManager = () => {
           settings
         };
 
-        if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-          await chrome.storage.local.set({ [STORAGE_KEY]: state });
-        } else {
-          localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-        }
+        await privateSet(STORAGE_KEY, state);
       } catch (error) {
         console.error('Failed to save state:', error);
       }
@@ -1095,16 +845,7 @@ const IdentityManager = () => {
   useEffect(() => {
     const loadDebugInfo = async () => {
       try {
-        let savedState;
-        if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-          const result = await chrome.storage.local.get(STORAGE_KEY);
-          savedState = result[STORAGE_KEY];
-        } else {
-          const stateStr = localStorage.getItem(STORAGE_KEY);
-          if (stateStr) {
-            savedState = JSON.parse(stateStr);
-          }
-        }
+        const savedState = await privateGet(STORAGE_KEY);
 
         if (savedState) {
           setDebugInfo(savedState);
@@ -1259,12 +1000,7 @@ const IdentityManager = () => {
         settings: DEFAULT_SETTINGS
       };
 
-      // Try chrome.storage.local first, fall back to localStorage
-      if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-        await chrome.storage.local.set({ [STORAGE_KEY]: state });
-      } else {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-      }
+      await privateSet(STORAGE_KEY, state);
 
       setState('initial');
       clearImportFields();
@@ -1400,8 +1136,19 @@ const IdentityManager = () => {
     let master: string;
     try {
       master = unlockVault(vault, lockPwd);
-    } catch (_) {
+    } catch (err: unknown) {
+      if (err && typeof err === 'object' && (err as { code?: string }).code === 'FABRIC_ACCOUNT_VAULT_MISMATCH') {
+        setReceiveAddr(null);
+        setMasterXprv(null);
+        return 'This Passport’s saved accounts were changed outside Passport. Restore it from your backup or seed phrase.';
+      }
       return 'Wrong lock password.';
+    }
+    try {
+      const resealed = resealVault(vault, master, lockPwd);
+      if (resealed !== vault) setVault(resealed);
+    } catch (err: unknown) {
+      console.warn('Passport: could not re-seal the vault:', err);
     }
     setMasterXprv(master);
     await rememberMaster(master);
@@ -1411,9 +1158,21 @@ const IdentityManager = () => {
   };
 
   const handleUnlockSigning = async () => {
-    const error = await unlockPassport(signUnlockPassword);
-    setSignUnlockError(error);
-    if (!error) setSignUnlockPassword('');
+    if (isUnlocking) return;
+    if (!signUnlockPassword) {
+      setSignUnlockError('Enter your lock password.');
+      return;
+    }
+    setIsUnlocking(true);
+    setSignUnlockError(null);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    try {
+      const error = await unlockPassport(signUnlockPassword);
+      setSignUnlockError(error);
+      if (!error) setSignUnlockPassword('');
+    } finally {
+      setIsUnlocking(false);
+    }
   };
 
   const copyWithNotice = (text: string, label: string) => {
@@ -1458,13 +1217,6 @@ const IdentityManager = () => {
         }
         const address = addressRaw;
 
-        try {
-          await makeRPCRequest(rpcNode, 'dumpprivkey', [address]);
-        } catch (error) {
-          console.error('Failed to access private key:', error);
-          throw new Error('Could not access private key for signing. Please ensure the wallet is unlocked and has private keys enabled.');
-        }
-
         const signatureRaw = await makeRPCRequest(rpcNode, 'signmessage', [address, messageToSign]);
         if (typeof signatureRaw !== 'string') {
           throw new Error('signmessage returned an unexpected response from the node.');
@@ -1480,7 +1232,7 @@ const IdentityManager = () => {
       if (!selectedIdentity.isCurrent) {
         throw new Error('Only the current account signs. Switch to this account first.');
       }
-      throw new Error('Unlock Passport with your lock password below, then try again.');
+      throw new Error('Unlock Passport with your lock password, then try again.');
     } catch (error: unknown) {
       console.error('Failed to sign message:', error);
       setSignature(null);
@@ -1603,8 +1355,6 @@ const IdentityManager = () => {
   };
 
   const renderSignMessageState = () => {
-    const signNeedsUnlock = locked && !!selectedIdentity?.isCurrent;
-
     return (
       <Message className="fade-in">
         <Message.Header>Sign Message</Message.Header>
@@ -1616,29 +1366,6 @@ const IdentityManager = () => {
             <Message size="tiny" positive onDismiss={() => setClipboardNotice(null)}>
               {clipboardNotice}
             </Message>
-          )}
-          {signNeedsUnlock && (
-            <Segment>
-              <Form.Field>
-                <label>Lock password</label>
-                <Input
-                  type="password"
-                  placeholder="The password that unlocks Passport"
-                  value={signUnlockPassword}
-                  onChange={(e) => {
-                    setSignUnlockPassword(e.target.value);
-                    setSignUnlockError(null);
-                  }}
-                  autoComplete="off"
-                />
-              </Form.Field>
-              {signUnlockError && (
-                <Message negative size="small">
-                  <p>{signUnlockError}</p>
-                </Message>
-              )}
-              <Button type="button" color="blue" content="Unlock" onClick={() => void handleUnlockSigning()} />
-            </Segment>
           )}
           <Form>
             <Form.Field>
@@ -2885,34 +2612,163 @@ const IdentityManager = () => {
     );
   };
 
-  const renderUnlockForm = () => (
-    <Form
-      onSubmit={(e) => {
-        e.preventDefault();
-        void handleUnlockSigning();
-      }}
-      style={{ marginTop: '0.5em' }}
-    >
-      <Form.Field>
-        <Input
-          type="password"
-          placeholder="Lock password"
-          value={signUnlockPassword}
-          onChange={(e) => {
-            setSignUnlockPassword(e.target.value);
-            setSignUnlockError(null);
-          }}
-          autoComplete="current-password"
-          action={{ type: 'submit', color: 'blue', content: 'Unlock' }}
-        />
-      </Form.Field>
-      {signUnlockError && (
-        <Message negative size="small">
-          <p>{signUnlockError}</p>
-        </Message>
-      )}
-    </Form>
-  );
+  const renderUnlockScreen = () => {
+    if (!showUnlockModal || typeof document === 'undefined') return null;
+
+    const timeoutCopy = showAutoLockBanner
+      ? `Session timed out${
+        settings.autoLockTimer > 0
+          ? ` after ${settings.autoLockTimer} minute${settings.autoLockTimer === 1 ? '' : 's'} without activity`
+          : ''
+      }. Passport locked and cleared its keys from memory.`
+      : null;
+
+    return createPortal(
+      <div
+        id="passport-unlock-screen"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="passport-unlock-title"
+      >
+        <style>{`
+          html.passport-locked,
+          html.passport-locked body {
+            overflow: hidden !important;
+          }
+          #passport-unlock-screen {
+            position: fixed;
+            inset: 0;
+            z-index: 20000;
+            box-sizing: border-box;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 1.5rem;
+            background: #1b1c1d;
+            color: #fff;
+            overflow: auto;
+          }
+          #passport-unlock-screen .passport-unlock-panel {
+            width: 100%;
+            max-width: 22rem;
+          }
+          #passport-unlock-screen .passport-unlock-forgot {
+            display: block;
+            width: 100%;
+            margin-top: 1.25em;
+            padding: 0;
+            border: 0;
+            background: none;
+            color: rgba(255, 255, 255, 0.72);
+            text-decoration: underline;
+            cursor: pointer;
+            font: inherit;
+            text-align: center;
+          }
+          #passport-unlock-screen .passport-unlock-forgot:disabled {
+            cursor: default;
+            opacity: 0.5;
+          }
+        `}</style>
+        <div className="passport-unlock-panel">
+          {showLogoutConfirm ? (
+            <>
+              <h2 id="passport-unlock-title" style={{ textAlign: 'center', marginTop: 0 }}>
+                Log out?
+              </h2>
+              <Message warning>
+                <Message.Header>Important</Message.Header>
+                <p>Logging out removes your Passport and every account from this device.</p>
+                <p><strong>You will need your seed phrase (and passphrase, if you set one) to restore your accounts.</strong></p>
+                <p>If you have not securely backed them up, you may permanently lose access to your funds.</p>
+              </Message>
+              <p>Are you sure you want to log out?</p>
+              <Button.Group vertical fluid>
+                <Button
+                  negative
+                  content="Log out"
+                  onClick={() => void handleLogout()}
+                  loading={isLoggingOut}
+                  disabled={isLoggingOut}
+                />
+                <Button
+                  type="button"
+                  content="Cancel"
+                  disabled={isLoggingOut}
+                  onClick={handleCancelLogout}
+                />
+              </Button.Group>
+            </>
+          ) : (
+            <>
+              <div style={{ textAlign: 'center', marginBottom: '0.35em' }}>
+                <Icon name="lock" size="huge" style={{ color: '#fff', margin: 0 }} />
+              </div>
+              <h2 id="passport-unlock-title" style={{ textAlign: 'center', margin: '0 0 0.75em', fontSize: '1.45em' }}>
+                Unlock your wallet
+              </h2>
+              {timeoutCopy && (
+                <Message warning size="small">
+                  <p style={{ margin: 0 }}>{timeoutCopy}</p>
+                </Message>
+              )}
+              <p style={{ textAlign: 'center', color: 'rgba(255,255,255,0.88)', marginTop: timeoutCopy ? '0.75em' : 0 }}>
+                Passport is locked. Enter your lock password to sign in to sites, sign messages, or open new accounts.
+              </p>
+              <Form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  void handleUnlockSigning();
+                }}
+              >
+                <Form.Field>
+                  <label htmlFor="passport-lock-password" style={{ color: 'rgba(255,255,255,0.92)' }}>
+                    Lock password
+                  </label>
+                  <Input
+                    id="passport-lock-password"
+                    fluid
+                    type="password"
+                    placeholder="Lock password"
+                    value={signUnlockPassword}
+                    onChange={(e) => {
+                      setSignUnlockPassword(e.target.value);
+                      setSignUnlockError(null);
+                    }}
+                    autoComplete="current-password"
+                    autoFocus
+                    disabled={isUnlocking}
+                  />
+                </Form.Field>
+                {signUnlockError && (
+                  <Message negative size="small">
+                    <p>{signUnlockError}</p>
+                  </Message>
+                )}
+                <Button
+                  type="submit"
+                  fluid
+                  primary
+                  content={isUnlocking ? 'Unlocking…' : 'Unlock'}
+                  loading={isUnlocking}
+                  disabled={isUnlocking || !signUnlockPassword}
+                />
+              </Form>
+              <button
+                type="button"
+                className="passport-unlock-forgot"
+                disabled={isUnlocking}
+                onClick={() => openEraseConfirm('logout')}
+              >
+                Forgot your lock password?
+              </button>
+            </>
+          )}
+        </div>
+      </div>,
+      document.body
+    );
+  };
 
   const renderLoggedInState = () => {
     const current = identities.find(id => id.isCurrent);
@@ -2984,32 +2840,6 @@ const IdentityManager = () => {
           </p>
           {renderIdentityCardActionBar()}
         </Segment>
-      )}
-      {locked && (
-        <>
-          {showAutoLockBanner && (
-            <Message
-              warning
-              size="small"
-              style={{ marginTop: '0.75em' }}
-              onDismiss={() => setShowAutoLockBanner(false)}
-            >
-              <p style={{ margin: 0 }}>
-                Session timed out
-                {settings.autoLockTimer > 0
-                  ? ` after ${settings.autoLockTimer} minute${settings.autoLockTimer === 1 ? '' : 's'} without activity`
-                  : ''}
-                . Passport locked and cleared its keys from memory.
-              </p>
-            </Message>
-          )}
-          <Message info size="small" style={{ marginTop: showAutoLockBanner ? '0.5em' : '0.75em' }}>
-            <p style={{ margin: 0 }}>
-              Passport is locked. Enter your lock password to sign in to sites, sign messages, or open new accounts.
-            </p>
-            {renderUnlockForm()}
-          </Message>
-        </>
       )}
 
       <style>{`
@@ -3121,12 +2951,6 @@ const IdentityManager = () => {
           <p style={{ color: 'white' }}>
             Open another account from your seed. Each account number and network has its own Fabric identity, wallet, and escrow key; picking a different network for the same number gives different keys.
           </p>
-          {locked && (
-            <>
-              <p style={{ color: 'white' }}>Unlock Passport to open an account you have not used yet.</p>
-              {renderUnlockForm()}
-            </>
-          )}
           <Form
             onSubmit={(e) => {
               e.preventDefault();
@@ -3789,60 +3613,9 @@ const IdentityManager = () => {
           <List divided relaxed>
             <List.Item>
               <List.Content>
-                <List.Header>Linked devices</List.Header>
+                <List.Header>Linked signers</List.Header>
                 <List.Description>
-                  <p>
-                    Peer-equivalent cluster: Passport, GoonCitizen Android, and desktop can each create or accept
-                    a <code>fabric://link</code>. Revoke publishes a BIP340 IdentityCrossSignRevoke Fabric Message.
-                  </p>
-                  {linkedDevices.length === 0 ? (
-                    <p style={{ color: 'rgba(255,255,255,0.65)' }}>No linked peers yet.</p>
-                  ) : (
-                    <List divided>
-                      {linkedDevices.map((d) => {
-                        const pid = peerIdOf(d);
-                        const current = !!linkBindingOf(d);
-                        const peerKey = d.peerPubkey || d.pubkey || '';
-                        return (
-                          <List.Item key={pid || d.linkedAt || d.label}>
-                            <List.Content floated="right">
-                              <Button
-                                size="mini"
-                                negative
-                                disabled={deviceLinkBusy || !signingIdentity?.privateKeyHex}
-                                onClick={() => void handleRevokeLinkedDevice(d)}
-                              >
-                                Revoke
-                              </Button>
-                            </List.Content>
-                            <List.Header>{d.label || d.kind || 'Device'}</List.Header>
-                            <List.Description style={{ wordBreak: 'break-all', fontSize: '0.85em' }}>
-                              {peerKey ? <><code>{keyFingerprint(peerKey)}</code>{' · '}</> : null}
-                              {pid || '—'}
-                              {d.hubOrigin ? ` · ${d.hubOrigin}` : ''}
-                              {current ? null : (
-                                <div style={{ color: '#f2c037' }}>
-                                  Linked with an older version — link this device again.
-                                </div>
-                              )}
-                            </List.Description>
-                          </List.Item>
-                        );
-                      })}
-                    </List>
-                  )}
-                </List.Description>
-              </List.Content>
-            </List.Item>
-            <List.Item>
-              <List.Content>
-                <List.Header>Desktop apps on this computer</List.Header>
-                <List.Description>
-                  <DesktopSignersPanel
-                    pubkey={signingIdentity?.publicKeyHex || null}
-                    disabled={deviceLinkBusy || !signingIdentity?.privateKeyHex}
-                    onLink={(desktop) => void handleStartDeviceLink(desktop)}
-                  />
+                  <LinkedSignersPanel hubs={pairingHubs} disabled={!signingIdentity?.privateKeyHex} />
                 </List.Description>
               </List.Content>
             </List.Item>
@@ -3851,86 +3624,6 @@ const IdentityManager = () => {
                 <List.Header>Trusted hubs</List.Header>
                 <List.Description>
                   <HubAllowlistPanel />
-                </List.Description>
-              </List.Content>
-            </List.Item>
-            <List.Item>
-              <List.Content>
-                <List.Header>Add a device</List.Header>
-                <List.Description>
-                  <p>
-                    Pair GoonCitizen Android or desktop with this Passport identity. They scan
-                    {' '}<code>fabric://link</code> (or open the HTTPS landing). Website sign-in is a
-                    different prompt — use Sign in on the site, not this offer. Each app keeps its own seed.
-                  </p>
-                  <Button
-                    primary
-                    size="small"
-                    loading={deviceLinkBusy}
-                    disabled={deviceLinkBusy || !signingIdentity?.privateKeyHex}
-                    onClick={() => void handleStartDeviceLink()}
-                    content={deviceLinkBusy ? 'Waiting for peer…' : 'Add a device'}
-                  />
-                  {!signingIdentity?.privateKeyHex ? (
-                    <p style={{ marginTop: '0.5em', color: 'rgba(255,200,120,0.95)' }}>
-                      Unlock Passport to create or revoke a link.
-                    </p>
-                  ) : null}
-                  {deviceLinkOffer ? (
-                    <div style={{ marginTop: '0.75em' }}>
-                      <p style={{ fontSize: '0.85em' }}>GoonCitizen desktop / Android</p>
-                      <code style={{ display: 'block', wordBreak: 'break-all', fontSize: '0.8em' }}>
-                        {deviceLinkOffer.protocolUrl}
-                      </code>
-                      <p style={{ fontSize: '0.85em', marginTop: '0.5em' }}>HTTPS landing (Passport on hub origin)</p>
-                      <code style={{ display: 'block', wordBreak: 'break-all', fontSize: '0.8em' }}>
-                        {deviceLinkOffer.httpsUrl}
-                      </code>
-                      <Button
-                        size="mini"
-                        style={{ marginTop: '0.5em' }}
-                        onClick={() => {
-                          try { void navigator.clipboard.writeText(deviceLinkOffer.protocolUrl); } catch (_) {}
-                        }}
-                        content="Copy fabric://link"
-                      />
-                      <Button
-                        size="mini"
-                        style={{ marginLeft: '0.35em' }}
-                        onClick={() => {
-                          try { void chrome.tabs.create({ url: deviceLinkOffer.protocolUrl }); } catch (_) {}
-                        }}
-                        content="Open in desktop app"
-                      />
-                      <Button
-                        size="mini"
-                        style={{ marginLeft: '0.35em' }}
-                        onClick={() => {
-                          try { void navigator.clipboard.writeText(deviceLinkOffer.httpsUrl); } catch (_) {}
-                        }}
-                        content="Copy HTTPS landing"
-                      />
-                      <Button
-                        size="mini"
-                        style={{ marginLeft: '0.35em' }}
-                        onClick={() => {
-                          const offer = deviceLinkOffer;
-                          clearDeviceLinkPoll();
-                          if (offer) {
-                            void cancelDeviceLinkSession(offer.hubBase, offer.sessionId, {
-                              pollSecret: offer.pollSecret
-                            });
-                          }
-                          setDeviceLinkOffer(null);
-                          setDeviceLinkBusy(false);
-                        }}
-                        content="Cancel"
-                      />
-                    </div>
-                  ) : null}
-                  {deviceLinkError ? (
-                    <Message negative size="small" style={{ marginTop: '0.75em' }}>{deviceLinkError}</Message>
-                  ) : null}
                 </List.Description>
               </List.Content>
             </List.Item>
@@ -4132,22 +3825,25 @@ const IdentityManager = () => {
 
   const deriveCurrentReceiveAddr = useCallback(() => {
     const cur = identities.find(id => id.isCurrent);
-    if (!cur) { setReceiveAddr(null); return; }
+    if (!masterXprv || !cur || !cur.wallet?.segwit?.xpub) { setReceiveAddr(null); return; }
     const addr = deriveReceiveAddress(cur.wallet.segwit.xpub, cur.network, receiveAddrIdx);
     setReceiveAddr(addr);
-  }, [identities, receiveAddrIdx]);
+  }, [identities, receiveAddrIdx, masterXprv]);
 
   const faucetAutoAddrRef = useRef<string | null>(null);
   useEffect(() => {
     const cur = identities.find(id => id.isCurrent);
-    const auto = faucetNetwork && cur && accountNetwork(faucetNetwork) === cur.network
+    const auto = masterXprv && faucetNetwork && cur && cur.wallet?.segwit?.xpub && accountNetwork(faucetNetwork) === cur.network
       ? deriveReceiveAddress(cur.wallet.segwit.xpub, cur.network, receiveAddrIdx)
       : null;
     const prevAuto = faucetAutoAddrRef.current;
     faucetAutoAddrRef.current = auto;
-    if (!auto) return;
+    if (!auto) {
+      setFaucetAddr(prev => (prevAuto && prev === prevAuto ? '' : prev));
+      return;
+    }
     setFaucetAddr(prev => (!prev.trim() || prev === prevAuto ? auto : prev));
-  }, [faucetNetwork, identities, receiveAddrIdx]);
+  }, [faucetNetwork, identities, receiveAddrIdx, masterXprv]);
 
   const refreshArcNotifications = useCallback(async () => {
     if (typeof chrome === 'undefined' || !chrome.runtime || !chrome.runtime.sendMessage) {
@@ -4387,6 +4083,7 @@ const IdentityManager = () => {
         height: '100%'
       }}>
         {renderView()}
+        {renderUnlockScreen()}
         <div style={{
           marginTop: '1em',
           paddingBottom: '1em',
@@ -4415,7 +4112,7 @@ const IdentityManager = () => {
       </div>
 
       <Modal
-        open={showLogoutConfirm}
+        open={showLogoutConfirm && !showUnlockModal}
         onClose={handleCancelLogout}
         size='small'
       >
@@ -4455,7 +4152,7 @@ const IdentityManager = () => {
         </Modal.Actions>
       </Modal>
 
-      {editingIdentity && (
+      {editingIdentity && !showUnlockModal && (
         <Modal open={true} onClose={() => setEditingIdentity(null)}>
           <Modal.Header>Rename Account</Modal.Header>
           <Modal.Content>
@@ -4478,7 +4175,7 @@ const IdentityManager = () => {
         </Modal>
       )}
 
-      {vaultCurrent ? (
+      {vaultCurrent && !showUnlockModal ? (
         <SiteLoginPrompt
           masterXprv={masterXprv}
           current={{ account: vaultCurrent.account, network: vaultCurrent.network, label: vaultCurrent.label }}
@@ -4488,11 +4185,8 @@ const IdentityManager = () => {
           onUnlock={(lockPwd) => unlockPassport(lockPwd)}
         />
       ) : null}
-      <DeviceLinkPrompt
-        privateKeyHex={signingIdentity?.privateKeyHex || null}
-        xpub={signingIdentity?.xpub || null}
-        needsUnlock={locked}
-      />
+      {!showUnlockModal ? <DelegationRequestPrompt hubBase={activeHubBase} cosignerHex={cosignerHex} /> : null}
+      {!showUnlockModal ? <PaymentRequestPrompt /> : null}
     </div>
   );
 };

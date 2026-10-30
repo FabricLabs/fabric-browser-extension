@@ -4,6 +4,7 @@ import assert from 'assert';
 import { MAX_SITE_PURPOSE_CHARS, sanitizeSitePurpose } from '../src/utils/fabricSiteMessage';
 import {
   buildPendingRow,
+  ancestorsShareOrigin,
   checkSenderFrame,
   livePending,
   MAX_SEEN_NONCES,
@@ -66,6 +67,20 @@ describe('site-login prompt rules', function () {
       assert.deepStrictEqual(checkSenderFrame(framed), { ok: false, error: 'cross_origin_frame' });
       const unknownTop = sender({ frameId: 3, tab: { id: 7 } as chrome.tabs.Tab });
       assert.deepStrictEqual(checkSenderFrame(unknownTop), { ok: false, error: 'cross_origin_frame' });
+    });
+
+    it('refuses a same-origin frame nested under another origin', function () {
+      const frames = [
+        { frameId: 0, parentFrameId: -1, url: `${SITE}/login` },
+        { frameId: 2, parentFrameId: 0, url: 'https://ads.example/wrap' },
+        { frameId: 3, parentFrameId: 2, url: `${SITE}/button` }
+      ];
+      assert.strictEqual(ancestorsShareOrigin(frames, 3, SITE), false);
+      assert.strictEqual(ancestorsShareOrigin(frames, 0, SITE), true);
+      assert.strictEqual(ancestorsShareOrigin([
+        { frameId: 0, parentFrameId: -1, url: `${SITE}/` },
+        { frameId: 4, parentFrameId: 0, url: `${SITE}/frame` }
+      ], 4, SITE), true);
     });
   });
 

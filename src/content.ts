@@ -10,17 +10,10 @@ import {
   FABRIC_RUNTIME_PASSPORT_CHALLENGE,
   FABRIC_SITE_POSTMESSAGE_SOURCE,
   PASSPORT_ASSERTION,
-  PASSPORT_CHALLENGE
+  PASSPORT_CHALLENGE,
+  PASSPORT_HELLO,
+  PASSPORT_PROTOCOL
 } from './constants/siteLogin';
-import {
-  FABRIC_DEVICE_LINK_REQUEST,
-  FABRIC_DEVICE_LINK_RESULT,
-  FABRIC_RUNTIME_DEVICE_LINK_REQUEST
-} from './constants/deviceLink';
-import { evaluateDeviceLinkPageRequest, fetchPendingDeviceLink } from './utils/fabricDeviceLinkFetch';
-import {
-  requestFabricHubGateOptions
-} from './utils/fabricHubAllowlist';
 import { installFabric402FetchInterceptor } from './content/fabric402FetchPatch';
 import { swallowNonFatal } from './utils/nonFatal';
 
@@ -39,8 +32,26 @@ window.fabricExtension = {
   chrome: chrome
 };
 
-/** DOM marker is set in `contentMarker.ts` (loads before this bundle). */
 installFabric402FetchInterceptor();
+
+/**
+ * A page asks whether Passport runs here: `{ source: 'fabric-site', type:
+ * 'PASSPORT_HELLO', v }` with a transferred port. The answer goes only to
+ * that port, and nothing is written to the DOM.
+ */
+window.addEventListener('message', (event: MessageEvent) => {
+  const data = event.data;
+  if (!data || data.source !== FABRIC_SITE_POSTMESSAGE_SOURCE || data.type !== PASSPORT_HELLO) return;
+  if (event.source !== window || event.origin !== window.location.origin) return;
+  const port = event.ports && event.ports[0];
+  if (!port) return;
+  try {
+    port.postMessage({ type: PASSPORT_HELLO, v: PASSPORT_PROTOCOL });
+    port.close();
+  } catch (err: unknown) {
+    swallowNonFatal('passport-hello', err);
+  }
+});
 
 /** Hub (or dev) page asks the extension to keep WebRTC signaling alive after the tab closes. */
 window.addEventListener('message', (event: MessageEvent) => {
@@ -124,6 +135,10 @@ window.addEventListener('message', (event: MessageEvent) => {
     settlePassportPort(requestId, { ok: false, error: 'invalid_challenge' });
     return;
   }
+  if (!(navigator.userActivation && navigator.userActivation.isActive)) {
+    settlePassportPort(requestId, { ok: false, error: 'user_activation' });
+    return;
+  }
   chrome.runtime.sendMessage({ type: FABRIC_RUNTIME_PASSPORT_CHALLENGE, requestId, challenge }).then((res) => {
     if (!res || res.ok === false) {
       settlePassportPort(requestId, {
@@ -135,80 +150,6 @@ window.addEventListener('message', (event: MessageEvent) => {
     swallowNonFatal('passport-challenge-runtime', err);
     settlePassportPort(requestId, { ok: false, error: 'passport_unavailable' });
   });
-});
-
-/** Hub (or site) asks Passport to accept a mutual device-link offer as responder. */
-window.addEventListener('message', (event: MessageEvent) => {
-  const data = event.data;
-  if (!data || data.source !== FABRIC_SITE_POSTMESSAGE_SOURCE || data.type !== FABRIC_DEVICE_LINK_REQUEST) {
-    return;
-  }
-  if (event.source !== window || event.origin !== window.location.origin) return;
-
-  const sessionId = typeof data.sessionId === 'string' ? data.sessionId.trim() : '';
-  const hubRaw = typeof data.hub === 'string' ? data.hub.trim() : '';
-  const declaredOrigin = typeof data.origin === 'string' ? data.origin.trim() : event.origin;
-  if (!sessionId || !hubRaw) return;
-
-  void requestFabricHubGateOptions().then((gate) => {
-    const pageGate = evaluateDeviceLinkPageRequest({
-      sessionId,
-      hubRaw,
-      declaredOrigin,
-      pageOrigin: event.origin,
-      ...gate
-    });
-    if (!pageGate.ok) {
-      window.postMessage({
-        source: 'fabric-passport',
-        type: FABRIC_DEVICE_LINK_RESULT,
-        ok: false,
-        error: pageGate.error
-      }, event.origin);
-      return;
-    }
-    const hubBase = pageGate.hubBase;
-
-    return fetchPendingDeviceLink(hubBase, sessionId).then((pending) => {
-      if (!pending.ok) {
-        window.postMessage({
-          source: 'fabric-passport',
-          type: FABRIC_DEVICE_LINK_RESULT,
-          ok: false,
-          error: pending.error
-        }, event.origin);
-        return;
-      }
-      if (pending.status !== 'pending') {
-        window.postMessage({
-          source: 'fabric-passport',
-          type: FABRIC_DEVICE_LINK_RESULT,
-          ok: false,
-          error: `device_link_${pending.status || 'unavailable'}`
-        }, event.origin);
-        return;
-      }
-      return chrome.runtime.sendMessage({
-        type: FABRIC_RUNTIME_DEVICE_LINK_REQUEST,
-        sessionId: pending.sessionId,
-        hubBase: pending.hubBase,
-        origin: pending.origin,
-        nonce: pending.nonce,
-        label: pending.label,
-        initiator: pending.initiator,
-        pageOrigin: event.origin
-      }).then((res) => {
-        if (res && res.ok === false) {
-          window.postMessage({
-            source: 'fabric-passport',
-            type: FABRIC_DEVICE_LINK_RESULT,
-            ok: false,
-            error: typeof res.error === 'string' ? res.error : 'passport_rejected'
-          }, event.origin);
-        }
-      });
-    });
-  }).catch((err: unknown) => swallowNonFatal('device-link-runtime', err));
 });
 
 // Listen for messages from the extension
@@ -234,24 +175,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
     return undefined;
   }
-  if (message.type === 'FABRIC_DEVICE_LINK_PAGE_RESULT') {
-    if (sender.tab || message.origin !== window.location.origin) return undefined;
-    window.postMessage({
-      source: 'fabric-passport',
-      type: FABRIC_DEVICE_LINK_RESULT,
-      ok: !!message.ok,
-      error: message.error,
-      sessionId: message.sessionId,
-      peerFabricId: message.peerFabricId
-    }, window.location.origin);
-  }
   return undefined;
 });
 
 // Notify the extension that content script is loaded
 chrome.runtime.sendMessage({ type: 'CONTENT_SCRIPT_LOADED' });
-
-console.log('Fabric Extension content script loaded successfully');
 
 // Export for TypeScript
 export {};

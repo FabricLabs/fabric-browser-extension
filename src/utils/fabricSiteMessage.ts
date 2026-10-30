@@ -3,11 +3,14 @@
 /**
  * Passport v2 sign-in for the extension: read a page's `PASSPORT_CHALLENGE`,
  * sign a `PASSPORT_ASSERTION` with the identity key of the chosen account and
- * network, wrap a challenge for a linked desktop app, and check what comes back.
+ * network, and check every assertion (this Passport's or a linked signer's)
+ * before the page sees it. Asking a linked signer is `background/delegation.ts`.
  *
  * The page never names its own origin here: callers pass the origin the browser
  * reported (`sender.origin`), and every challenge and assertion is bound to it.
  */
+
+import { pairwiseIndex } from './siteIdentity';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const core = require('./loadFabricPassport');
@@ -141,9 +144,28 @@ export function consentedDisclosures (request: readonly string[], ticked: readon
 }
 
 /**
+ * The identity key Passport shows `origin`: the account identity
+ * (`m/7777'/F'/n'/0/0`), or with `pairwise` the site's own at
+ * `m/7777'/F'/n'/0/<index from the origin>`.
+ */
+export function siteIdentityKey (
+  masterXprv: string,
+  pair: { account: number; network: string },
+  origin: string,
+  pairwise: boolean
+): { key: any; pubkey: string } {
+  const keys = deriveAccountKeys(masterXprv, pair);
+  if (!pairwise) return { key: keys.identity.key, pubkey: String(keys.identity.pubkey).toLowerCase() };
+  const path = String(keys.identity.path).replace(/\/0$/, `/${pairwiseIndex(origin)}`);
+  const root = new core.Key({ xprv: core.accountKeys.normalizeMasterXprv(masterXprv) });
+  const key = root.derive(path);
+  return { key, pubkey: String(key.pubkey).toLowerCase() };
+}
+
+/**
  * Sign a `PASSPORT_ASSERTION` with this Passport's identity for the chosen
- * account and network. Wallet xpubs and the cosigner key go only when listed
- * in `disclose`.
+ * account and network (the site's own identity with `pairwise`). Wallet xpubs
+ * and the cosigner key go only when listed in `disclose`.
  */
 export function signPassportAssertion (params: {
   challenge: string;
@@ -151,10 +173,12 @@ export function signPassportAssertion (params: {
   masterXprv: string;
   account: number;
   network: string;
+  pairwise?: boolean;
   disclose?: PassportDisclosure[];
   now?: number;
 }): { uri: string; identity: { id: string; pubkey: string }; network: string; disclosed: PassportDisclosure[]; expiresAt: number } {
   const keys = deriveAccountKeys(params.masterXprv, { account: params.account, network: params.network });
+  const signer = siteIdentityKey(params.masterXprv, params, params.origin, !!params.pairwise);
   const disclose = params.disclose || [];
   const signed = core.passport.signAssertion({
     challenge: params.challenge,
@@ -165,7 +189,7 @@ export function signPassportAssertion (params: {
     wallet: disclose.includes('wallet') ? keys.wallet : undefined,
     cosignerKey: disclose.includes('cosigner') ? keys.cosigner.key : undefined,
     now: params.now
-  }, keys.identity.key);
+  }, signer.key);
   return {
     uri: signed.uri,
     identity: signed.identity,
@@ -176,34 +200,9 @@ export function signPassportAssertion (params: {
 }
 
 /**
- * Ask a linked desktop app to answer a challenge. Signed by the Passport key
- * that was linked to it, so the desktop can find this device in its identity
- * cluster.
- */
-export function buildDesktopSignRequest (params: {
-  challenge: string;
-  origin: string;
-  masterXprv: string;
-  /** The Passport pair whose identity key was linked to the desktop. */
-  device: { account: number; network: string };
-  disclose?: PassportDisclosure[];
-  now?: number;
-}): { uri: string; nonce: string; expiresAt: number; device: string } {
-  const keys = deriveAccountKeys(params.masterXprv, params.device);
-  const wrapped = core.passport.createSignRequest({
-    challenge: params.challenge,
-    origin: params.origin,
-    account: 0,
-    disclose: params.disclose || [],
-    now: params.now
-  }, keys.identity.key);
-  return { uri: wrapped.uri, nonce: wrapped.nonce, expiresAt: wrapped.expiresAt, device: keys.identity.pubkey };
-}
-
-/**
  * Verify an assertion before handing it to the page: bound to the challenge,
  * signed by an accepted signer, disclosing nothing it wasn't asked, and (for a
- * desktop) signed by the key pinned when it was linked.
+ * linked signer) signed by its key and naming this Passport as `device`.
  */
 export function verifyPageAssertion (uri: unknown, expected: {
   origin: string;
@@ -235,7 +234,7 @@ export function verifyPageAssertion (uri: unknown, expected: {
     return { ok: false, error: 'signed by a different key than the one linked' };
   }
   if (expected.device && String(verified.device || '') !== String(expected.device).toLowerCase()) {
-    return { ok: false, error: 'the desktop answered for a different device' };
+    return { ok: false, error: 'the linked signer answered for someone else' };
   }
   const disclosed: PassportDisclosure[] = [];
   if (verified.wallet) disclosed.push('wallet');
@@ -251,12 +250,6 @@ export function verifyPageAssertion (uri: unknown, expected: {
       expiresAt: Number(verified.expiresAt)
     }
   };
-}
-
-/** Six-digit code both devices show while pairing. */
-export function pairingCode (a: string, b: string): string {
-  requireCore();
-  return core.passport.pairingCode(a, b);
 }
 
 /** What the user is about to share, in the words the prompt uses. */
