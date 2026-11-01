@@ -58,7 +58,7 @@
     "@playwright/test": "=1.64.1",
     "@types/chrome": "=0.0.323",
     "@types/mocha": "=10.0.10",
-    "@types/node": "^24.0.3",
+    "@types/node": "^26.6.6",
     "@types/react": "=18.3.18",
     "@types/react-dom": "=18.2.19",
     "@types/sinon": "=17.0.4",
