@@ -29,10 +29,10 @@ Living queue for this repo. Detail and closed items live in [SECURITY.md](../SEC
   wired through `fabricBackgroundRuntimeMessages.ts` — remaining work is
   calling it post-unlock plus migrating existing records. Wallet seed is *not*
   in this store (master sealed with PBKDF2 600k + AES-GCM). [AUDIT.md](../AUDIT.md) #2.
-- [ ] Confirm whether the shipped webpack bundle actually reaches `elliptic`
-  (via `@fabric/http` `crypto-browserify`). `npm audit --omit=dev` is **7 high
-  / 4 moderate / 5 low**, all transitive; for a wallet, a reachable `elliptic`
-  advisory should be treated as release-blocking rather than noise.
+- [x] Confirm whether the shipped webpack bundle actually reaches `elliptic` —
+  it doesn't (`crypto` maps to `@fabric/http/functions/browserCrypto`).
+  `npm audit` is **0**, full and `--omit=dev` (2026-11-01); overrides in
+  [AUDIT.md](../AUDIT.md) #3.
 - [ ] Move xpub off Hub `GET /services/bitcoin/xpub…` query strings (needs Hub POST endpoints).
 - [x] Pin `@fabric/core` **`984b874ba`** / `@fabric/http` **`b87b1b0`** in `package-lock.json`. Live Hub still **`f63a33f`** until operator redeploy.
 - [ ] Keep `src/utils/fabricHubAllowlist.ts` lockstep with `@fabric/http/functions/fabricHubAllowlist`.

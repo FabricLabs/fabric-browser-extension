@@ -416,6 +416,8 @@ function sessionArea (): SessionArea | null {
 export async function rememberMaster (master: string): Promise<void> {
   const area = sessionArea();
   if (area) await area.set({ [PASSPORT_MASTER_SESSION_KEY]: master });
+  const { bindDatastoreToMaster } = require('../background/encryptedDatastore');
+  await bindDatastoreToMaster(master);
 }
 
 export async function recallMaster (vault: AccountVault | null): Promise<string | null> {
@@ -437,4 +439,6 @@ export async function recallMaster (vault: AccountVault | null): Promise<string 
 export async function forgetMaster (): Promise<void> {
   const area = sessionArea();
   if (area) await area.remove(PASSPORT_MASTER_SESSION_KEY);
+  const { unbindDatastore } = require('../background/encryptedDatastore');
+  await unbindDatastore();
 }

@@ -68,7 +68,7 @@ module.exports = function (callback) {
   function copyExample() {
     // copy src/ to server
     console.info('Copying examples');
-    return gulp.src('examples/**/*.*')
+    return gulp.src('examples/**/*.*', {encoding: false})
       .pipe(gulp.dest(output.examples))
       .pipe(print(log.created));
   }
@@ -81,7 +81,7 @@ module.exports = function (callback) {
   function copyLess() {
     // copy src/ to server
     console.info('Copying LESS source');
-    return gulp.src('src/**/*.*')
+    return gulp.src('src/**/*.*', {encoding: false})
       .pipe(gulp.dest(output.less))
       .pipe(print(log.created));
   }

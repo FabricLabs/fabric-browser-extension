@@ -9,7 +9,7 @@ Peer documents: [`@fabric/core` AUDIT.md](https://github.com/FabricLabs/fabric/b
 [`@fabric/http` AUDIT.md](https://github.com/FabricLabs/fabric-http/blob/feature/rsi/AUDIT.md),
 [`@fabric/hub` AUDIT.md](https://github.com/FabricLabs/hub.fabric.pub/blob/feature/rsi/AUDIT.md).
 
-## Status (2026-10-30)
+## Status (2026-11-01)
 
 | Area | Posture |
 |------|---------|
@@ -24,10 +24,10 @@ Peer documents: [`@fabric/core` AUDIT.md](https://github.com/FabricLabs/fabric/b
 | Background datastore at rest | **Weak by default** — AES-GCM with a self-generated master key stored *in plaintext beside the ciphertext* in `chrome.storage.local`. See Known gaps #2 |
 | Content-script trust | Content scripts are untrusted relative to the background; seed material never leaves the background / popup |
 | CSP | `script-src 'self' 'wasm-unsafe-eval'; object-src 'self'` — no remote code |
-| Unit tests | **154 passing** (`npm run test:unit`) — Passport v2 sign-in, delegation (pairing, grants, requests), payment requests, sealed trusted lists, vault re-seal and cache checks, allowlist, ARC publish/evaluate, encrypted datastore, activity auto-lock timestamps, adversarial origins, store listing |
+| Unit tests | **157 passing** (`npm run test:unit`) — Passport v2 sign-in, delegation (pairing, grants, requests), payment requests, sealed trusted lists, vault re-seal and cache checks, allowlist, ARC publish/evaluate, encrypted datastore, activity auto-lock timestamps, adversarial origins, store listing |
 | Extension E2E | Playwright MV3 (`npm run test:extension`, `npm run test:ui`). Headless-shell cannot discover the MV3 service worker; this tree stages headed Chromium + `xvfb-run` |
 | JSON-RPC auth gate | `npm run test:ui:release-gate` — bearer + `POST /services/rpc` per [`@fabric/http` docs/RELEASE_GATE.md](https://github.com/FabricLabs/fabric-http/blob/feature/rsi/docs/RELEASE_GATE.md) |
-| npm audit (`--omit=dev`) | **16 findings (7 high / 4 moderate / 5 low)** — all transitive. See Known gaps #3 |
+| npm audit | **0 findings**, full and `--omit=dev` (56 before the 2026-11-01 toolchain bumps and overrides). See Known gaps #3 |
 | External security review | **Outstanding** before dropping “experimental” language |
 | Store listing pack | Complete — [`docs/CHROME_WEB_STORE.md`](docs/CHROME_WEB_STORE.md), [`docs/privacy-policy.md`](docs/privacy-policy.md), `store/` icons + promo + 1280×800 screenshots. **Blocked on ops:** the listing privacy URL `https://hub.fabric.pub/passport-privacy.html` is not deployed |
 
@@ -63,20 +63,24 @@ Peer documents: [`@fabric/core` AUDIT.md](https://github.com/FabricLabs/fabric/b
    `fabricBackgroundRuntimeMessages.ts` so a post-unlock key can replace it.
    Remaining work is to actually call it after unlock and to migrate existing
    records. Parallels Hub `docs/OUTSTANDING.md` blocker #3 (at-rest identity KDF).
-3. **`npm audit --omit=dev` is not clean (7 high).** All findings are
-   transitive, none are direct dependencies:
-   - `elliptic`, `browserify-sign`, `create-ecdh`, `crypto-browserify` —
-     removed. Webpack maps `crypto` to `@fabric/http/functions/browserCrypto`
-     (noble hashes and ciphers), and none of these packages is bundled. They
-     leave the lockfile once it resolves an `@fabric/http` that ships that file.
-   - `uuid` via `jayson` via `@fabric/core` — core mitigates with an
-     `uuid@11.1.1` override; Passport should inherit it after the next pin.
-   - `puppeteer` / `@puppeteer/browsers` / `extract-zip` — a **production**
-     dependency of `@fabric/http` (its Sandbox), not of the shipped extension
-     bundle. `@fabric/http` tracks a deferred `puppeteer@25.7.0` bump.
-   - `@babel/core`, `webpack`, `valibot`, `bip32` — build/toolchain trees.
+3. **`npm audit` is clean, partly through overrides.** The 2026-11-01 pass
+   bumped the toolchain (webpack 5.112, webpack-dev-server 6, copy-webpack-plugin
+   14, Playwright 1.64, sinon 22, sharp 0.35, gulp 5) and replaced unmaintained
+   Semantic UI build plugins: `@fomantic/gulp-concat-css` and
+   `@fomantic/gulp-dedupe` for the originals, small local helpers in
+   `libraries/semantic/tasks/` for `gulp-if` (`pipe-if.js`) and
+   `gulp-json-editor` (`json-editor.js`), `del` 8, and `js-yaml` for `yamljs`.
+   gulp 5 returns one brace glob in directory order and decodes sources as
+   UTF-8, so the build reads components in order (`ordered-src.js`) and copies
+   fonts and images with `encoding: false`; the packaged `semantic.min.css`
+   and `semantic.js` come out byte-identical to the gulp 4 build. Overrides in
+   `package.json` (root-only in npm, so they repeat core's and http's):
+   | Override | Reason | Drop when |
+   |----------|--------|-----------|
+   | `minimatch@>=9.0.0 <11.0.1` → `11.0.3` | GHSA-g3hv-75wg-m249 in glob / filelist trees | Those trees resolve minimatch ≥ 11.0.1 |
+   | `glob@>=9.0.0 <14.0.2` → `14.0.3` | GHSA-3g3m-2fjr-6pw4 | Dependents move to glob ≥ 14.0.2 |
+   | `page` → `path-to-regexp@1.9.0` | GHSA-9wv6-86v2-598j (via `@fabric/http`) | `page` ships a fixed range |
    Prefer upstream bumps and explicit overrides over `npm audit fix --force`.
-   This cut accepts those build-time findings and does not rewrite the lockfile.
    Re-check after each Fabric pin bump.
 4. **Page-world 402 fetch patch is not installed.**
    `installFabric402FetchInterceptor` runs in the isolated content-script world
@@ -137,7 +141,7 @@ bundle size and pull Node built-ins — treat drift, not duplication, as the bug
       can: `crypto-browserify` is gone and no `elliptic` module is bundled
 - [ ] `npm run test:all` plus `npm run test:ui:release-gate` on a clean tree
 - [ ] Re-pin `@fabric/core` / `@fabric/http` to the tagged suite SHAs and
-      re-run `npm audit --omit=dev`
+      re-run `npm audit` (0 on 2026-11-01)
 - [ ] Keep the release claim scoped: browser identity + site login +
       linked signers — **not** an audited hardware-grade wallet
 

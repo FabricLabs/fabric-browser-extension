@@ -27,7 +27,7 @@ var
   // gulp dependencies
   chmod          = require('gulp-chmod'),
   del            = require('del'),
-  jsonEditor     = require('gulp-json-editor'),
+  jsonEditor     = require('./json-editor'),
   plumber        = require('gulp-plumber'),
   inquirer       = require('inquirer'),
   rename         = require('gulp-rename'),
@@ -423,7 +423,7 @@ module.exports = function (callback) {
         inquirer.prompt(questions.cleanup)
           .then((answers) => {
             if (answers.cleanup === 'yes') {
-              del(install.setupFiles);
+              del.deleteAsync(install.setupFiles);
             }
             if (answers.build === 'yes') {
               gulp.series('build')(callback);

@@ -11,11 +11,12 @@ const
   // gulp dependencies
   chmod      = require('gulp-chmod'),
   concat     = require('gulp-concat'),
-  dedupe     = require('gulp-dedupe'),
+  dedupe     = require('@fomantic/gulp-dedupe'),
   flatten    = require('gulp-flatten'),
-  gulpif     = require('gulp-if'),
+  gulpif     = require('../pipe-if'),
   header     = require('gulp-header'),
   normalize  = require('normalize-path'),
+  orderedSrc = require('../ordered-src'),
   plumber    = require('gulp-plumber'),
   print      = require('gulp-print').default,
   rename     = require('gulp-rename'),
@@ -72,7 +73,13 @@ function pack(type, compress) {
   const output         = type === 'docs' ? docsConfig.paths.output : config.paths.output;
   const concatenatedJS = compress ? filenames.concatenatedMinifiedJS : filenames.concatenatedJS;
 
-  return gulp.src(output.uncompressed + '/**/' + globs.components + globs.ignored + '.js')
+  const sources = globs.components
+    .replace(/[{}]/g, '')
+    .split(',')
+    .map((component) => output.uncompressed + '/**/' + component + globs.ignored + '.js')
+  ;
+
+  return orderedSrc(sources)
     .pipe(plumber())
     .pipe(dedupe())
     .pipe(replace(assets.uncompressed, assets.packaged))
