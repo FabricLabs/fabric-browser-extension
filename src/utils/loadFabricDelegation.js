@@ -1,8 +1,9 @@
 'use strict';
 
 /**
- * Load `@fabric/core` delegation (`functions/delegation`, `types/delegation`)
- * with the `types/key` and `functions/fabricUri` of the same tree:
+ * Load `@fabric/core` delegation (`types/delegation`: the `Delegation` class,
+ * whose statics build and read the frames) with the `types/key` and
+ * `functions/fabricUri` of the same tree:
  * FABRIC_CORE when set, else this package's `node_modules`.
  *
  * Only a core whose pairing frames carry the author's `pubkey` qualifies.
@@ -21,17 +22,18 @@ function coreRoots () {
 }
 
 function qualifies (root) {
-  const fn = path.join(root, 'functions', 'delegation.js');
-  if (!fs.existsSync(fn) || !fs.existsSync(path.join(root, 'types', 'delegation.js'))) return false;
+  const fn = path.join(root, 'types', 'delegation.js');
+  if (!fs.existsSync(fn)) return false;
   return fs.readFileSync(fn, 'utf8').includes('pubkeys: { initiator');
 }
 
 function loadFabricDelegation () {
   for (const root of coreRoots()) {
     if (!qualifies(root)) continue;
+    const Delegation = require(path.join(root, 'types', 'delegation.js'));
     return {
-      delegation: require(path.join(root, 'functions', 'delegation.js')),
-      Delegation: require(path.join(root, 'types', 'delegation.js')),
+      delegation: Delegation,
+      Delegation,
       Key: require(path.join(root, 'types', 'key.js')),
       fabricUri: require(path.join(root, 'functions', 'fabricUri.js'))
     };

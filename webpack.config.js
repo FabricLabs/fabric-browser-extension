@@ -56,13 +56,13 @@ function resolveFabricFederationCoreRoot () {
 /** Core tree for delegation (same order and check as `src/utils/loadFabricDelegation.js`). */
 function resolveFabricDelegationCoreRoot () {
   for (const root of fabricCoreRoots()) {
-    const fn = path.join(root, 'functions', 'delegation.js');
-    if (fs.existsSync(fn) && fs.existsSync(path.join(root, 'types', 'delegation.js')) && fs.readFileSync(fn, 'utf8').includes('pubkeys: { initiator')) {
+    const fn = path.join(root, 'types', 'delegation.js');
+    if (fs.existsSync(fn) && fs.readFileSync(fn, 'utf8').includes('pubkeys: { initiator')) {
       console.log(`[webpack] delegation core: ${root}`);
       return root;
     }
   }
-  throw new Error('Linked signers need @fabric/core with functions/delegation.js (set FABRIC_CORE to a core checkout)');
+  throw new Error('Linked signers need @fabric/core with types/delegation.js frame statics (set FABRIC_CORE to a core checkout)');
 }
 const MiniCssExtractPlugin = require('mini-css-extract-plugin');
 const HtmlWebpackPlugin = require('html-webpack-plugin');
@@ -71,7 +71,7 @@ const ProgressBar = require('progress-bar-webpack-plugin');
 const TerserPlugin = require('terser-webpack-plugin');
 
 module.exports = (env, argv) => {
-  const isProduction = (env && env.NODE_ENV === 'production') || process.env.NODE_ENV === 'production';
+  const isProduction = (env && env.NODE_ENV === 'production') || process.env.NODE_ENV === 'production' || (argv && argv.mode === 'production');
   return {
     mode: isProduction ? 'production' : 'development',
     entry: {
@@ -294,7 +294,8 @@ module.exports = (env, argv) => {
           },
           {
             from: path.join(FABRIC_HTTP_ASSETS, 'themes'),
-            to: 'css/themes'
+            to: 'css/themes',
+            noErrorOnMissing: true
           }
         ],
       }),

@@ -205,8 +205,39 @@ describe('Passport federation member', () => {
     assert.strictEqual(mine.status, 'broadcast');
     assert.match(String(mine.txid), /^[0-9a-f]{64}$/);
     assert.match(String(mine.error), /broadcast notice failed/);
+    assert.strictEqual(mine.noticePending, true);
     await bob.sync();
     assert.strictEqual(hub.sent.length, 1);
+    assert.strictEqual(mine.noticePending, false);
+    assert.strictEqual(mine.error, null);
+    await alice.sync();
+    const theirs = alice.get(created.id)!.withdrawals[w.requestId];
+    assert.strictEqual(theirs.status, 'broadcast');
+    assert.strictEqual(theirs.txid, mine.txid);
+  });
+
+  it('keeps a withdrawal pending when the Hub reports a different txid', async () => {
+    const hub = fakeHub();
+    const fetch = async (url: string, init: any = {}) => {
+      const res = await hub.fetch(url, init);
+      if (init.method === 'POST' && /\/transactions$/.test(new URL(url).pathname)) {
+        return { ok: true, status: 200, json: async () => ({ txid: 'ff'.repeat(32) }) };
+      }
+      return res;
+    };
+    const alice = new FederationMember({ hubBase: 'https://hub.example', privateKeyHex: priv(), fetch: hub.fetch });
+    const bob = new FederationMember({ hubBase: 'https://hub.example', privateKeyHex: priv(), fetch });
+    const created = await alice.create({ threshold: 2, members: [bob.pubkey] });
+    await bob.sync();
+    await bob.respond(created.id, true);
+    hub.fund(created.id, 100000);
+    const w = await alice.requestWithdrawal(created.id, { destinationAddress: coreDest(), amountSats: 40000, feeSats: 500 });
+    await bob.sync();
+    await bob.approve(created.id, w.requestId);
+    const mine = bob.get(created.id)!.withdrawals[w.requestId];
+    assert.strictEqual(mine.status, 'pending');
+    assert.strictEqual(mine.txid, null);
+    assert.match(String(mine.error), /the Hub reported txid/);
   });
 
   it('refuses frames that do not check out', async () => {

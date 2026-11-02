@@ -110,7 +110,7 @@
       <li>Chrome / Google as part of installing or updating the extension from the Chrome Web Store. Fabric Labs does not receive that telemetry.</li>
     </ol>
     <p>
-      Public hubs must be HTTPS. Cleartext http:// is allowed for loopback (localhost / 127.0.0.1 / [::1]) so you can develop against a local Hub, and for a Hub on your local network that you add by exact origin under Trusted hubs — Passport then asks Chrome for access to that one host (optional http://*/* host permission, granted per host) and talks to it only after you accept. Traffic to such a Hub is not encrypted in transit; add only Hubs on networks you trust.
+      Public hubs must be HTTPS. Cleartext http:// is allowed for loopback (localhost / 127.0.0.1 / [::1]) so you can develop against a local Hub, and for a Hub you add by exact origin under Trusted hubs, meant for one on your local network — Passport then asks Chrome for access to that one host (optional http://*/* host permission, granted per host) and talks to it only after you accept. Passport does not check that such a Hub is on your local network: traffic to it is not encrypted in transit, so anyone on the path (including the open internet, for a public address) can read and change it. Add only Hubs on networks you trust.
     </p>
     <p>
       We do not sell user data. We do not use user data for advertising, credit-worthiness, or lending. We do not transfer user data to data brokers.

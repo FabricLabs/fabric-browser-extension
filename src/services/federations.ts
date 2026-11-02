@@ -40,6 +40,8 @@ export interface FederationWithdrawal {
   status: 'pending' | 'broadcast';
   txid: string | null;
   error: string | null;
+  /** On chain, but the other members have not been told yet. */
+  noticePending?: boolean;
   at: number;
 }
 
@@ -81,6 +83,8 @@ export interface FederationVault {
   balanceSats: number;
   utxos: Array<{ txid: string; vout: number; amountSats: number; txHex?: string }>;
 }
+
+const REQUEST_TIMEOUT_MS = 20_000;
 
 type FetchLike = (url: string, init?: any) => Promise<{ ok: boolean; status: number; json: () => Promise<any> }>;
 
@@ -203,6 +207,7 @@ export class FederationMember {
     for (const record of this.list()) {
       for (const w of Object.values(record.withdrawals)) {
         if (w.status === 'pending') await this.maybeFinalize(record, w);
+        else if (w.noticePending) await this.sendBroadcastNotice(record, w);
       }
     }
     return { received, rejected };
@@ -411,19 +416,29 @@ export class FederationMember {
       });
       const done = core.Federation.finalizeWithdrawal({ descriptor: record.descriptor, psbtBase64: merged.psbtBase64 });
       const sent = await this.request('POST', `/services/federations/${record.id}/transactions`, { txHex: done.txHex });
-      const txid = String(sent.txid || done.txid).toLowerCase();
+      const txid = String(done.txid).toLowerCase();
+      if (sent.txid && String(sent.txid).toLowerCase() !== txid) {
+        throw new Error(`the Hub reported txid ${sent.txid}, but the signed transaction is ${txid}`);
+      }
       w.status = 'broadcast';
       w.txid = txid;
       w.error = null;
-      try {
-        await this.post(core.Federation.broadcastMessage(record.id, w.requestId, txid));
-      } catch (err: unknown) {
-        w.error = `sent, but the broadcast notice failed: ${err instanceof Error ? err.message : String(err)}`;
-      }
+      w.noticePending = true;
+      await this.sendBroadcastNotice(record, w);
       return true;
     } catch (err: unknown) {
       w.error = err instanceof Error ? err.message : String(err);
       return false;
+    }
+  }
+
+  private async sendBroadcastNotice (record: FederationRecord, w: FederationWithdrawal): Promise<void> {
+    try {
+      await this.post(core.Federation.broadcastMessage(record.id, w.requestId, w.txid));
+      w.noticePending = false;
+      w.error = null;
+    } catch (err: unknown) {
+      w.error = `sent, but the broadcast notice failed: ${err instanceof Error ? err.message : String(err)}`;
     }
   }
 
@@ -476,18 +491,31 @@ export class FederationMember {
   }
 
   private async request (method: 'GET' | 'POST', path: string, body?: object): Promise<any> {
-    const res = await this.fetchImpl(`${this.hubBase}${path}`, {
-      method,
-      headers: body ? { Accept: 'application/json', 'Content-Type': 'application/json' } : { Accept: 'application/json' },
-      body: body ? JSON.stringify(body) : undefined,
-      cache: 'no-store'
+    const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const timeout = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => {
+        if (controller) controller.abort();
+        reject(new Error(`the Hub did not answer within ${REQUEST_TIMEOUT_MS / 1000}s`));
+      }, REQUEST_TIMEOUT_MS);
     });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) {
-      if (res.status === 404 && /^\/services\/federations(\?|$)/.test(path)) throw new Error('this Hub does not carry federations');
-      throw new Error(data && data.message ? String(data.message) : `Hub answered HTTP ${res.status}`);
+    try {
+      const res = await Promise.race([this.fetchImpl(`${this.hubBase}${path}`, {
+        method,
+        headers: body ? { Accept: 'application/json', 'Content-Type': 'application/json' } : { Accept: 'application/json' },
+        body: body ? JSON.stringify(body) : undefined,
+        cache: 'no-store',
+        signal: controller ? controller.signal : undefined
+      }), timeout]);
+      const data = await Promise.race([res.json().catch(() => ({})), timeout]);
+      if (!res.ok) {
+        if (res.status === 404 && /^\/services\/federations(\?|$)/.test(path)) throw new Error('this Hub does not carry federations');
+        throw new Error(data && data.message ? String(data.message) : `Hub answered HTTP ${res.status}`);
+      }
+      return data;
+    } finally {
+      if (timer) clearTimeout(timer);
     }
-    return data;
   }
 }
 

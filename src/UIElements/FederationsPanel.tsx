@@ -55,7 +55,7 @@ export default function FederationsPanel (props: FederationsPanelProps) {
   const [vaults, setVaults] = useState<Record<string, FederationVault>>({});
   const [creating, setCreating] = useState(false);
   const memberRef = useRef<FederationMember | null>(null);
-  const inFlight = useRef(false);
+  const inFlight = useRef<FederationMember | null>(null);
 
   // Rebuild the member when the identity or Hub changes.
   useEffect(() => {
@@ -64,6 +64,7 @@ export default function FederationsPanel (props: FederationsPanelProps) {
     setHub(null);
     setErr(null);
     memberRef.current = null;
+    inFlight.current = null;
     if (!hubBase || !privateKeyHex || !federationsAvailable()) return undefined;
     (async () => {
       try {
@@ -81,8 +82,8 @@ export default function FederationsPanel (props: FederationsPanelProps) {
 
   const run = useCallback(async (label: string, fn: (m: FederationMember) => Promise<unknown>, done?: string) => {
     const m = memberRef.current;
-    if (!m || inFlight.current) return;
-    inFlight.current = true;
+    if (!m || inFlight.current === m) return;
+    inFlight.current = m;
     setBusy(label);
     setErr(null);
     setNotice(null);
@@ -94,8 +95,10 @@ export default function FederationsPanel (props: FederationsPanelProps) {
     } finally {
       await saveState(m);
       setVersion((v) => v + 1);
-      setBusy(null);
-      inFlight.current = false;
+      if (inFlight.current === m) {
+        setBusy(null);
+        inFlight.current = null;
+      }
     }
   }, []);
 

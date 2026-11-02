@@ -50,6 +50,10 @@ export default function HubAllowlistPanel (): React.ReactElement {
         (<code>localhost</code>, <code>127.0.0.1</code>, <code>[::1]</code>), and the extra
         hubs you add below. Built in: {DEFAULT_FABRIC_HUB_ORIGINS.join(', ')}.
       </p>
+      <p>
+        An <code>http://</code> hub is not encrypted: anyone between you and it can read and
+        change what Passport sends. Add one only on a network you trust, such as your own LAN.
+      </p>
       <Form>
         <TextArea
           rows={3}

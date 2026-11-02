@@ -200,6 +200,11 @@ export default function SiteLoginPrompt (props: Props): React.ReactElement | nul
     const disclose = consentedDisclosures(pending.request, ticked);
     try {
       const signer = signers.find((x) => x.pubkey === choice) || null;
+      if (!signer && choice !== 'main' && choice !== 'pairwise') {
+        setChoice('pairwise');
+        setError('That signer is no longer linked — choose again.');
+        return;
+      }
       if (signer) {
         setWaitingOn(signer.name);
         const res = await send<{ ok: boolean; error?: string }>({

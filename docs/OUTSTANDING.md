@@ -28,7 +28,7 @@ Living queue for this repo. Detail and closed items live in [SECURITY.md](../SEC
   is obfuscation not encryption. `setDatastoreMasterKeyFromBytes` is already
   wired through `fabricBackgroundRuntimeMessages.ts` — remaining work is
   calling it post-unlock plus migrating existing records. Wallet seed is *not*
-  in this store (master sealed with PBKDF2 600k + AES-GCM). [AUDIT.md](../AUDIT.md) #2.
+  in this store (master sealed with Argon2id, or 600k PBKDF2 where the linked core lacks it, + AES-GCM). [AUDIT.md](../AUDIT.md) #2.
 - [x] Confirm whether the shipped webpack bundle actually reaches `elliptic` —
   it doesn't (`crypto` maps to `@fabric/http/functions/browserCrypto`).
   `npm audit` is **0**, full and `--omit=dev` (2026-11-01); overrides in
@@ -43,7 +43,7 @@ Living queue for this repo. Detail and closed items live in [SECURITY.md](../SEC
 ## Closed / in this cut
 - **Delegation protocol (linked signers).** Device links, desktop signers, and `IdentityCrossSign` are replaced by `DELEGATION_*` Fabric messages (`@fabric/core` `docs/DELEGATION.md`): commit-then-reveal pairing with a six-digit code (`PairingPrompt`), scoped revocable grants (**Linked signers** panel), and `DELEGATION_REQUEST`s shown as notifications and signed or declined in `DelegationRequestPrompt`. A shared wallet can be made from the cosigner keys linked signers granted. See [SECURITY.md](../SECURITY.md#linked-signers-delegation).
 - **Passport v2 sign-in hardening.** `PASSPORT_HELLO` handshake (no page marker), one sign-in per origin at a time, pairwise identity per site by default, look-alike and new-site warnings, arm-delayed buttons.
-- **Sealed lists, vault checks.** Trusted hubs, trusted HTTP origins, and delegation records carry an HMAC keyed from the master; vault re-sealed at 600k PBKDF2 on unlock, cached public keys checked, background auto-lock alarm, 12-character lock password. `X-Fabric-Identity` only on a trusted origin's own requests (`initiatorDomains`).
+- **Sealed lists, vault checks.** Trusted hubs, trusted HTTP origins, and delegation records carry an HMAC keyed from the master; vault re-sealed with the active KDF (Argon2id, else 600k PBKDF2) on unlock, cached public keys checked, background auto-lock alarm, 12-character lock password. `X-Fabric-Identity` only on requests made from a trusted origin's host or its subdomains (`initiatorDomains`).
 - **402 payments in the popup.** The content script reports a 402 invoice; the popup's `PaymentRequestPrompt` shows and pays it. The in-page overlay is gone.
 - **Allowlist + manifest.** `https://hub.goon.vc` in the default allowlist; `http://[::1]/*` alongside the other loopback twins; `optional_host_permissions: ["http://*/*"]` for LAN hubs the user trusts (granted per host on Save). `FABRIC_HUB_REGISTER_MESH` requires sender origin === hub.
 - **Auto-lock activity timestamps reject epoch 0.** `touchFabricActivity` /

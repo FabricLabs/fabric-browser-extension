@@ -18,11 +18,18 @@ export type PassportBolt11PayResult = { ok: boolean; message: string };
 
 const PAY_RPC_TIMEOUT_MS = 15_000;
 
-async function fetchJsonWithTimeout (url: string, init: RequestInit): Promise<Response> {
+async function fetchJsonWithTimeout (url: string, init: RequestInit): Promise<Record<string, unknown>> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), PAY_RPC_TIMEOUT_MS);
   try {
-    return await fetch(url, { ...init, signal: controller.signal });
+    const res = await fetch(url, { ...init, signal: controller.signal });
+    const aborted = new Promise<never>((_resolve, reject) => {
+      const fail = () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' }));
+      if (controller.signal.aborted) fail();
+      else controller.signal.addEventListener('abort', fail, { once: true });
+    });
+    const body = res.json().catch(() => ({}));
+    return await Promise.race([body, aborted]) as Record<string, unknown>;
   } finally {
     clearTimeout(timer);
   }
@@ -46,7 +53,7 @@ export async function attemptPayBolt11ViaActiveFabricNode (bolt11: string): Prom
 
   const base = hub.replace(/\/+$/, '');
   try {
-    const res = await fetchJsonWithTimeout(`${base}/services/rpc`, {
+    const json = await fetchJsonWithTimeout(`${base}/services/rpc`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
       body: JSON.stringify({
@@ -56,7 +63,6 @@ export async function attemptPayBolt11ViaActiveFabricNode (bolt11: string): Prom
         params: [{ bolt11: b, origin: '@fabric/passport-extension' }]
       })
     });
-    const json = await res.json().catch(() => ({})) as Record<string, unknown>;
     if ((json.error as Record<string, unknown> | undefined)?.message) {
       const msg = String((json.error as Record<string, unknown>).message || 'RPC error');
       return {

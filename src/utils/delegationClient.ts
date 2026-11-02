@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * Transports for delegation frames (`@fabric/core` `functions/delegation`):
+ * Transports for delegation frames (`@fabric/core` `types/delegation`):
  *
  * - linked signers on this computer (Fabric Hub, GoonCitizen) answer on
  *   loopback at `/services/delegation` (`@fabric/http` `fabricDelegate`);

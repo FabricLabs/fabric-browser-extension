@@ -204,6 +204,14 @@ export async function fetchBitcoinStatus (baseUrl: string): Promise<BitcoinStatu
   }
 }
 
+/** The wallet goes in a POST body, never the URL, so it stays out of proxy and server logs. */
+function xpubQueryBody (xpub: string, addresses: string[], standardXpub?: string | null): Record<string, unknown> {
+  const body: Record<string, unknown> = { xpub };
+  if (standardXpub) body.standardXpub = String(standardXpub).trim();
+  if (addresses.length > 0) body.addresses = addresses;
+  return body;
+}
+
 export async function fetchWalletBalance (
   baseUrl: string,
   xpub: string,
@@ -219,14 +227,10 @@ export async function fetchWalletBalance (
     }
 
     const root = baseUrl.replace(/\/+$/, '');
-    const params = new URLSearchParams();
-    params.set('xpub', xpub);
-    if (opts?.standardXpub) params.set('standardXpub', String(opts.standardXpub).trim());
-    if (addresses.length > 0) params.set('addresses', addresses.join(','));
-    const path = `/services/bitcoin/xpub?${params.toString()}`;
-
-    const res = await fetchWithTimeout(`${root}${path}`, {
-      headers: { Accept: 'application/json', ...xpubQueryAuthHeaders(opts?.xpubQueryToken) }
+    const res = await fetchWithTimeout(`${root}/services/bitcoin/xpub`, {
+      method: 'POST',
+      headers: { Accept: 'application/json', 'Content-Type': 'application/json', ...xpubQueryAuthHeaders(opts?.xpubQueryToken) },
+      body: JSON.stringify(xpubQueryBody(xpub, addresses, opts?.standardXpub))
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
@@ -266,19 +270,12 @@ export async function fetchTransactionHistory (
   const root = baseUrl.replace(/\/+$/, '');
   const limit = Math.max(1, Math.min(100, count));
   const watchAddrs = watchAddresses(trimmedXpub, networkName, 50, opts?.standardXpub);
-  const params = new URLSearchParams();
-  params.set('xpub', trimmedXpub);
-  if (opts?.standardXpub) params.set('standardXpub', String(opts.standardXpub).trim());
-  params.set('limit', String(limit));
-  if (watchAddrs.length > 0) {
-    params.set('addresses', watchAddrs.join(','));
-  }
-
-  const path = `/services/bitcoin/xpub/transactions?${params.toString()}`;
 
   try {
-    const res = await fetchWithTimeout(`${root}${path}`, {
-      headers: { Accept: 'application/json', ...xpubQueryAuthHeaders(opts?.xpubQueryToken) }
+    const res = await fetchWithTimeout(`${root}/services/bitcoin/xpub/transactions`, {
+      method: 'POST',
+      headers: { Accept: 'application/json', 'Content-Type': 'application/json', ...xpubQueryAuthHeaders(opts?.xpubQueryToken) },
+      body: JSON.stringify({ ...xpubQueryBody(trimmedXpub, watchAddrs, opts?.standardXpub), limit })
     });
     if (!res.ok) {
       throw new Error(`HTTP ${res.status}`);
