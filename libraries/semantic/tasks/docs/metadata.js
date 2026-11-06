@@ -7,7 +7,7 @@ var
   // node dependencies
   console      = require('better-console'),
   fs           = require('fs'),
-  YAML         = require('yamljs')
+  YAML         = require('js-yaml')
 ;
 
 var data = {};
@@ -104,7 +104,7 @@ function parser(file, callback) {
 
 
     // Parse yaml.
-    meta = YAML.parse(yaml.join('\n'));
+    meta = YAML.load(yaml.join('\n'));
     if(meta && meta.type && meta.title && inArray(meta.type, categories) ) {
       meta.category = meta.type;
       meta.filename = filename;

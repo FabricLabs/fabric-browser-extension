@@ -79,14 +79,16 @@ function scheduleReconnect (): void {
   }, 5000);
 }
 
-function sendJsonCall (method: string, params: unknown[]): void {
-  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+function sendJsonCall (method: string, params: unknown[]): boolean {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return false;
   try {
     const msg = Message.fromVector(['JSONCall', JSON.stringify({ method, params })]);
     const buf = msg.toBuffer();
     ws.send(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength));
+    return true;
   } catch (err: unknown) {
     swallowNonFatal('mesh-jsoncall', err);
+    return false;
   }
 }
 
@@ -119,9 +121,35 @@ function sendSignal (toPeerId: string, signal: object): void {
   }]);
 }
 
-function relayFromWebRTC (originalType: string, originalBase64: string): void {
-  if (!localPeerId) return;
-  sendJsonCall('RelayFromWebRTC', [{
+const MAX_SEEN_FRAMES = 512;
+const seenFrames = new Set<string>();
+
+function frameKey (b64: string): string {
+  let a = 0x811c9dc5;
+  let b = 0x01000193;
+  for (let i = 0; i < b64.length; i++) {
+    const c = b64.charCodeAt(i);
+    a = Math.imul(a ^ c, 0x01000193) >>> 0;
+    b = Math.imul(b ^ c, 0x5bd1e995) >>> 0;
+  }
+  return `${b64.length}:${a.toString(16)}:${b.toString(16)}`;
+}
+
+/** True the first time a frame is seen; later copies (echoes, loops) are false. */
+function markFrameSeen (b64: string): boolean {
+  const key = frameKey(b64);
+  if (seenFrames.has(key)) return false;
+  seenFrames.add(key);
+  if (seenFrames.size > MAX_SEEN_FRAMES) {
+    const oldest = seenFrames.values().next().value;
+    if (oldest !== undefined) seenFrames.delete(oldest);
+  }
+  return true;
+}
+
+function relayFromWebRTC (originalType: string, originalBase64: string): boolean {
+  if (!localPeerId) return false;
+  return sendJsonCall('RelayFromWebRTC', [{
     fromPeerId: localPeerId,
     envelope: {
       original: originalBase64,
@@ -164,6 +192,7 @@ function attachDataChannel (peerId: string, dc: RTCDataChannel, entry: PeerEntry
           ? new Uint8Array(data)
           : new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
         const b64 = bufferToBase64(u8);
+        if (!markFrameSeen(b64)) return;
         // Prefer CONTRACT_MESSAGE / fabric-message fan-out to Hub → Fabric TCP.
         relayFromWebRTC('fabric-message', b64);
         const parsed = tryParseNotifiableFabricFrame(data);
@@ -184,7 +213,7 @@ function attachDataChannel (peerId: string, dc: RTCDataChannel, entry: PeerEntry
         } catch (_) {
           return;
         }
-        if (payload && payload.type === 'fabric-message' && typeof payload.data === 'string') {
+        if (payload && payload.type === 'fabric-message' && typeof payload.data === 'string' && markFrameSeen(payload.data)) {
           relayFromWebRTC('fabric-message', payload.data);
         }
       }
@@ -194,9 +223,10 @@ function attachDataChannel (peerId: string, dc: RTCDataChannel, entry: PeerEntry
   };
 }
 
-function ensurePeer (peerId: string, initiator: boolean): PeerEntry {
+function ensurePeer (peerId: string, initiator: boolean): PeerEntry | null {
   let entry = peers.get(peerId);
   if (entry) return entry;
+  if (peers.size >= MAX_MESH_PEERS) return null;
 
   const pc = createFabricPeerConnection();
   entry = {
@@ -262,13 +292,14 @@ async function handleIncomingSignal (fromPeerId: string, signal: Record<string, 
   if (!meta || meta.protocol !== FABRIC_WEBRTC_SIGNAL_PROTOCOL || !meta.sessionId) return;
 
   const entry = ensurePeer(fromPeerId, false);
+  if (!entry) return;
   if (meta.targetSessionId && meta.targetSessionId !== entry.localSessionId) return;
 
   entry.signalQueue = entry.signalQueue.then(async () => {
     const pc = entry.pc;
     if (signal.type === 'offer' && signal.sdp) {
       if (!entry.remoteSessionId || entry.remoteSessionId !== meta.sessionId) {
-        entry.remoteSessionId = meta.sessionId;
+        entry.remoteSessionId = meta.sessionId || null;
         entry.remoteSignalRevision = 0;
       }
       if (Number.isFinite(meta.revision)) {
@@ -445,8 +476,9 @@ export function startMeshSignaling (hubAddress: string): void {
 }
 
 /** @deprecated use ensurePeer via discovery; kept for PEER_ENSURE IPC */
-export function meshEnsurePeerConnection (peerId: string): RTCPeerConnection {
-  return ensurePeer(peerId, !!(localPeerId && localPeerId < peerId)).pc;
+export function meshEnsurePeerConnection (peerId: string): RTCPeerConnection | null {
+  const entry = ensurePeer(peerId, !!(localPeerId && localPeerId < peerId));
+  return entry ? entry.pc : null;
 }
 
 export function meshDropPeerConnection (peerId: string): void {
@@ -466,6 +498,7 @@ export function meshDropPeerConnection (peerId: string): void {
  */
 export function meshPublishFabricWire (wireBase64: string, originalType = 'fabric-message'): boolean {
   if (!wireBase64) return false;
+  markFrameSeen(wireBase64);
   let sent = 0;
   try {
     const raw = Uint8Array.from(atob(wireBase64), (c) => c.charCodeAt(0));
@@ -478,8 +511,8 @@ export function meshPublishFabricWire (wireBase64: string, originalType = 'fabri
   } catch (err: unknown) {
     swallowNonFatal('mesh-publish-dc', err);
   }
-  relayFromWebRTC(originalType, wireBase64);
-  return sent > 0 || !!localPeerId;
+  const hubSent = relayFromWebRTC(originalType, wireBase64);
+  return sent > 0 || hubSent;
 }
 
 /**

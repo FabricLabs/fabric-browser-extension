@@ -57,6 +57,7 @@ jobs:
         # Playwright `headless: true` uses chromium-headless-shell, which cannot.
         env:
           PLAYWRIGHT_CHROMIUM_USE_HEADLESS_SHELL: '0'
+          FABRIC_CORE: node_modules/@fabric/core
         run: xvfb-run --auto-servernum npm run report:coverage
 
       - name: Send coverage report

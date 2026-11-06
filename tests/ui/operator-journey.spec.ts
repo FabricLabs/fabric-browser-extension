@@ -19,38 +19,40 @@ test.describe('@fabric/passport operator journey (chained)', () => {
     const page = await context.newPage();
     try {
       await loginWithTestMnemonic(page, extensionId);
-      await expect(page.getByText('Loaded Identities')).toBeVisible();
+      await expect(page.getByText('Accounts', { exact: true })).toBeVisible();
 
+      await page.getByRole('button', { name: /^Wallet/ }).click();
       await page.getByRole('button', { name: /Receive/i }).click();
-      await expect(page.getByText(/Receive address \(BIP84|Could not derive an address/i)).toBeVisible({
+      await expect(page.getByText(/Receive address \(SegWit, BIP84|Could not derive an address/i)).toBeVisible({
         timeout: 15000
       });
-      await page.getByRole('button', { name: /Receive/i }).click();
+      await page.getByRole('button', { name: /^Back$/ }).click();
+      await expect(page.getByText('Accounts', { exact: true })).toBeVisible();
 
       await page.getByRole('button', { name: /Verify Message/i }).click();
       await expect(page.getByText('Verify message signature')).toBeVisible();
       await page.getByRole('button', { name: /^Go back$/i }).click();
-      await expect(page.getByText('Loaded Identities')).toBeVisible();
+      await expect(page.getByText('Accounts', { exact: true })).toBeVisible();
 
       await page.getByRole('button', { name: /Sign Message/i }).click();
       await expect(page.locator('.message .header').filter({ hasText: /^Sign Message$/ })).toBeVisible();
       await page.getByRole('button', { name: /^Go back$/i }).click();
-      await expect(page.getByText('Loaded Identities')).toBeVisible();
+      await expect(page.getByText('Accounts', { exact: true })).toBeVisible();
 
       await page.getByRole('button', { name: /^Settings$/ }).click();
       await expect(page.getByRole('heading', { name: /Fabric Nodes/i })).toBeVisible();
       await page.getByRole('button', { name: /^Back$/ }).click();
-      await expect(page.getByText('Loaded Identities')).toBeVisible();
+      await expect(page.getByText('Accounts', { exact: true })).toBeVisible();
 
-      await page.locator('.message').filter({ hasText: 'Loaded Identities' }).locator('.content .item').first().click();
+      await page.locator('.message').filter({ has: page.locator('.header', { hasText: /^Accounts$/ }) }).locator('.content .item').first().click();
       await expect(page.getByRole('heading', { name: /Balance/i })).toBeVisible();
       await page.getByRole('button', { name: /^Back$/ }).click();
-      await expect(page.getByText('Loaded Identities')).toBeVisible();
+      await expect(page.getByText('Accounts', { exact: true })).toBeVisible();
 
       await page.getByRole('button', { name: /^Logout$/ }).click();
       await expect(page.getByText('Log out?', { exact: true })).toBeVisible();
       await page.getByRole('button', { name: /^Cancel$/ }).click();
-      await expect(page.getByText('Loaded Identities')).toBeVisible();
+      await expect(page.getByText('Accounts', { exact: true })).toBeVisible();
     } finally {
       await page.close();
     }

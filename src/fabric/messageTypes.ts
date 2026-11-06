@@ -39,8 +39,8 @@ export const CONTRACT_WITHDRAWAL_WITNESS = 'ContractWithdrawalWitness' as const;
 export const MISSION_BROADCAST = 'MissionBroadcast' as const;
 export const MISSION_CREATED = 'MissionCreated' as const;
 
-export const DELEGATION_SIGNATURE_REQUEST = 'DELEGATION_SIGNATURE_REQUEST' as const;
-export const DELEGATION_SIGNATURE_RESOLUTION = 'DELEGATION_SIGNATURE_RESOLUTION' as const;
+/** A linked signer asks this Passport to sign (`DELEGATION_REQUEST`, shown as a notification). */
+export const DELEGATION_REQUEST = 'DelegationRequest' as const;
 
 export const TOMBSTONE = 'Tombstone' as const;
 export const DOCUMENT_OFFER = 'DOCUMENT_OFFER' as const;
@@ -69,6 +69,12 @@ export interface FabricMessageTypeDescriptor {
  */
 export const NOTIFICATION_WORTHY_TYPES: readonly FabricMessageTypeDescriptor[] = [
   {
+    type: DELEGATION_REQUEST,
+    label: 'Signature request from a linked signer',
+    notificationPriority: 'high',
+    icon: 'pencil alternate'
+  },
+  {
     type: FEDERATION_CONTRACT_INVITE,
     label: 'Group invitation (GoonCitizen)',
     notificationPriority: 'high',
@@ -94,12 +100,6 @@ export const NOTIFICATION_WORTHY_TYPES: readonly FabricMessageTypeDescriptor[] =
     label: 'Collaboration invitation',
     notificationPriority: 'high',
     icon: 'handshake outline'
-  },
-  {
-    type: DELEGATION_SIGNATURE_REQUEST,
-    label: 'Signature request',
-    notificationPriority: 'high',
-    icon: 'pencil alternate'
   },
   {
     type: MISSION_BROADCAST,

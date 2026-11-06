@@ -185,27 +185,28 @@ describe('Browser extension (Playwright + Mocha)', function () {
   });
 
   /** Run before opening `chrome-extension://` pages so MV3 startup order does not flake content-script injection. */
-  it('injects the content script (shared DOM marker; isolated from page JS)', async function () {
+  it('injects the content script (answers PASSPORT_HELLO on a transferred port; no DOM marker)', async function () {
     const page = await context.newPage();
     try {
       await page.goto(`${server.baseUrl}/test.html`, { waitUntil: 'load', timeout: 30000 });
-      let lastErr: Error | null = null;
+      let answer: unknown = null;
       for (let attempt = 0; attempt < 3; attempt++) {
-        try {
-          await page.waitForFunction(
-            () => document.documentElement?.getAttribute('data-fabric-passport') != null,
-            { timeout: 20000 }
-          );
-          lastErr = null;
-          break;
-        } catch (e) {
-          lastErr = e instanceof Error ? e : new Error(String(e));
-          await page.reload({ waitUntil: 'load', timeout: 30000 });
-        }
+        answer = await page.evaluate(() => new Promise((resolve) => {
+          const channel = new MessageChannel();
+          const timer = setTimeout(() => { channel.port1.close(); resolve(null); }, 20000);
+          channel.port1.onmessage = (event) => {
+            clearTimeout(timer);
+            channel.port1.close();
+            resolve(event.data);
+          };
+          window.postMessage({ source: 'fabric-site', type: 'PASSPORT_HELLO', v: 2 }, window.location.origin, [channel.port2]);
+        }));
+        if (answer) break;
+        await page.reload({ waitUntil: 'load', timeout: 30000 });
       }
-      if (lastErr) throw lastErr;
+      assert.deepStrictEqual(answer, { type: 'PASSPORT_HELLO', v: 2, peer: 3 });
       const attr = await page.evaluate(() => document.documentElement?.getAttribute('data-fabric-passport'));
-      assert.strictEqual(attr, extensionId);
+      assert.strictEqual(attr, null, 'Passport v2 writes nothing to the DOM');
     } finally {
       await page.close();
     }

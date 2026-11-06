@@ -19,7 +19,7 @@ var
 
   // admin dependencies
   flatten         = require('gulp-flatten'),
-  jsonEditor      = require('gulp-json-editor'),
+  jsonEditor      = require('../../json-editor'),
   plumber         = require('gulp-plumber'),
   rename          = require('gulp-rename'),
   replace         = require('gulp-replace'),
