@@ -11,13 +11,19 @@ import {
   FABRIC_RUNTIME_DELEGATE_SIGN_IN,
   FABRIC_RUNTIME_PASSPORT_ANSWER,
   FABRIC_RUNTIME_PASSPORT_CHALLENGE,
-  FABRIC_RUNTIME_PASSPORT_LIST
+  FABRIC_RUNTIME_PASSPORT_LIST,
+  FABRIC_RUNTIME_PASSPORT_PEER_AUTHORIZE,
+  FABRIC_RUNTIME_PASSPORT_PEER_CALL,
+  FABRIC_RUNTIME_PASSPORT_PEER_CLOSE,
+  FABRIC_RUNTIME_PASSPORT_PEER_CONNECT
 } from '../constants/siteLogin';
+import { authorizePeerRequest, callPeerSession, closePeerSession } from './passportPeerSessions';
 import {
   answerPassport,
   completeWithDelegate,
-  mayNotifySignIn,
   queuePassportChallenge,
+  surfaceSignIn,
+  queuePeerConnect,
   readPendingPassport
 } from './fabricSiteLoginRuntime';
 import {
@@ -106,6 +112,10 @@ export const CONTENT_SCRIPT_MESSAGES: ReadonlySet<string> = new Set([
   'FABRIC_HUB_REGISTER_MESH',
   'FABRIC_HUB_UNREGISTER_MESH',
   FABRIC_RUNTIME_PASSPORT_CHALLENGE,
+  FABRIC_RUNTIME_PASSPORT_PEER_CONNECT,
+  FABRIC_RUNTIME_PASSPORT_PEER_CALL,
+  FABRIC_RUNTIME_PASSPORT_PEER_AUTHORIZE,
+  FABRIC_RUNTIME_PASSPORT_PEER_CLOSE,
   FABRIC_RUNTIME_PAYMENT_REQUIRED
 ]);
 
@@ -500,24 +510,54 @@ export function handleFabricRuntimeMessage (
         sendResponse(queued);
         return;
       }
-      // No popup opens on its own (P-06): the notification and badge show the
-      // sign-in, and a click on either opens it.
-      try {
-        if (mayNotifySignIn(queued.row.origin)) chrome.notifications.create(`${SIGN_IN_NOTIFICATION_PREFIX}${queued.row.key}`, {
-          type: 'basic',
-          iconUrl: 'icons/icon128.png',
-          title: 'Sign-in request',
-          message: `${queued.row.origin} asks you to sign in. Click to review.`,
-          priority: 2
-        });
-      } catch (err: unknown) {
-        swallowNonFatal('passport-sign-in-notify', err);
-      }
+      // The page's click asked for this; open Passport's popup on that window,
+      // else a notification and the badge show it.
       void refreshBadge();
+      void surfaceSignIn(queued.row, sender.tab && sender.tab.windowId, SIGN_IN_NOTIFICATION_PREFIX);
       sendResponse({ ok: true });
     }).catch((e: unknown) => {
       sendResponse({ ok: false, error: String(e instanceof Error ? e.message : e) });
     });
+    return true;
+  }
+
+  /** Content script: a page asks to sign in to a peer; Passport connects and queues it for the popup. */
+  if (m.type === FABRIC_RUNTIME_PASSPORT_PEER_CONNECT && !fromExtension && sender.tab) {
+    void queuePeerConnect(m, sender).then((queued) => {
+      if (!queued.ok) {
+        sendResponse(queued);
+        return;
+      }
+      void refreshBadge();
+      void surfaceSignIn(queued.row, sender.tab && sender.tab.windowId, SIGN_IN_NOTIFICATION_PREFIX);
+      sendResponse({ ok: true });
+    }).catch((e: unknown) => {
+      sendResponse({ ok: false, error: String(e instanceof Error ? e.message : e) });
+    });
+    return true;
+  }
+
+  /** Content script: a page calls a peer as a session it opened (only that page's origin). */
+  if (m.type === FABRIC_RUNTIME_PASSPORT_PEER_CALL && !fromExtension && sender.tab) {
+    void callPeerSession(m, originOfSender(sender))
+      .then((out) => sendResponse(out))
+      .catch((e: unknown) => sendResponse({ ok: false, error: String(e instanceof Error ? e.message : e) }));
+    return true;
+  }
+
+  /** Content script: a page asks Passport to sign one HTTP request as its session (HTTP peers). */
+  if (m.type === FABRIC_RUNTIME_PASSPORT_PEER_AUTHORIZE && !fromExtension && sender.tab) {
+    void authorizePeerRequest(m, originOfSender(sender))
+      .then((out) => sendResponse(out))
+      .catch((e: unknown) => sendResponse({ ok: false, error: String(e instanceof Error ? e.message : e) }));
+    return true;
+  }
+
+  /** Content script: a page ends a session it opened. */
+  if (m.type === FABRIC_RUNTIME_PASSPORT_PEER_CLOSE && !fromExtension && sender.tab) {
+    void closePeerSession(m, originOfSender(sender))
+      .then((out) => sendResponse(out))
+      .catch((e: unknown) => sendResponse({ ok: false, error: String(e instanceof Error ? e.message : e) }));
     return true;
   }
 

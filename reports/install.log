@@ -3,7 +3,7 @@ npm warn deprecated clone-buffer@1.0.0: Package no longer supported. Contact Sup
 npm warn deprecated lodash.template@4.18.1: This package is deprecated. Use https://socket.dev/npm/package/eta instead.
 npm warn deprecated whatwg-encoding@2.0.0: Use @exodus/bytes instead for a more spec-conformant and faster implementation
 
-added 1227 packages, and audited 1228 packages in 53s
+added 1227 packages, and audited 1228 packages in 45s
 
 231 packages are looking for funding
   run `npm fund` for details

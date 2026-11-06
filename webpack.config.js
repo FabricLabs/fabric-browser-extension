@@ -35,12 +35,14 @@ function fabricCoreRoots () {
 /** Core tree for Passport sign-in and accounts (same order as `src/utils/loadFabricPassport.js`). */
 function resolveFabricPassportCoreRoot () {
   for (const root of fabricCoreRoots()) {
-    if (fs.existsSync(path.join(root, 'functions', 'passport.js')) && fs.existsSync(path.join(root, 'functions', 'accountKeys.js'))) {
+    const file = path.join(root, 'functions', 'passport.js');
+    if (fs.existsSync(file) && fs.existsSync(path.join(root, 'functions', 'accountKeys.js')) &&
+        fs.readFileSync(file, 'utf8').includes('createPeerChallenge')) {
       console.log(`[webpack] Passport core: ${root}`);
       return root;
     }
   }
-  throw new Error('Passport needs @fabric/core with functions/passport.js and functions/accountKeys.js (set FABRIC_CORE to a core checkout)');
+  throw new Error('Passport needs @fabric/core with functions/passport.js (peer sessions) and functions/accountKeys.js (set FABRIC_CORE to a core checkout)');
 }
 /** Core tree for named federations (same order as `src/utils/loadFabricFederation.js`). */
 function resolveFabricFederationCoreRoot () {

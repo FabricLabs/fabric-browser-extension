@@ -5,5 +5,7 @@ module.exports = {
   passport: require('fabric-passport-core/functions/passport'),
   accountKeys: require('fabric-passport-core/functions/accountKeys'),
   identitySchnorr: require('fabric-passport-core/functions/fabricIdentitySchnorr'),
-  Key: require('fabric-passport-core/types/key')
+  Key: require('fabric-passport-core/types/key'),
+  Message: require('fabric-passport-core/types/message'),
+  fabricUri: require('fabric-passport-core/functions/fabricUri')
 };

@@ -8,6 +8,9 @@
  *
  * The page never names its own origin here: callers pass the origin the browser
  * reported (`sender.origin`), and every challenge and assertion is bound to it.
+ *
+ * Peer sessions (v3) sign in to a peer named by its key instead; the page's
+ * origin is recorded, and the assertion's audience is the peer.
  */
 
 import { pairwiseIndex } from './siteIdentity';
@@ -127,6 +130,59 @@ export function readPageChallenge (
   };
 }
 
+/** Most endpoints a page may name for one peer. */
+export const MAX_PEER_ENDPOINTS = 8;
+
+export type PeerConnectRequest = {
+  endpoints: string[];
+  /** Compressed pubkey the page says the peer has, or null to learn it (trust on first use). */
+  peer: string | null;
+  request: PassportDisclosure[];
+  purpose: string | null;
+};
+
+/**
+ * `ws:` / `wss:` URLs (WebSocket peers) or `http:` / `https:` URLs (HTTP
+ * peers), at most {@link MAX_PEER_ENDPOINTS}.
+ */
+export function cleanPeerEndpoints (value: unknown): string[] {
+  const list = Array.isArray(value) ? value : [value];
+  const out: string[] = [];
+  for (const item of list) {
+    if (typeof item !== 'string' || item.length > 2048) continue;
+    try {
+      const url = new URL(item);
+      if (['ws:', 'wss:', 'http:', 'https:'].includes(url.protocol) && !url.username && !url.password && !out.includes(url.href)) out.push(url.href);
+    } catch {
+      // not a URL
+    }
+  }
+  return out.slice(0, MAX_PEER_ENDPOINTS);
+}
+
+/** Read a page's `PASSPORT_PEER_CONNECT`. The page's origin comes from the browser, not from here. */
+export function readPeerConnectRequest (m: Record<string, unknown>): Result<{ connect: PeerConnectRequest }> {
+  const endpoints = cleanPeerEndpoints(m.endpoints);
+  if (!endpoints.length) return { ok: false, error: 'no_endpoints' };
+  let peer: string | null = null;
+  if (m.peer != null && m.peer !== '') {
+    const text = String(m.peer).toLowerCase();
+    if (!/^0[23][0-9a-f]{64}$/.test(text)) return { ok: false, error: 'invalid_peer' };
+    peer = text;
+  }
+  const asked = Array.isArray(m.request) ? m.request.map(String) : [];
+  const request = (['wallet', 'cosigner'] as PassportDisclosure[]).filter((d) => asked.includes(d));
+  return { ok: true, connect: { endpoints, peer, request, purpose: sanitizeSitePurpose(m.purpose) } };
+}
+
+/**
+ * What a pairwise identity is scoped to: the site's origin, or for a peer
+ * sign-in the peer's key, so a peer sees one identity from every page.
+ */
+export function identityScope (row: { origin: string; peer?: string | null }): string {
+  return row.peer ? `fabric-peer:${row.peer}` : row.origin;
+}
+
 /** Keys of one (account, network) pair of the unlocked master (core `deriveAccount`). */
 export function deriveAccountKeys (masterXprv: string, pair: { account: number; network: string }): any {
   requireCore();
@@ -175,14 +231,20 @@ export function signPassportAssertion (params: {
   network: string;
   pairwise?: boolean;
   disclose?: PassportDisclosure[];
+  /** Peer sign-in: the peer's compressed pubkey (the audience). */
+  peer?: string | null;
+  /** Peer sign-in: the session key's compressed pubkey. */
+  sessionKey?: string | null;
   now?: number;
 }): { uri: string; identity: { id: string; pubkey: string }; network: string; disclosed: PassportDisclosure[]; expiresAt: number } {
   const keys = deriveAccountKeys(params.masterXprv, { account: params.account, network: params.network });
-  const signer = siteIdentityKey(params.masterXprv, params, params.origin, !!params.pairwise);
+  const signer = siteIdentityKey(params.masterXprv, params, identityScope(params), !!params.pairwise);
   const disclose = params.disclose || [];
   const signed = core.passport.signAssertion({
     challenge: params.challenge,
     origin: params.origin,
+    peer: params.peer || undefined,
+    sessionKey: params.sessionKey || undefined,
     signer: PASSPORT_SIGNER,
     network: keys.network,
     disclose,
@@ -206,6 +268,10 @@ export function signPassportAssertion (params: {
  */
 export function verifyPageAssertion (uri: unknown, expected: {
   origin: string;
+  /** Peer sign-in: the audience the assertion must name instead of the origin. */
+  peer?: string | null;
+  /** Peer sign-in: the session key the assertion must name. */
+  sessionKey?: string | null;
   nonce: string;
   challengeHash: string;
   challengeExpiresAt: number;
@@ -219,7 +285,8 @@ export function verifyPageAssertion (uri: unknown, expected: {
   if (!passportAvailable()) return { ok: false, error: 'passport_unavailable' };
   if (typeof uri !== 'string' || uri.length > MAX_PAGE_FABRIC_CHARS) return { ok: false, error: 'invalid assertion' };
   const verified = core.passport.verifyAssertion(uri, {
-    origin: expected.origin,
+    origin: expected.peer ? undefined : expected.origin,
+    peer: expected.peer || undefined,
     nonce: expected.nonce,
     challengeHash: expected.challengeHash,
     challengeExpiresAt: expected.challengeExpiresAt,
@@ -229,6 +296,9 @@ export function verifyPageAssertion (uri: unknown, expected: {
     now: expected.now
   });
   if (!verified.ok) return { ok: false, error: String(verified.error) };
+  if (expected.peer && String(verified.sessionKey || '') !== String(expected.sessionKey || '').toLowerCase()) {
+    return { ok: false, error: 'the assertion names another session key' };
+  }
   const pubkey = String(verified.identity.pubkey).toLowerCase();
   if (expected.pubkey && pubkey !== String(expected.pubkey).toLowerCase()) {
     return { ok: false, error: 'signed by a different key than the one linked' };

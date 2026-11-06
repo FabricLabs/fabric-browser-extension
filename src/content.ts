@@ -8,10 +8,23 @@ import {
 import {
   FABRIC_PASSPORT_PAGE_RESULT,
   FABRIC_RUNTIME_PASSPORT_CHALLENGE,
+  FABRIC_RUNTIME_PASSPORT_PEER_AUTHORIZE,
+  FABRIC_RUNTIME_PASSPORT_PEER_CALL,
+  FABRIC_RUNTIME_PASSPORT_PEER_CLOSE,
+  FABRIC_RUNTIME_PASSPORT_PEER_CONNECT,
   FABRIC_SITE_POSTMESSAGE_SOURCE,
   PASSPORT_ASSERTION,
   PASSPORT_CHALLENGE,
   PASSPORT_HELLO,
+  PASSPORT_PEER_AUTHORIZATION,
+  PASSPORT_PEER_AUTHORIZE,
+  PASSPORT_PEER_CALL,
+  PASSPORT_PEER_CLOSE,
+  PASSPORT_PEER_CLOSED,
+  PASSPORT_PEER_CONNECT,
+  PASSPORT_PEER_RESULT,
+  PASSPORT_PEER_PROTOCOL,
+  PASSPORT_PEER_SESSION,
   PASSPORT_PROTOCOL
 } from './constants/siteLogin';
 import { installFabric402FetchInterceptor } from './content/fabric402FetchPatch';
@@ -46,7 +59,7 @@ window.addEventListener('message', (event: MessageEvent) => {
   const port = event.ports && event.ports[0];
   if (!port) return;
   try {
-    port.postMessage({ type: PASSPORT_HELLO, v: PASSPORT_PROTOCOL });
+    port.postMessage({ type: PASSPORT_HELLO, v: PASSPORT_PROTOCOL, peer: PASSPORT_PEER_PROTOCOL });
     port.close();
   } catch (err: unknown) {
     swallowNonFatal('passport-hello', err);
@@ -94,12 +107,15 @@ window.addEventListener('message', (event: MessageEvent) => {
 const passportPorts = new Map<string, MessagePort>();
 const MAX_PASSPORT_CHALLENGE_CHARS = 48 * 1024;
 
-function settlePassportPort (requestId: string, payload: Record<string, unknown>): void {
+/** Port answer types the background may name for a pending request. */
+const PORT_TYPES = new Set([PASSPORT_ASSERTION, PASSPORT_PEER_SESSION]);
+
+function settlePassportPort (requestId: string, payload: Record<string, unknown>, type: string = PASSPORT_ASSERTION): void {
   const port = passportPorts.get(requestId);
   if (!port) return;
   passportPorts.delete(requestId);
   try {
-    port.postMessage({ type: PASSPORT_ASSERTION, ...payload });
+    port.postMessage({ type: PORT_TYPES.has(type) ? type : PASSPORT_ASSERTION, ...payload });
   } catch (err: unknown) {
     swallowNonFatal('passport-port-post', err);
   }
@@ -152,6 +168,78 @@ window.addEventListener('message', (event: MessageEvent) => {
   });
 });
 
+/**
+ * A page asks Passport to sign in to a peer by its key: `{ source:
+ * 'fabric-site', type: 'PASSPORT_PEER_CONNECT', endpoints, peer?, request?,
+ * purpose? }` with a port. Passport connects itself; the page gets only the
+ * session's public view on the port, never a token or key.
+ */
+window.addEventListener('message', (event: MessageEvent) => {
+  const data = event.data;
+  if (!data || data.source !== FABRIC_SITE_POSTMESSAGE_SOURCE || data.type !== PASSPORT_PEER_CONNECT) return;
+  if (event.source !== window || event.origin !== window.location.origin) return;
+  const port = event.ports && event.ports[0];
+  if (!port) return;
+  for (const id of [...passportPorts.keys()]) settlePassportPort(id, { ok: false, error: 'replaced' });
+  const requestId = randomRequestId();
+  passportPorts.set(requestId, port);
+  const fail = (error: string) => settlePassportPort(requestId, { ok: false, error }, PASSPORT_PEER_SESSION);
+  if (!(navigator.userActivation && navigator.userActivation.isActive)) {
+    fail('user_activation');
+    return;
+  }
+  chrome.runtime.sendMessage({
+    type: FABRIC_RUNTIME_PASSPORT_PEER_CONNECT,
+    requestId,
+    endpoints: Array.isArray(data.endpoints) ? data.endpoints.slice(0, 8).map(String) : [],
+    peer: typeof data.peer === 'string' ? data.peer : undefined,
+    request: Array.isArray(data.request) ? data.request.slice(0, 4).map(String) : [],
+    purpose: typeof data.purpose === 'string' ? data.purpose.slice(0, 280) : undefined
+  }).then((res) => {
+    if (!res || res.ok === false) fail(res && typeof res.error === 'string' ? res.error : 'passport_rejected');
+  }).catch((err: unknown) => {
+    swallowNonFatal('passport-peer-connect-runtime', err);
+    fail('passport_unavailable');
+  });
+});
+
+/**
+ * A page calls a peer as a session it opened, has Passport sign one HTTP
+ * request to it, or ends it. The background answers only for this frame's
+ * browser-reported origin; the answer goes to this request's port only.
+ */
+window.addEventListener('message', (event: MessageEvent) => {
+  const data = event.data;
+  if (!data || data.source !== FABRIC_SITE_POSTMESSAGE_SOURCE) return;
+  if (data.type !== PASSPORT_PEER_CALL && data.type !== PASSPORT_PEER_CLOSE && data.type !== PASSPORT_PEER_AUTHORIZE) return;
+  if (event.source !== window || event.origin !== window.location.origin) return;
+  const port = event.ports && event.ports[0];
+  if (!port) return;
+  const isCall = data.type === PASSPORT_PEER_CALL;
+  const isAuthorize = data.type === PASSPORT_PEER_AUTHORIZE;
+  const replyType = isCall ? PASSPORT_PEER_RESULT : isAuthorize ? PASSPORT_PEER_AUTHORIZATION : PASSPORT_PEER_CLOSED;
+  const reply = (payload: Record<string, unknown>) => {
+    try {
+      port.postMessage({ type: replyType, ...payload });
+      port.close();
+    } catch (err: unknown) {
+      swallowNonFatal('passport-peer-port', err);
+    }
+  };
+  const request = isCall
+    ? { type: FABRIC_RUNTIME_PASSPORT_PEER_CALL, sessionId: String(data.sessionId || ''), method: String(data.method || ''), params: Array.isArray(data.params) ? data.params : [] }
+    : isAuthorize
+      ? { type: FABRIC_RUNTIME_PASSPORT_PEER_AUTHORIZE, sessionId: String(data.sessionId || ''), url: String(data.url || ''), method: String(data.method || 'GET'), body: typeof data.body === 'string' ? data.body : '' }
+      : { type: FABRIC_RUNTIME_PASSPORT_PEER_CLOSE, sessionId: String(data.sessionId || '') };
+  chrome.runtime.sendMessage(request).then((res) => {
+    if (res && res.ok === true) reply(isCall ? { ok: true, result: res.result } : isAuthorize ? { ok: true, header: res.header } : { ok: true });
+    else reply({ ok: false, error: res && typeof res.error === 'string' ? res.error : 'passport_rejected' });
+  }).catch((err: unknown) => {
+    swallowNonFatal('passport-peer-call-runtime', err);
+    reply({ ok: false, error: 'passport_unavailable' });
+  });
+});
+
 // Listen for messages from the extension
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   const selfId = chrome.runtime.id;
@@ -165,13 +253,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
   if (message.type === FABRIC_PASSPORT_PAGE_RESULT) {
     if (sender.tab || message.origin !== window.location.origin || typeof message.requestId !== 'string') return undefined;
+    const portType = typeof message.portType === 'string' ? message.portType : PASSPORT_ASSERTION;
     if (message.ok === true && typeof message.assertion === 'string') {
-      settlePassportPort(message.requestId, { ok: true, assertion: message.assertion });
+      settlePassportPort(message.requestId, { ok: true, assertion: message.assertion }, portType);
+    } else if (message.ok === true && message.session && typeof message.session === 'object') {
+      settlePassportPort(message.requestId, { ok: true, session: message.session }, portType);
     } else {
       settlePassportPort(message.requestId, {
         ok: false,
         error: typeof message.error === 'string' ? message.error : 'passport_rejected'
-      });
+      }, portType);
     }
     return undefined;
   }

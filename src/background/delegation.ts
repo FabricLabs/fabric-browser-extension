@@ -608,13 +608,21 @@ export async function signInThrough (params: {
   origin: string;
   disclose: string[];
   expiresAt: number;
+  /** Peer sign-in: the session key the delegate's assertion must name. */
+  sessionKey?: string;
 }): Promise<{ ok: true; assertion: string; signer: LinkedSigner; device: string } | { ok: false; error: string }> {
   const who = await me();
   const signer = await signerFor(who, params.target);
   if (!signer) return { ok: false, error: 'that signer is not linked to this Passport' };
   let made: { uri: string; hash: string; expiresAt: number };
   try {
-    made = await who.d.request({ target: signer.pubkey, request: params.challenge, origin: params.origin, disclose: params.disclose });
+    made = await who.d.request({
+      target: signer.pubkey,
+      request: params.challenge,
+      origin: params.origin,
+      disclose: params.disclose,
+      sessionKey: params.sessionKey
+    });
   } catch (err: unknown) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }

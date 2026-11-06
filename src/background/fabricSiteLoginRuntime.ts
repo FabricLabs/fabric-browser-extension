@@ -13,24 +13,39 @@
  *   posts it on the page's port.
  * - One sign-in waits per origin: a newer challenge from the same site
  *   replaces the older one, whose page is told so.
+ * - Peer sign-ins (v3) queue the same way, but the challenge comes from the
+ *   peer over a socket Passport opened (`passportPeerSessions.ts`); once
+ *   signed, the assertion goes to the peer, and the page gets the session.
  */
 
 import {
   FABRIC_PASSPORT_PAGE_RESULT,
   FABRIC_PASSPORT_SEEN_NONCES_KEY,
-  FABRIC_PENDING_PASSPORT_KEY
+  FABRIC_PENDING_PASSPORT_KEY,
+  PASSPORT_ASSERTION,
+  PASSPORT_PEER_SESSION
 } from '../constants/siteLogin';
 import {
   DESKTOP_SIGNERS,
   PASSPORT_SIGNER,
+  isSignableSiteOrigin,
   originOfSender,
   originOfUrl,
   readPageChallenge,
+  readPeerConnectRequest,
   sanitizeSitePurpose,
   verifyPageAssertion,
   type PassportDisclosure
 } from '../utils/fabricSiteMessage';
 import { refreshBadge, signInThrough } from './delegation';
+import {
+  abandonPeerSignIn,
+  finishPeerSignIn,
+  holdSessionKey,
+  newSessionKey,
+  requestPeerChallenge,
+  type PeerSessionView
+} from './passportPeerSessions';
 import { swallowNonFatal } from '../utils/nonFatal';
 
 export type PendingPassportRow = {
@@ -51,6 +66,19 @@ export type PendingPassportRow = {
   siteAuthor: string | null;
   expiresAt: number;
   createdAt: number;
+  /** `peer`: a peer sign-in (v3); absent for a site sign-in. */
+  kind?: 'peer';
+  /** Peer sign-in: the peer's compressed pubkey (the audience). */
+  peer?: string | null;
+  /** Peer sign-in: whether the page named that key, or Passport learned it from the peer. */
+  peerNamed?: boolean;
+  /** Peer sign-in: origins the peer's signed challenge lists as its own. */
+  homes?: string[];
+  /** Peer sign-in: the session key's pubkey (its private key stays in the background). */
+  sessionKey?: string | null;
+  /** Peer sign-in: the socket the challenge came on. */
+  connId?: string;
+  endpoint?: string;
 };
 
 /** Most sign-ins waiting at once, over all tabs. */
@@ -109,6 +137,47 @@ export async function frameAncestorsOk (sender: chrome.runtime.MessageSender): P
 
 const NOTIFY_GAP_MS = 30_000;
 const lastSignInNotify = new Map<string, number>();
+
+/**
+ * Bring up the prompt for a sign-in the page just asked for. The page's
+ * request needed the user's click (`navigator.userActivation`), so Passport
+ * opens its own popup on that tab's window with `chrome.action.openPopup`
+ * (Chrome 127+). Where that isn't available or fails (another popup open, the
+ * window not focused), a notification (at most one per origin per
+ * {@link NOTIFY_GAP_MS}) and the badge show it, and a click opens it.
+ * @returns `popup`, `notification`, or `badge` (only the badge shows it).
+ */
+export async function surfaceSignIn (
+  row: { key: string; origin: string; kind?: 'peer' },
+  windowId: number | undefined,
+  notificationPrefix: string
+): Promise<'popup' | 'notification' | 'badge'> {
+  const action = (typeof chrome !== 'undefined' && chrome.action) as unknown as { openPopup?: (options?: { windowId?: number }) => Promise<void> } | undefined;
+  if (action && typeof action.openPopup === 'function') {
+    try {
+      await action.openPopup(typeof windowId === 'number' ? { windowId } : undefined);
+      return 'popup';
+    } catch (err: unknown) {
+      swallowNonFatal('passport-open-popup', err);
+    }
+  }
+  if (!mayNotifySignIn(row.origin)) return 'badge';
+  try {
+    chrome.notifications.create(`${notificationPrefix}${row.key}`, {
+      type: 'basic',
+      iconUrl: 'icons/icon128.png',
+      title: 'Sign-in request',
+      message: row.kind === 'peer'
+        ? `${row.origin} asks you to sign in to a Fabric peer. Click to review.`
+        : `${row.origin} asks you to sign in. Click to review.`,
+      priority: 2
+    });
+    return 'notification';
+  } catch (err: unknown) {
+    swallowNonFatal('passport-sign-in-notify', err);
+    return 'badge';
+  }
+}
 
 /** At most one sign-in notification per origin in this window. */
 export function mayNotifySignIn (origin: string, now: number = Date.now()): boolean {
@@ -253,9 +322,91 @@ export async function queuePassportChallenge (
     if (others.length >= MAX_PENDING_PASSPORT) return { ok: false as const, error: 'busy' };
     if (!(await claimNonce(row.nonce, row.expiresAt))) return { ok: false as const, error: 'challenge_replayed' };
     await writePendingPassport([...others, row]);
-    for (const old of replaced) deliverToPage(old, { ok: false, error: 'replaced' });
+    for (const old of replaced) {
+      deliverToPage(old, { ok: false, error: 'replaced' });
+      if (old.kind === 'peer') void abandonPeerSignIn(old);
+    }
     return { ok: true as const, row };
   });
+}
+
+/**
+ * A page asks Passport to sign in to a peer (`PASSPORT_PEER_CONNECT`):
+ * connect, read the peer's signed challenge, make a session key, and queue
+ * the sign-in for the popup like a site's.
+ * @param m Content-script message `{ requestId, endpoints, peer?, request?, purpose? }`.
+ */
+export async function queuePeerConnect (
+  m: Record<string, unknown>,
+  sender: chrome.runtime.MessageSender
+): Promise<{ ok: true; row: PendingPassportRow } | Fail> {
+  if (!sender.tab || typeof sender.tab.id !== 'number') return { ok: false, error: 'not_a_tab' };
+  const frame = checkSenderFrame(sender);
+  if (!frame.ok) return frame;
+  const origin = originOfSender(sender);
+  if (!origin) return { ok: false, error: 'origin_unknown' };
+  if (!isSignableSiteOrigin(origin)) return { ok: false, error: 'origin_not_signable' };
+  const requestId = typeof m.requestId === 'string' && /^[0-9a-f]{32}$/.test(m.requestId) ? m.requestId : '';
+  if (!requestId) return { ok: false, error: 'invalid_request' };
+  const asked = readPeerConnectRequest(m);
+  if (!asked.ok) return asked;
+  if (!(await frameAncestorsOk(sender))) return { ok: false, error: 'cross_origin_frame' };
+  const got = await requestPeerChallenge({
+    endpoints: asked.connect.endpoints,
+    peer: asked.connect.peer,
+    origin,
+    request: asked.connect.request
+  });
+  if (!got.ok) return got;
+  const c = got.challenge;
+  const sessionKey = newSessionKey();
+  const frameId = typeof sender.frameId === 'number' ? sender.frameId : 0;
+  const row: PendingPassportRow = {
+    key: `${sender.tab.id}:${frameId}`,
+    requestId,
+    tabId: sender.tab.id,
+    frameId,
+    tabTitle: sanitizeSitePurpose(sender.tab.title),
+    origin,
+    challenge: c.uri,
+    challengeHash: c.hash,
+    nonce: c.nonce,
+    purpose: sanitizeSitePurpose(c.purpose) || asked.connect.purpose,
+    network: c.network,
+    request: c.request as PassportDisclosure[],
+    siteAuthor: c.peer.slice(2),
+    expiresAt: c.expiresAt,
+    createdAt: Date.now(),
+    kind: 'peer',
+    peer: c.peer,
+    peerNamed: !!asked.connect.peer,
+    homes: c.homes,
+    sessionKey: sessionKey.pubkey,
+    connId: c.connId,
+    endpoint: c.endpoint
+  };
+  try {
+    await holdSessionKey(requestId, sessionKey.privateHex, row.expiresAt);
+  } catch (err: unknown) {
+    await abandonPeerSignIn(row);
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+  const queued = await serialized(async () => {
+    const rows = await readPendingPassport();
+    const replaced = rows.filter((r) => r.key !== row.key && r.origin === row.origin);
+    const sameFrame = rows.filter((r) => r.key === row.key);
+    const others = rows.filter((r) => r.key !== row.key && r.origin !== row.origin);
+    if (others.length >= MAX_PENDING_PASSPORT) return { ok: false as const, error: 'busy' };
+    if (!(await claimNonce(row.nonce, row.expiresAt))) return { ok: false as const, error: 'challenge_replayed' };
+    await writePendingPassport([...others, row]);
+    for (const old of [...replaced, ...sameFrame]) {
+      deliverToPage(old, { ok: false, error: 'replaced' });
+      if (old.kind === 'peer') void abandonPeerSignIn(old);
+    }
+    return { ok: true as const, row };
+  });
+  if (!queued.ok) await abandonPeerSignIn(row);
+  return queued;
 }
 
 async function takePending (key: string, requestId?: string): Promise<PendingPassportRow | null> {
@@ -273,9 +424,13 @@ async function peekPending (key: string, requestId?: string): Promise<PendingPas
 }
 
 /** Hand the result to the content script of that frame, which checks its origin and posts on the page's port. */
-export function deliverToPage (row: PendingPassportRow, payload: { ok: true; assertion: string } | { ok: false; error: string }): void {
+export function deliverToPage (
+  row: PendingPassportRow,
+  payload: { ok: true; assertion: string } | { ok: true; session: PeerSessionView } | { ok: false; error: string }
+): void {
   const message = {
     type: FABRIC_PASSPORT_PAGE_RESULT,
+    portType: row.kind === 'peer' ? PASSPORT_PEER_SESSION : PASSPORT_ASSERTION,
     origin: row.origin,
     requestId: row.requestId,
     ...payload
@@ -288,6 +443,8 @@ export function deliverToPage (row: PendingPassportRow, payload: { ok: true; ass
 function expectationsFor (row: PendingPassportRow) {
   return {
     origin: row.origin,
+    peer: row.kind === 'peer' ? row.peer || null : null,
+    sessionKey: row.kind === 'peer' ? row.sessionKey || null : null,
     nonce: row.nonce,
     challengeHash: row.challengeHash,
     challengeExpiresAt: row.expiresAt,
@@ -307,6 +464,7 @@ export async function answerPassport (m: Record<string, unknown>): Promise<{ ok:
     const row = await takePending(key, requestId);
     if (!row) return { ok: false, error: 'no pending sign-in' };
     deliverToPage(row, { ok: false, error: m.error === 'rejected' ? 'rejected' : 'cancelled' });
+    if (row.kind === 'peer') await abandonPeerSignIn(row);
     return { ok: true };
   }
   const row = await peekPending(key, requestId);
@@ -316,10 +474,23 @@ export async function answerPassport (m: Record<string, unknown>): Promise<{ ok:
   if (Date.now() >= row.expiresAt) {
     await takePending(row.key, row.requestId);
     deliverToPage(row, { ok: false, error: 'expired' });
+    if (row.kind === 'peer') await abandonPeerSignIn(row);
     return { ok: false, error: 'the sign-in expired' };
   }
   if (!(await takePending(row.key, row.requestId))) return { ok: false, error: 'no pending sign-in' };
+  if (row.kind === 'peer') return finishPeer(row, String(m.assertion), verified.assertion.disclosed);
   deliverToPage(row, { ok: true, assertion: String(m.assertion) });
+  return { ok: true };
+}
+
+/** Send a verified peer assertion on its socket; the page gets the session, or why not. */
+async function finishPeer (row: PendingPassportRow, assertion: string, disclosed: PassportDisclosure[]): Promise<{ ok: true } | Fail> {
+  const done = await finishPeerSignIn(row, assertion, disclosed);
+  if (!done.ok) {
+    deliverToPage(row, { ok: false, error: done.error });
+    return done;
+  }
+  deliverToPage(row, { ok: true, session: done.session });
   return { ok: true };
 }
 
@@ -341,7 +512,14 @@ export async function completeWithDelegate (m: Record<string, unknown>): Promise
   const disclose = (Array.isArray(m.disclose) ? m.disclose : []).map(String)
     .filter((d): d is PassportDisclosure => row.request.includes(d as PassportDisclosure));
 
-  const answered = await signInThrough({ target, challenge: row.challenge, origin: row.origin, disclose, expiresAt: row.expiresAt });
+  const answered = await signInThrough({
+    target,
+    challenge: row.challenge,
+    origin: row.origin,
+    disclose,
+    expiresAt: row.expiresAt,
+    sessionKey: row.kind === 'peer' ? row.sessionKey || undefined : undefined
+  });
   if (!answered.ok) return answered;
   if (answered.signer.network && row.network && answered.signer.network !== row.network) {
     return { ok: false, error: `${answered.signer.name} signs on ${answered.signer.network}` };
@@ -358,8 +536,10 @@ export async function completeWithDelegate (m: Record<string, unknown>): Promise
   if (!taken) return { ok: false, error: 'no pending sign-in' };
   if (Date.now() >= row.expiresAt) {
     deliverToPage(row, { ok: false, error: 'expired' });
+    if (row.kind === 'peer') await abandonPeerSignIn(row);
     return { ok: false, error: 'the sign-in expired' };
   }
+  if (row.kind === 'peer') return finishPeer(row, answered.assertion, verified.assertion.disclosed);
   deliverToPage(row, { ok: true, assertion: answered.assertion });
   return { ok: true };
 }
@@ -370,5 +550,6 @@ export async function dropTabPending (tabId: number): Promise<void> {
     const rows = await readPendingPassport();
     const next = rows.filter((r) => r.tabId !== tabId);
     if (next.length !== rows.length) await writePendingPassport(next);
+    for (const r of rows) if (r.tabId === tabId && r.kind === 'peer') void abandonPeerSignIn(r);
   });
 }

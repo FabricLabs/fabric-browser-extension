@@ -11,6 +11,7 @@ import {
 import {
   consentedDisclosures,
   describeDisclosures,
+  identityScope,
   sanitizeSitePurpose,
   shortKey,
   signPassportAssertion,
@@ -25,6 +26,7 @@ import {
 } from '../utils/fabricHubAllowlist';
 import { describeSite } from '../utils/siteIdentity';
 import { readSignedInSites, rememberSignIn, type SignedInSite } from '../utils/signedInSites';
+import { peerTrustStatus, readKnownPeers, rememberPeerSignIn, type KnownPeer, type PeerTrust } from '../utils/peerTrust';
 import type { PendingPassportRow } from '../background/fabricSiteLoginRuntime';
 import { passportSigners, useDelegationState } from './delegationApi';
 import SiteName from './SiteName';
@@ -89,6 +91,21 @@ export function defaultSiteIdentity (origin: string, sites: Record<string, Signe
   return 'pairwise';
 }
 
+/** What the prompt says about a peer, by {@link PeerTrust}. */
+export function peerTrustNotice (trust: PeerTrust, named: boolean): { tone: 'warning' | 'info' | null; text: string | null } {
+  if (trust === 'new_peer') {
+    return {
+      tone: 'warning',
+      text: named
+        ? 'Passport has never signed in to this peer. Check its key with whoever runs it before you approve.'
+        : 'Passport has never signed in to this peer, and the page did not say which key to expect. Check this key with whoever runs it before you approve.'
+    };
+  }
+  if (trust === 'new_site') return { tone: 'warning', text: 'You have signed in to this peer before, but never from this page.' };
+  if (trust === 'home') return { tone: 'info', text: 'The peer lists this page as one of its own.' };
+  return { tone: null, text: null };
+}
+
 /**
  * Approves Passport sign-ins queued by the background, oldest first. Signs
  * with this site's own identity (or the account identity) of the chosen
@@ -105,6 +122,8 @@ export default function SiteLoginPrompt (props: Props): React.ReactElement | nul
   const [error, setError] = useState<string | null>(null);
   const [choice, setChoice] = useState<string>('pairwise');
   const [sites, setSites] = useState<Record<string, SignedInSite>>({});
+  const [peers, setPeers] = useState<Record<string, KnownPeer>>({});
+  const [peerName, setPeerName] = useState('');
   const [gate, setGate] = useState<FabricHubGateOptions>({});
   const { state: delegation } = useDelegationState();
   const signers = useMemo(() => passportSigners(delegation), [delegation]);
@@ -144,15 +163,18 @@ export default function SiteLoginPrompt (props: Props): React.ReactElement | nul
     setTicked([]);
     setAccountIndex(current.account);
     setNetwork(pending.network || current.network);
+    setPeerName('');
     let cancelled = false;
     void Promise.all([
       masterXprv ? readSignedInSites(masterXprv).catch(() => ({})) : Promise.resolve({}),
-      loadFabricHubGateOptions()
-    ]).then(([found, g]) => {
+      loadFabricHubGateOptions(),
+      masterXprv ? readKnownPeers(masterXprv).catch(() => ({})) : Promise.resolve({})
+    ]).then(([found, g, knownPeers]) => {
       if (cancelled) return;
       setSites(found);
       setGate(g);
-      setChoice(defaultSiteIdentity(pending.origin, found, g));
+      setPeers(knownPeers as Record<string, KnownPeer>);
+      setChoice(pending.kind === 'peer' ? 'pairwise' : defaultSiteIdentity(pending.origin, found, g));
     });
     return () => { cancelled = true; };
   }, [pending?.key, pending?.requestId, masterXprv]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -160,7 +182,7 @@ export default function SiteLoginPrompt (props: Props): React.ReactElement | nul
   const identityPubkey = useCallback((pairwise: boolean): string | null => {
     if (!masterXprv || !pending) return null;
     try {
-      return siteIdentityKey(masterXprv, { account: accountIndex, network: effectiveNetwork }, pending.origin, pairwise).pubkey;
+      return siteIdentityKey(masterXprv, { account: accountIndex, network: effectiveNetwork }, identityScope(pending), pairwise).pubkey;
     } catch {
       return null;
     }
@@ -219,7 +241,8 @@ export default function SiteLoginPrompt (props: Props): React.ReactElement | nul
           setError((res && typeof res.error === 'string') ? res.error : `${signer.name} did not answer`);
           return;
         }
-        await rememberSignIn(masterXprv, pending.origin, 'linked').catch(() => undefined);
+        if (pending.kind === 'peer' && pending.peer) await rememberPeerSignIn(masterXprv, pending.peer, pending.origin, peerName || null).catch(() => undefined);
+        else await rememberSignIn(masterXprv, pending.origin, 'linked').catch(() => undefined);
       } else {
         const pairwise = choice !== 'main';
         const signed = signPassportAssertion({
@@ -229,14 +252,17 @@ export default function SiteLoginPrompt (props: Props): React.ReactElement | nul
           account: accountIndex,
           network: effectiveNetwork,
           pairwise,
-          disclose
+          disclose,
+          peer: pending.kind === 'peer' ? pending.peer : null,
+          sessionKey: pending.kind === 'peer' ? pending.sessionKey : null
         });
         const failure = await answer(pending, { ok: true, assertion: signed.uri });
         if (failure) {
           setError(failure);
           return;
         }
-        await rememberSignIn(masterXprv, pending.origin, pairwise ? 'pairwise' : 'main').catch(() => undefined);
+        if (pending.kind === 'peer' && pending.peer) await rememberPeerSignIn(masterXprv, pending.peer, pending.origin, peerName || null).catch(() => undefined);
+        else await rememberSignIn(masterXprv, pending.origin, pairwise ? 'pairwise' : 'main').catch(() => undefined);
       }
       pull();
     } catch (e: unknown) {
@@ -245,7 +271,7 @@ export default function SiteLoginPrompt (props: Props): React.ReactElement | nul
       setWaitingOn(null);
       setBusy(false);
     }
-  }, [pending, armed, masterXprv, needsUnlock, ticked, signers, choice, accountIndex, effectiveNetwork, answer, pull]);
+  }, [pending, armed, masterXprv, needsUnlock, ticked, signers, choice, accountIndex, effectiveNetwork, answer, pull, peerName]);
 
   const unlock = useCallback(async () => {
     if (!onUnlock) return;
@@ -264,16 +290,49 @@ export default function SiteLoginPrompt (props: Props): React.ReactElement | nul
   const usingSigner = choice !== 'main' && choice !== 'pairwise';
   const ownKey = identityPubkey(true);
   const mainKey = identityPubkey(false);
+  const isPeer = pending.kind === 'peer' && !!pending.peer;
+  const knownPeer = isPeer ? peers[String(pending.peer)] : undefined;
+  const trust = isPeer ? peerTrustStatus(peers, String(pending.peer), pending.origin, pending.homes || []) : null;
+  const notice = trust ? peerTrustNotice(trust, !!pending.peerNamed) : null;
+  const peerLabel = knownPeer && knownPeer.name ? knownPeer.name : `peer ${shortKey(pending.peer)}`;
 
   return (
     <Modal open size="small" closeOnDimmerClick={false}>
-      <Modal.Header>Sign in to {site ? site.registrable : pending.origin}</Modal.Header>
+      <Modal.Header>Sign in to {isPeer ? peerLabel : (site ? site.registrable : pending.origin)}</Modal.Header>
       <Modal.Content>
-        <p>
-          This site is asking you to sign in with Fabric. The answer works only
-          for this site and expires in minutes. Approve only if you started this
-          sign-in.
-        </p>
+        {isPeer ? (
+          <p>
+            A page is asking you to sign in to a Fabric peer. Passport has
+            connected to the peer and checked its key; the session stays in
+            Passport, and only that page can use it. Approve only if you
+            started this sign-in.
+          </p>
+        ) : (
+          <p>
+            This site is asking you to sign in with Fabric. The answer works only
+            for this site and expires in minutes. Approve only if you started this
+            sign-in.
+          </p>
+        )}
+        {isPeer ? (
+          <Message size="small" warning={notice?.tone === 'warning'} info={notice?.tone === 'info'}>
+            <div><strong>Peer key</strong> <code title={String(pending.peer)}>{shortKey(pending.peer)}</code>{knownPeer && knownPeer.name ? ` (${knownPeer.name})` : ''}</div>
+            <div><strong>Page</strong> {pending.origin}</div>
+            {pending.endpoint ? <div style={{ fontSize: '0.85em' }}>Connected to {pending.endpoint}</div> : null}
+            {notice && notice.text ? <p style={{ marginTop: '0.5em' }}>{notice.text}</p> : null}
+          </Message>
+        ) : null}
+        {isPeer && trust === 'new_peer' ? (
+          <Form.Field>
+            <Input
+              placeholder="Name this peer (optional)"
+              value={peerName}
+              maxLength={64}
+              onChange={(e) => setPeerName(e.target.value)}
+              fluid
+            />
+          </Form.Field>
+        ) : null}
         {!masterXprv && onUnlock ? (
           <Form onSubmit={() => void unlock()}>
             <Form.Field>
@@ -288,7 +347,7 @@ export default function SiteLoginPrompt (props: Props): React.ReactElement | nul
             </Form.Field>
           </Form>
         ) : null}
-        {site ? <SiteName site={site} /> : null}
+        {site && !isPeer ? <SiteName site={site} /> : null}
         {pending.tabTitle ? <p style={{ fontSize: '0.85em' }}>Tab: {pending.tabTitle}</p> : null}
         {purpose ? (
           <p>
@@ -304,7 +363,7 @@ export default function SiteLoginPrompt (props: Props): React.ReactElement | nul
           <Form.Field><label>Sign in as</label></Form.Field>
           <Form.Field>
             <Radio
-              label={`A separate identity for this site${ownKey ? ` (${shortKey(ownKey)})` : ''}`}
+              label={`A separate identity for this ${isPeer ? 'peer' : 'site'}${ownKey ? ` (${shortKey(ownKey)})` : ''}`}
               name="passport-signer"
               value="pairwise"
               checked={choice === 'pairwise'}
@@ -378,7 +437,7 @@ export default function SiteLoginPrompt (props: Props): React.ReactElement | nul
           ) : null}
         </Form>
         <Message size="small">
-          <strong>This site will see</strong>
+          <strong>{isPeer ? 'This peer will see' : 'This site will see'}</strong>
           <ul style={{ margin: '0.5em 0 0' }}>
             {describeDisclosures(disclose).map((line) => <li key={line}>{line}</li>)}
           </ul>
