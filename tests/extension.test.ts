@@ -204,7 +204,7 @@ describe('Browser extension (Playwright + Mocha)', function () {
         if (answer) break;
         await page.reload({ waitUntil: 'load', timeout: 30000 });
       }
-      assert.deepStrictEqual(answer, { type: 'PASSPORT_HELLO', v: 2 });
+      assert.deepStrictEqual(answer, { type: 'PASSPORT_HELLO', v: 2, peer: 3 });
       const attr = await page.evaluate(() => document.documentElement?.getAttribute('data-fabric-passport'));
       assert.strictEqual(attr, null, 'Passport v2 writes nothing to the DOM');
     } finally {

@@ -68,6 +68,8 @@ window.addEventListener('message', (event: MessageEvent) => {
 
 /** Hub (or dev) page asks the extension to keep WebRTC signaling alive after the tab closes. */
 window.addEventListener('message', (event: MessageEvent) => {
+  // Only this page itself, never a frame inside it posting up under its own origin.
+  if (event.source !== window || event.origin !== window.location.origin) return;
   const data = event.data;
   if (!data || data.source !== FABRIC_HUB_POSTMESSAGE_SOURCE || typeof data.type !== 'string') return;
 

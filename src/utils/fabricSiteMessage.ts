@@ -141,9 +141,17 @@ export type PeerConnectRequest = {
   purpose: string | null;
 };
 
+/** @private Loopback hosts, where a plaintext endpoint never crosses a network. */
+function isLoopbackHost (hostname: string): boolean {
+  const host = hostname.replace(/^\[|\]$/g, '').toLowerCase();
+  return host === 'localhost' || host === '::1' || /^127(?:\.\d{1,3}){3}$/.test(host);
+}
+
 /**
- * `ws:` / `wss:` URLs (WebSocket peers) or `http:` / `https:` URLs (HTTP
- * peers), at most {@link MAX_PEER_ENDPOINTS}.
+ * `wss:` URLs (WebSocket peers) or `https:` URLs (HTTP peers), at most
+ * {@link MAX_PEER_ENDPOINTS}. Plaintext `ws:` / `http:` only on loopback:
+ * elsewhere anyone on the path could stand in for a peer the page didn't name
+ * and read what the user shares.
  */
 export function cleanPeerEndpoints (value: unknown): string[] {
   const list = Array.isArray(value) ? value : [value];
@@ -152,7 +160,9 @@ export function cleanPeerEndpoints (value: unknown): string[] {
     if (typeof item !== 'string' || item.length > 2048) continue;
     try {
       const url = new URL(item);
-      if (['ws:', 'wss:', 'http:', 'https:'].includes(url.protocol) && !url.username && !url.password && !out.includes(url.href)) out.push(url.href);
+      const secure = url.protocol === 'wss:' || url.protocol === 'https:';
+      const plain = url.protocol === 'ws:' || url.protocol === 'http:';
+      if ((secure || (plain && isLoopbackHost(url.hostname))) && !url.username && !url.password && !out.includes(url.href)) out.push(url.href);
     } catch {
       // not a URL
     }

@@ -367,8 +367,9 @@ export async function requestPeerChallenge (params: {
   let conn: Conn;
   try {
     conn = await openPeerConnection(params.endpoints);
-  } catch (err: unknown) {
-    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  } catch {
+    // One answer for every failure: a page must not learn which hosts and ports answer.
+    return { ok: false, error: 'peer_unreachable' };
   }
   try {
     const connect = core.passport.createConnect({ peer: params.peer || undefined, origin: params.origin, request: params.request });

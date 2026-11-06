@@ -65,6 +65,14 @@ describe('Passport peer sessions', function () {
       assert.deepStrictEqual(readPeerConnectRequest({ endpoints: [] }), { ok: false, error: 'no_endpoints' });
       assert.deepStrictEqual(readPeerConnectRequest({ endpoints: ['wss://x.example'], peer: 'nope' }), { ok: false, error: 'invalid_peer' });
     });
+
+    it('takes plaintext endpoints only on loopback', function () {
+      assert.deepStrictEqual(
+        cleanPeerEndpoints(['ws://hub.example', 'http://192.168.1.1:8080', 'ws://127.0.0.1.evil.example', 'ws://localhost:7777', 'http://[::1]:8080', 'http://127.0.0.2:9000']),
+        ['ws://localhost:7777/', 'http://[::1]:8080/', 'http://127.0.0.2:9000/']
+      );
+      assert.deepStrictEqual(readPeerConnectRequest({ endpoints: ['ws://hub.example'] }), { ok: false, error: 'no_endpoints' });
+    });
   });
 
   describe('trust', function () {

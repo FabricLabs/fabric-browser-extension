@@ -4,8 +4,9 @@
  * Bitcoin wallet service for Fabric Passport.
  *
  * Uses a Fabric node's `/services/bitcoin` HTTP API as a block-explorer and wallet backend.
- * Keys never leave the extension; only xpub-derived watch addresses are sent for balance lookups
- * (`GET …/services/bitcoin/xpub?xpub=…&addresses=…`).
+ * Private keys never leave the extension. Balance lookups send the account xpub and its first
+ * watch addresses to the node in a POST body (`POST …/services/bitcoin/xpub`), never in the URL;
+ * the node can link every address of that account.
  *
  * Compatible with any Fabric node that exposes the standard Bitcoin service surface
  * (hub.fabric.pub, local `node scripts/hub.js`, or any `@fabric/http` instance with Bitcoin enabled).
