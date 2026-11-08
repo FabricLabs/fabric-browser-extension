@@ -226,6 +226,29 @@ describe('Browser extension (Playwright + Mocha)', function () {
     }
   });
 
+  it('never renders the popup inside a website frame', async function () {
+    const page = await context.newPage();
+    try {
+      await page.goto(`${server.baseUrl}/test.html`, { waitUntil: 'load', timeout: 30000 });
+      await page.evaluate((src) => new Promise<void>((resolve) => {
+        const frame = document.createElement('iframe');
+        frame.src = src;
+        frame.onload = () => resolve();
+        document.body.appendChild(frame);
+        setTimeout(resolve, 3000);
+      }), `chrome-extension://${extensionId}/popup.html`);
+      for (const frame of page.frames().filter((f) => f !== page.mainFrame())) {
+        const rendered = await frame.evaluate(() => {
+          const root = document.getElementById('fabric-root');
+          return !!(root && root.children.length);
+        }).catch(() => false);
+        assert.strictEqual(rendered, false, `popup rendered in a frame at ${frame.url()}`);
+      }
+    } finally {
+      await page.close();
+    }
+  });
+
   it('serves the dev harness API used by FABRIC_ACTION (Node check; SW async reply is not asserted here)', async function () {
     const u = new URL('/api/endpoint', server.nodeBaseUrl).href;
     const body: unknown = await new Promise((resolve, reject) => {

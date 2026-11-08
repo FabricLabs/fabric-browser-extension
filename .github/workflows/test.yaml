@@ -39,7 +39,7 @@ jobs:
           path: ~/.cache/ms-playwright
           key: ${{ runner.os }}-playwright-${{ hashFiles('package-lock.json') }}
 
-      # Node 26.12.1 bundles npm 11; package.json engines and .npmrc allow-git need npm 12.
+      # Node 26.13.0 bundles npm 11; package.json engines and .npmrc allow-git need npm 12.
       - name: Install npm 12
         run: npm install -g npm@12.2.1
 

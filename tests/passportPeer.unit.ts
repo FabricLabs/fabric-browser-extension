@@ -39,6 +39,24 @@ function record (extra: Partial<PeerSessionRecord> = {}): PeerSessionRecord {
 }
 
 describe('Passport peer sessions', function () {
+  it('treats an extension page framed inside a website as a stranger', function () {
+    const g = globalThis as any;
+    const before = g.chrome;
+    g.chrome = Object.assign({}, before || {}, { runtime: Object.assign({}, (before && before.runtime) || {}, { id: 'ext', getURL: (p: string) => `chrome-extension://ext/${p}` }) });
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const { isExtensionPage } = require('../src/background/fabricBackgroundRuntimeMessages');
+      const page = 'chrome-extension://ext/popup.html';
+      assert.strictEqual(isExtensionPage({ id: 'ext', url: page }), true, 'the action popup');
+      assert.strictEqual(isExtensionPage({ id: 'ext', url: page, frameId: 0, tab: { url: page } }), true, 'the popup window');
+      assert.strictEqual(isExtensionPage({ id: 'ext', url: page, frameId: 3, tab: { url: 'https://evil.example/' } }), false, 'framed by a website');
+      assert.strictEqual(isExtensionPage({ id: 'ext', url: page, frameId: 0, tab: { url: 'https://evil.example/' } }), false);
+      assert.strictEqual(isExtensionPage({ id: 'other', url: page }), false);
+    } finally {
+      g.chrome = before;
+    }
+  });
+
   it('the background accepts every runtime message the content script sends', function () {
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const fs = require('fs');

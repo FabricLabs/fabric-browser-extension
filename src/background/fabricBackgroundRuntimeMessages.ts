@@ -124,6 +124,11 @@ export function isExtensionPage (sender: chrome.runtime.MessageSender): boolean 
   if (!sender || sender.id !== chrome.runtime.id) return false;
   const own = chrome.runtime.getURL('');
   const from = typeof sender.url === 'string' ? sender.url : '';
+  if (sender.tab) {
+    // An extension page framed inside a website is not the extension's own page.
+    if (typeof sender.frameId === 'number' && sender.frameId !== 0) return false;
+    if (typeof sender.tab.url === 'string' && sender.tab.url && !sender.tab.url.startsWith(own)) return false;
+  }
   if (from) return from.startsWith(own);
   return !sender.tab;
 }

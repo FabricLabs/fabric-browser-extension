@@ -405,7 +405,7 @@ function cursorKey (who: Me, origin: string): string {
 
 async function pollMailbox (who: Me, origin: string): Promise<number> {
   const since = Number(await fabricDsGet<number>(cursorKey(who, origin))) || 0;
-  const proof = dcore.delegation.createMailboxFetch({ since }, who.keys.identity.key);
+  const proof = dcore.delegation.createMailboxFetch({ origin, purpose: 'delegation-mailbox', since }, who.keys.identity.key);
   const out = await fetchMailbox(origin, proof.uri);
   if (!out.ok) return 0;
   const frames = Array.isArray(out.frames) ? out.frames as Array<{ frame: string; seq: number }> : [];
@@ -986,7 +986,7 @@ export async function cancelPairing (): Promise<{ ok: true }> {
     if (p.rendezvous && p.linkId) {
       try {
         const who = await me();
-        const proof = dcore.delegation.createMailboxFetch({}, who.keys.identity.key);
+        const proof = dcore.delegation.createMailboxFetch({ origin: p.rendezvous, purpose: 'delegation-cancel' }, who.keys.identity.key);
         await cancelLink(p.rendezvous, p.linkId, proof.uri);
       } catch (err: unknown) {
         swallowNonFatal('delegation-cancel-link', err);

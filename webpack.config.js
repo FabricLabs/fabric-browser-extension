@@ -191,8 +191,8 @@ module.exports = (env, argv) => {
           test: /\.css$/,
           oneOf: [
             {
-              // Keep @fabric/http semantic bundle untouched; it embeds data: font URLs.
-              // Include realpath (npm link) as well as the node_modules path.
+              // Leave the @fabric/http bundle's url()s alone: they point at themes/fabric/,
+              // copied to css/themes below. Include realpath (npm link) as well as the node_modules path.
               include: FABRIC_HTTP_ASSETS_ALIASES,
               use: [
                 MiniCssExtractPlugin.loader,
@@ -210,7 +210,6 @@ module.exports = (env, argv) => {
                 'css-loader'
               ],
               include: [
-                path.join(__dirname, 'node_modules/semantic-ui-css'),
                 path.join(__dirname, 'assets')
               ]
             }
@@ -225,9 +224,6 @@ module.exports = (env, argv) => {
           ],
           include: [
             path.join(__dirname, 'src')
-          ],
-          exclude: [
-            path.join(__dirname, 'node_modules/semantic-ui-css')
           ]
         },
         {

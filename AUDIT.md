@@ -65,15 +65,10 @@ Peer documents: [`@fabric/core` AUDIT.md](https://github.com/FabricLabs/fabric/b
    records. Parallels Hub `docs/OUTSTANDING.md` blocker #3 (at-rest identity KDF).
 3. **`npm audit` is clean, partly through overrides.** The 2026-11-01 pass
    bumped the toolchain (webpack 5.112, webpack-dev-server 6, copy-webpack-plugin
-   14, Playwright 1.64, sinon 22, sharp 0.35, gulp 5) and replaced unmaintained
-   Semantic UI build plugins: `@fomantic/gulp-concat-css` and
-   `@fomantic/gulp-dedupe` for the originals, small local helpers in
-   `libraries/semantic/tasks/` for `gulp-if` (`pipe-if.js`) and
-   `gulp-json-editor` (`json-editor.js`), `del` 8, and `js-yaml` for `yamljs`.
-   gulp 5 returns one brace glob in directory order and decodes sources as
-   UTF-8, so the build reads components in order (`ordered-src.js`) and copies
-   fonts and images with `encoding: false`; the packaged `semantic.min.css`
-   and `semantic.js` come out byte-identical to the gulp 4 build. Overrides in
+   14, Playwright 1.64, sinon 22, sharp 0.35). There is no Semantic UI build
+   here any more: the popup bundles `@fabric/http`'s prebuilt Fomantic CSS and
+   copies its `themes/`, so the vendored `libraries/semantic`, its Gulp
+   plugins, and `semantic-ui-css` are gone. Overrides in
    `package.json` (root-only in npm, so they repeat core's and http's):
    | Override | Reason | Drop when |
    |----------|--------|-----------|

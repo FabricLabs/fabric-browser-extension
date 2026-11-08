@@ -17,10 +17,23 @@
  */
 
 import { Buffer } from 'buffer';
+import { Psbt, Transaction } from 'bitcoinjs-lib';
 import { swallowNonFatal } from '../utils/nonFatal';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const core = require('../utils/loadFabricFederation');
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const dcore = require('../utils/loadFabricDelegation');
+
+/** The txid a withdrawal PSBT's transaction has once signed, or null. */
+function unsignedTxid (psbtBase64: string): string | null {
+  try {
+    const unsigned = (Psbt.fromBase64(String(psbtBase64 || '')).data.globalMap.unsignedTx as any).toBuffer();
+    return Transaction.fromBuffer(unsigned).getId();
+  } catch (_) {
+    return null;
+  }
+}
 
 export type WithdrawalSignature = { pubkey: string; leafHash: string; signature: string };
 
@@ -191,8 +204,7 @@ export class FederationMember {
     let received = 0;
     let rejected = 0;
     for (let page = 0; page < 20; page++) {
-      const q = `pubkey=${encodeURIComponent(this.pubkey)}&since=${this.state.cursor}`;
-      const data = await this.request('GET', `/services/federations/messages?${q}`);
+      const data = await this.request('GET', '/services/federations/messages', undefined, { 'X-Fabric-Mailbox': this.mailboxProof() });
       for (const m of Array.isArray(data.messages) ? data.messages : []) {
         try {
           if (this.receive(String(m.fabric || ''))) received++;
@@ -303,8 +315,11 @@ export class FederationMember {
       const w = record.withdrawals[String(body.requestId || '').toLowerCase()];
       if (!w || w.status === 'broadcast') return false;
       if (!/^[0-9a-f]{64}$/i.test(String(body.txid || ''))) throw new Error('broadcast notice without a txid');
+      // Witnesses don't change a txid, so the request's own PSBT names the only spend a notice may report.
+      const txid = String(body.txid).toLowerCase();
+      if (unsignedTxid(w.psbtBase64) !== txid) throw new Error('broadcast notice names another transaction than this withdrawal');
       w.status = 'broadcast';
-      w.txid = String(body.txid).toLowerCase();
+      w.txid = txid;
       w.error = null;
       return true;
     }
@@ -490,7 +505,15 @@ export class FederationMember {
     return uri;
   }
 
-  private async request (method: 'GET' | 'POST', path: string, body?: object): Promise<any> {
+  /** A one-time mailbox read for this key, good only on this Hub (signed `DELEGATION_MAILBOX_FETCH`). */
+  private mailboxProof (): string {
+    const d = dcore && dcore.delegation;
+    if (!d || !d.MAILBOX_FETCH_PURPOSES) throw new Error('reading the Hub mailbox needs a newer @fabric/core in this build');
+    const origin = new URL(this.hubBase).origin;
+    return d.createMailboxFetch({ origin, purpose: d.MAILBOX_FETCH_PURPOSES.federation, since: this.state.cursor }, this.key).uri;
+  }
+
+  private async request (method: 'GET' | 'POST', path: string, body?: object, extraHeaders: Record<string, string> = {}): Promise<any> {
     const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
     let timer: ReturnType<typeof setTimeout> | null = null;
     const timeout = new Promise<never>((_resolve, reject) => {
@@ -502,7 +525,7 @@ export class FederationMember {
     try {
       const res = await Promise.race([this.fetchImpl(`${this.hubBase}${path}`, {
         method,
-        headers: body ? { Accept: 'application/json', 'Content-Type': 'application/json' } : { Accept: 'application/json' },
+        headers: Object.assign(body ? { Accept: 'application/json', 'Content-Type': 'application/json' } : { Accept: 'application/json' }, extraHeaders),
         body: body ? JSON.stringify(body) : undefined,
         cache: 'no-store',
         signal: controller ? controller.signal : undefined

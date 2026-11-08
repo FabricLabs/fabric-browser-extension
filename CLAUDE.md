@@ -76,14 +76,13 @@ graph TD
   - sass 1.71.1
   - sass-loader 14.1.0
   - css-loader 6.10.0
-  - semantic-ui-css 2.5.0
+  - Semantic UI (Fomantic) CSS + fabric theme from `@fabric/http`
 
 ### Development Tools
 - Mocha 11.1.0 (Testing)
 - Playwright 1.52.0 (Browser Testing)
 - c8 10.1.3 (Code Coverage)
 - TypeScript 5.3.3
-- Various Gulp plugins for Semantic UI building
 
 ## Project Structure
 ```
@@ -95,14 +94,13 @@ fabric-browser-extension/
 │   ├── UIElements/        # React components
 │   └── types/             # TypeScript definitions
 ├── assets/                # Built extension files
-├── libraries/             # Third-party libraries
 └── tests/                # Test files
 ```
 
 ## Build Process
 1. TypeScript files are compiled and bundled using Webpack
 2. React components are processed through Babel
-3. Semantic UI themes are compiled using Gulp
+3. Semantic UI CSS and the fabric theme come prebuilt from `@fabric/http`
 4. Static assets are copied to the build directory
 5. Source maps are generated for development builds
 6. Final extension package is created in the assets directory
