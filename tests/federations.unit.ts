@@ -6,6 +6,8 @@ import { FederationMember, federationsAvailable } from '../src/services/federati
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const core = require('../src/utils/loadFabricFederation');
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const dcore = require('../src/utils/loadFabricDelegation');
 
 /** bitcoinjs-lib of the same core tree (v7: bigint output values). */
 function coreBitcoin (): any {
@@ -24,6 +26,7 @@ function fakeHub (opts: { member?: boolean } = {}) {
   const descriptors = new Map<string, any>();
   const coins = new Map<string, Array<{ txid: string; vout: number; amountSats: number; txHex: string }>>();
   const sent: string[] = [];
+  const spent = new Set<string>();
   let seq = 0;
 
   function record (uri: string) {
@@ -65,8 +68,13 @@ function fakeHub (opts: { member?: boolean } = {}) {
         return reply(200, { duplicate: false });
       }
       if (u.pathname === '/services/federations/messages') {
-        const x = String(u.searchParams.get('pubkey')).slice(2);
-        const since = Number(u.searchParams.get('since')) || 0;
+        const headers = init.headers || {};
+        const read = dcore.delegation.readMailboxFetch(String(headers['X-Fabric-Mailbox'] || ''), { origin: u.origin, purpose: 'federation-mailbox' });
+        if (!read.ok || u.searchParams.has('pubkey')) return reply(401, { message: read.error || 'signed mailbox read required' });
+        if (spent.has(read.nonce)) return reply(409, { message: 'mailbox proof already used' });
+        spent.add(read.nonce);
+        const x = String(read.pubkey).slice(2);
+        const since = Number(read.since) || 0;
         const messages = frames.filter((f) => f.seq > since && core.Federation.isValidator(descriptors.get(f.federationId), x));
         return reply(200, { messages, next: seq, more: false });
       }
@@ -138,6 +146,47 @@ describe('Passport federation member', () => {
     assert.strictEqual(again.list().length, 1);
   });
 
+  it('reads its mailbox only with a proof signed for the Hub it asks', async () => {
+    const hub = fakeHub();
+    const alice = new FederationMember({ hubBase: 'https://hub.example', privateKeyHex: priv(), fetch: hub.fetch });
+    const bob = new FederationMember({ hubBase: 'https://hub.example', privateKeyHex: priv(), fetch: hub.fetch });
+    const created = await alice.create({ name: 'Bound reads', threshold: 2, members: [bob.pubkey] });
+
+    // A proof made for another Hub is refused, and so is a bare ?pubkey=.
+    const elsewhere = (url: string, init: any = {}) => hub.fetch(url.replace('https://hub.example', 'https://other.example'), init);
+    const misrouted = new FederationMember({ hubBase: 'https://hub.example', privateKeyHex: priv(), fetch: elsewhere });
+    await assert.rejects(() => misrouted.sync(), /another origin/);
+    const bare = await hub.fetch(`https://hub.example/services/federations/messages?pubkey=${bob.pubkey}`, { method: 'GET' });
+    assert.strictEqual(bare.status, 401);
+
+    await bob.sync();
+    assert.deepStrictEqual(bob.pendingInvites().map((r) => r.id), [created.id]);
+  });
+
+  it('answers a linked signer\'s invite and withdrawal from the frames alone', async () => {
+    const hub = fakeHub();
+    const alice = new FederationMember({ hubBase: 'https://hub.example', privateKeyHex: priv(), fetch: hub.fetch });
+    const bob = new FederationMember({ hubBase: 'https://hub.example', privateKeyHex: priv(), fetch: hub.fetch });
+    const created = await alice.create({ name: 'Linked signers', threshold: 2, members: [bob.pubkey] });
+    assert.match(created.invite, /^fabric:/);
+
+    const joined = await bob.answerDelegated(created.invite);
+    assert.match(joined, /^fabric:/);
+    assert.strictEqual(bob.get(created.id)!.status, 'accepted');
+    await assert.rejects(alice.answerDelegated(created.invite), /you created/);
+
+    hub.fund(created.id, 60000);
+    const w = await alice.requestWithdrawal(created.id, { destinationAddress: coreDest(), amountSats: 20000, feeSats: 400 });
+    const request = hub.frames.map((f) => f.fabric).find((uri) => {
+      const d = core.fabricUri.decodeFabricUri(uri, { allowedTypes: ['CONTRACT_MESSAGE'] });
+      return JSON.parse(d.message.data).type === core.Federation.MESSAGE_TYPES.withdrawal;
+    })!;
+    await bob.sync();
+    await bob.answerDelegated(request);
+    assert.strictEqual(hub.sent.length, 1);
+    assert.strictEqual(bob.get(created.id)!.withdrawals[w.requestId].status, 'broadcast');
+  });
+
   it('leaves broadcasting to a member Hub', async () => {
     const hub = fakeHub({ member: true });
     const alice = new FederationMember({ hubBase: 'https://hub.example', privateKeyHex: priv(), fetch: hub.fetch });
@@ -153,6 +202,22 @@ describe('Passport federation member', () => {
     await bob.approve(created.id, w.requestId);
     assert.strictEqual(hub.sent.length, 0);
     assert.strictEqual(bob.get(created.id)!.withdrawals[w.requestId].status, 'pending');
+  });
+
+  it('ignores a broadcast notice for a transaction other than the withdrawal', async () => {
+    const hub = fakeHub();
+    const alice = new FederationMember({ hubBase: 'https://hub.example', privateKeyHex: priv(), fetch: hub.fetch });
+    const bob = new FederationMember({ hubBase: 'https://hub.example', privateKeyHex: priv(), fetch: hub.fetch });
+    const created = await alice.create({ threshold: 2, members: [bob.pubkey] });
+    await bob.sync();
+    await bob.respond(created.id, true);
+    hub.fund(created.id, 100000);
+    const w = await alice.requestWithdrawal(created.id, { destinationAddress: coreDest(), amountSats: 40000, feeSats: 500 });
+    await bob.sync();
+    await (bob as any).post(core.Federation.broadcastMessage(created.id, w.requestId, 'ab'.repeat(32))).catch(() => null);
+    const read = await alice.sync();
+    assert.ok(read.rejected >= 1);
+    assert.strictEqual(alice.get(created.id)!.withdrawals[w.requestId].status, 'pending');
   });
 
   it('keeps a sent withdrawal as broadcast when the notice post fails', async () => {
@@ -181,8 +246,39 @@ describe('Passport federation member', () => {
     assert.strictEqual(mine.status, 'broadcast');
     assert.match(String(mine.txid), /^[0-9a-f]{64}$/);
     assert.match(String(mine.error), /broadcast notice failed/);
+    assert.strictEqual(mine.noticePending, true);
     await bob.sync();
     assert.strictEqual(hub.sent.length, 1);
+    assert.strictEqual(mine.noticePending, false);
+    assert.strictEqual(mine.error, null);
+    await alice.sync();
+    const theirs = alice.get(created.id)!.withdrawals[w.requestId];
+    assert.strictEqual(theirs.status, 'broadcast');
+    assert.strictEqual(theirs.txid, mine.txid);
+  });
+
+  it('keeps a withdrawal pending when the Hub reports a different txid', async () => {
+    const hub = fakeHub();
+    const fetch = async (url: string, init: any = {}) => {
+      const res = await hub.fetch(url, init);
+      if (init.method === 'POST' && /\/transactions$/.test(new URL(url).pathname)) {
+        return { ok: true, status: 200, json: async () => ({ txid: 'ff'.repeat(32) }) };
+      }
+      return res;
+    };
+    const alice = new FederationMember({ hubBase: 'https://hub.example', privateKeyHex: priv(), fetch: hub.fetch });
+    const bob = new FederationMember({ hubBase: 'https://hub.example', privateKeyHex: priv(), fetch });
+    const created = await alice.create({ threshold: 2, members: [bob.pubkey] });
+    await bob.sync();
+    await bob.respond(created.id, true);
+    hub.fund(created.id, 100000);
+    const w = await alice.requestWithdrawal(created.id, { destinationAddress: coreDest(), amountSats: 40000, feeSats: 500 });
+    await bob.sync();
+    await bob.approve(created.id, w.requestId);
+    const mine = bob.get(created.id)!.withdrawals[w.requestId];
+    assert.strictEqual(mine.status, 'pending');
+    assert.strictEqual(mine.txid, null);
+    assert.match(String(mine.error), /the Hub reported txid/);
   });
 
   it('refuses frames that do not check out', async () => {

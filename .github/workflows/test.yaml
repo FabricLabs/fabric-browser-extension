@@ -39,7 +39,7 @@ jobs:
           path: ~/.cache/ms-playwright
           key: ${{ runner.os }}-playwright-${{ hashFiles('package-lock.json') }}
 
-      # Node 26.12.1 bundles npm 11; package.json engines and .npmrc allow-git need npm 12.
+      # Node 26.13.0 bundles npm 11; package.json engines and .npmrc allow-git need npm 12.
       - name: Install npm 12
         run: npm install -g npm@12.2.1
 
@@ -57,6 +57,7 @@ jobs:
         # Playwright `headless: true` uses chromium-headless-shell, which cannot.
         env:
           PLAYWRIGHT_CHROMIUM_USE_HEADLESS_SHELL: '0'
+          FABRIC_CORE: node_modules/@fabric/core
         run: xvfb-run --auto-servernum npm run report:coverage
 
       - name: Send coverage report

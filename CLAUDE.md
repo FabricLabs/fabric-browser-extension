@@ -76,14 +76,13 @@ graph TD
   - sass 1.71.1
   - sass-loader 14.1.0
   - css-loader 6.10.0
-  - semantic-ui-css 2.5.0
+  - Semantic UI (Fomantic) CSS + fabric theme from `@fabric/http`
 
 ### Development Tools
 - Mocha 11.1.0 (Testing)
 - Playwright 1.52.0 (Browser Testing)
 - c8 10.1.3 (Code Coverage)
 - TypeScript 5.3.3
-- Various Gulp plugins for Semantic UI building
 
 ## Project Structure
 ```
@@ -95,14 +94,13 @@ fabric-browser-extension/
 │   ├── UIElements/        # React components
 │   └── types/             # TypeScript definitions
 ├── assets/                # Built extension files
-├── libraries/             # Third-party libraries
 └── tests/                # Test files
 ```
 
 ## Build Process
 1. TypeScript files are compiled and bundled using Webpack
 2. React components are processed through Babel
-3. Semantic UI themes are compiled using Gulp
+3. Semantic UI CSS and the fabric theme come prebuilt from `@fabric/http`
 4. Static assets are copied to the build directory
 5. Source maps are generated for development builds
 6. Final extension package is created in the assets directory
@@ -119,3 +117,8 @@ fabric-browser-extension/
 - Secure key derivation
 - Protected storage of sensitive data
 - Chain-specific security settings
+## Fabric ecosystem workflow (shared)
+This repo is **5 of 6 — @fabric/passport (depends on core, http)** in the Fabric dependency order. Before installing or testing, read [docs/agents/](docs/agents/README.md):
+- **Install** with `npm run report:install` (fresh lock, latest Git pins; log in `reports/install.log`).
+- **Strictly serial:** one install or test run at a time across all Fabric repos, top down (core → http → discord → hub → passport → star-citizen). Stop on upstream failure.
+- **Consolidate** into common APIs; Core messaging stays free of HTTP, HTTP is an adapter ([API_CONSOLIDATION.md](docs/agents/API_CONSOLIDATION.md)).

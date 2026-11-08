@@ -21,18 +21,16 @@ test.describe('@fabric/passport Settings (deep)', () => {
       await expect(page.getByRole('heading', { name: /^Identity Management$/i, level: 4 })).toBeVisible();
       await expect(page.getByText('Auto-Lock Timer', { exact: true })).toBeVisible();
       await expect(page.getByText(/Lock wallet after inactivity/i)).toBeVisible();
-      await expect(page.getByText('Default Derivation Path', { exact: true })).toBeVisible();
-      await expect(page.locator('label').filter({ hasText: /BIP32 derivation path/i })).toBeVisible();
-      const bip32Field = page.locator('.field').filter({ hasText: 'BIP32 derivation path' });
-      await expect(bip32Field.locator('input').first()).toBeDisabled();
+      await expect(page.getByText('Lock now', { exact: true })).toBeVisible();
+      await expect(page.getByRole('button', { name: /^Lock Passport$/ })).toBeVisible();
 
       await expect(page.getByRole('heading', { name: /^Bitcoin Nodes$/i, level: 4 })).toBeVisible();
       await expect(page.getByRole('heading', { name: /^Fabric Nodes$/i, level: 4 })).toBeVisible();
       await expect(page.getByText(/WebRTC data channels use the Hub WebSocket/i)).toBeVisible();
 
-      await expect(page.getByRole('heading', { name: /^Security$/i, level: 4 })).toBeVisible();
+      await expect(page.getByRole('heading', { name: /^Security & privacy$/i, level: 4 }).first()).toBeVisible();
       await expect(page.getByText('Backup & Restore', { exact: true })).toBeVisible();
-      await expect(page.getByRole('button', { name: /^Export Wallet$/ })).toBeVisible();
+      await expect(page.getByRole('button', { name: /^Export Backup$/ })).toBeVisible();
       await expect(page.getByText('Clear All Data', { exact: true })).toBeVisible();
 
       await expect(page.getByRole('heading', { name: /^About$/i, level: 4 })).toBeVisible();
@@ -42,14 +40,14 @@ test.describe('@fabric/passport Settings (deep)', () => {
       await page.getByRole('button', { name: /^Clear Data$/ }).click();
       await expect(page.getByText('Erase all extension data?', { exact: true })).toBeVisible();
       await expect(
-        page.getByText(/This removes all identities, encrypted signing material, and stored settings/i)
+        page.getByText(/This removes your Passport \(the sealed master key and every account\)/i)
       ).toBeVisible();
       await page.getByRole('button', { name: /^Cancel$/ }).click();
       await expect(page.getByText('Erase all extension data?', { exact: true })).not.toBeVisible();
       await expect(page.locator('.message .header').filter({ hasText: /^Settings$/ })).toBeVisible();
 
       await page.getByRole('button', { name: /^Back$/ }).click();
-      await expect(page.getByText('Loaded Identities')).toBeVisible();
+      await expect(page.getByText('Accounts', { exact: true })).toBeVisible();
     } finally {
       await page.close();
     }

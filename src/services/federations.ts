@@ -17,9 +17,23 @@
  */
 
 import { Buffer } from 'buffer';
+import { Psbt, Transaction } from 'bitcoinjs-lib';
+import { swallowNonFatal } from '../utils/nonFatal';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const core = require('../utils/loadFabricFederation');
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const dcore = require('../utils/loadFabricDelegation');
+
+/** The txid a withdrawal PSBT's transaction has once signed, or null. */
+function unsignedTxid (psbtBase64: string): string | null {
+  try {
+    const unsigned = (Psbt.fromBase64(String(psbtBase64 || '')).data.globalMap.unsignedTx as any).toBuffer();
+    return Transaction.fromBuffer(unsigned).getId();
+  } catch (_) {
+    return null;
+  }
+}
 
 export type WithdrawalSignature = { pubkey: string; leafHash: string; signature: string };
 
@@ -39,6 +53,8 @@ export interface FederationWithdrawal {
   status: 'pending' | 'broadcast';
   txid: string | null;
   error: string | null;
+  /** On chain, but the other members have not been told yet. */
+  noticePending?: boolean;
   at: number;
 }
 
@@ -80,6 +96,8 @@ export interface FederationVault {
   balanceSats: number;
   utxos: Array<{ txid: string; vout: number; amountSats: number; txHex?: string }>;
 }
+
+const REQUEST_TIMEOUT_MS = 20_000;
 
 type FetchLike = (url: string, init?: any) => Promise<{ ok: boolean; status: number; json: () => Promise<any> }>;
 
@@ -186,8 +204,7 @@ export class FederationMember {
     let received = 0;
     let rejected = 0;
     for (let page = 0; page < 20; page++) {
-      const q = `pubkey=${encodeURIComponent(this.pubkey)}&since=${this.state.cursor}`;
-      const data = await this.request('GET', `/services/federations/messages?${q}`);
+      const data = await this.request('GET', '/services/federations/messages', undefined, { 'X-Fabric-Mailbox': this.mailboxProof() });
       for (const m of Array.isArray(data.messages) ? data.messages : []) {
         try {
           if (this.receive(String(m.fabric || ''))) received++;
@@ -202,6 +219,7 @@ export class FederationMember {
     for (const record of this.list()) {
       for (const w of Object.values(record.withdrawals)) {
         if (w.status === 'pending') await this.maybeFinalize(record, w);
+        else if (w.noticePending) await this.sendBroadcastNotice(record, w);
       }
     }
     return { received, rejected };
@@ -297,8 +315,11 @@ export class FederationMember {
       const w = record.withdrawals[String(body.requestId || '').toLowerCase()];
       if (!w || w.status === 'broadcast') return false;
       if (!/^[0-9a-f]{64}$/i.test(String(body.txid || ''))) throw new Error('broadcast notice without a txid');
+      // Witnesses don't change a txid, so the request's own PSBT names the only spend a notice may report.
+      const txid = String(body.txid).toLowerCase();
+      if (unsignedTxid(w.psbtBase64) !== txid) throw new Error('broadcast notice names another transaction than this withdrawal');
       w.status = 'broadcast';
-      w.txid = String(body.txid).toLowerCase();
+      w.txid = txid;
       w.error = null;
       return true;
     }
@@ -307,9 +328,10 @@ export class FederationMember {
 
   /**
    * Create a federation of this identity and `members` (compressed pubkeys),
-   * optionally with the mailbox Hub as a member, and invite them.
+   * optionally with the mailbox Hub as a member, and invite them. `invite` is
+   * the signed invitation frame, for asking linked signers directly.
    */
-  async create (opts: { name?: string; threshold: number; members: string[]; includeHub?: boolean }): Promise<FederationRecord> {
+  async create (opts: { name?: string; threshold: number; members: string[]; includeHub?: boolean }): Promise<FederationRecord & { invite: string }> {
     const hub = await this.hub();
     const validators = [this.pubkey, ...(opts.members || []).map((m) => String(m || '').trim().toLowerCase()).filter(Boolean)];
     if (opts.includeHub) {
@@ -329,8 +351,8 @@ export class FederationMember {
       url: (opts.includeHub && pubkey === hub.pubkey) ? this.hubBase : null
     }));
     const body = core.Federation.inviteMessage({ descriptor, name: opts.name ? String(opts.name).trim().slice(0, 120) : null, members: hints });
-    await this.post(body);
-    return this.state.records[body.federationId];
+    const invite = await this.post(body);
+    return { ...this.state.records[body.federationId], invite };
   }
 
   async respond (federationId: string, accept: boolean): Promise<FederationRecord> {
@@ -409,19 +431,29 @@ export class FederationMember {
       });
       const done = core.Federation.finalizeWithdrawal({ descriptor: record.descriptor, psbtBase64: merged.psbtBase64 });
       const sent = await this.request('POST', `/services/federations/${record.id}/transactions`, { txHex: done.txHex });
-      const txid = String(sent.txid || done.txid).toLowerCase();
+      const txid = String(done.txid).toLowerCase();
+      if (sent.txid && String(sent.txid).toLowerCase() !== txid) {
+        throw new Error(`the Hub reported txid ${sent.txid}, but the signed transaction is ${txid}`);
+      }
       w.status = 'broadcast';
       w.txid = txid;
       w.error = null;
-      try {
-        await this.post(core.Federation.broadcastMessage(record.id, w.requestId, txid));
-      } catch (err: unknown) {
-        w.error = `sent, but the broadcast notice failed: ${err instanceof Error ? err.message : String(err)}`;
-      }
+      w.noticePending = true;
+      await this.sendBroadcastNotice(record, w);
       return true;
     } catch (err: unknown) {
       w.error = err instanceof Error ? err.message : String(err);
       return false;
+    }
+  }
+
+  private async sendBroadcastNotice (record: FederationRecord, w: FederationWithdrawal): Promise<void> {
+    try {
+      await this.post(core.Federation.broadcastMessage(record.id, w.requestId, w.txid));
+      w.noticePending = false;
+      w.error = null;
+    } catch (err: unknown) {
+      w.error = `sent, but the broadcast notice failed: ${err instanceof Error ? err.message : String(err)}`;
     }
   }
 
@@ -431,27 +463,104 @@ export class FederationMember {
     return record;
   }
 
-  /** Sign a body, hand it to the Hub, and apply it here. */
-  private async post (body: object): Promise<void> {
+  /**
+   * Answer a linked signer's federation request (a `DELEGATION_REQUEST` with
+   * scope `federation`): join the shared wallet an invite names, or sign the
+   * withdrawal it asks for. Returns the signed answer frame, which also goes
+   * to the Hub like any member message.
+   */
+  async answerDelegated (innerUri: string): Promise<string> {
+    const T = messageTypes();
+    const decoded = core.fabricUri.decodeFabricUri(innerUri, { allowedTypes: ['CONTRACT_MESSAGE'] });
+    if (!decoded || !decoded.ok || !decoded.signed || !decoded.author) throw new Error('not a signed federation message');
+    const body = JSON.parse(String(decoded.message.data || ''));
+    this.receive(innerUri);
+    if (body.type === T.invite) {
+      const descriptor = core.Federation.verifyInvite(body, String(decoded.author).toLowerCase());
+      const record = this.require(core.Federation.descriptorId(descriptor));
+      if (record.publisher.slice(2) === this.xonly) throw new Error('you created this shared wallet');
+      return this.post(core.Federation.responseMessage(record.id, true));
+    }
+    if (body.type === T.withdrawal) {
+      const record = this.require(String(body.federationId || ''));
+      if (record.status !== 'accepted') throw new Error('join this shared wallet first');
+      const w = record.withdrawals[String(body.requestId || '').toLowerCase()];
+      if (!w) throw new Error('unknown withdrawal request');
+      if (w.status !== 'pending') throw new Error('this withdrawal is already on chain');
+      const signed = core.Federation.signWithdrawal({ psbtBase64: w.psbtBase64, privateKey: this.secret });
+      const uri = await this.post(core.Federation.signatureMessage(record.id, w.requestId, signed.signatures));
+      await this.maybeFinalize(record, w);
+      return uri;
+    }
+    throw new Error('Passport answers shared-wallet invitations and withdrawals only');
+  }
+
+  /** Sign a body, hand it to the Hub, apply it here, and return the frame. */
+  private async post (body: object): Promise<string> {
     const msg = core.Message.fromVector(['CONTRACT_MESSAGE', JSON.stringify(body)]);
     msg.signWithKey(this.key);
     const uri = core.fabricUri.encodeFabricUri(msg);
     await this.request('POST', '/services/federations/messages', { fabric: uri });
     this.receive(uri);
+    return uri;
   }
 
-  private async request (method: 'GET' | 'POST', path: string, body?: object): Promise<any> {
-    const res = await this.fetchImpl(`${this.hubBase}${path}`, {
-      method,
-      headers: body ? { Accept: 'application/json', 'Content-Type': 'application/json' } : { Accept: 'application/json' },
-      body: body ? JSON.stringify(body) : undefined,
-      cache: 'no-store'
+  /** A one-time mailbox read for this key, good only on this Hub (signed `DELEGATION_MAILBOX_FETCH`). */
+  private mailboxProof (): string {
+    const d = dcore && dcore.delegation;
+    if (!d || !d.MAILBOX_FETCH_PURPOSES) throw new Error('reading the Hub mailbox needs a newer @fabric/core in this build');
+    const origin = new URL(this.hubBase).origin;
+    return d.createMailboxFetch({ origin, purpose: d.MAILBOX_FETCH_PURPOSES.federation, since: this.state.cursor }, this.key).uri;
+  }
+
+  private async request (method: 'GET' | 'POST', path: string, body?: object, extraHeaders: Record<string, string> = {}): Promise<any> {
+    const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const timeout = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => {
+        if (controller) controller.abort();
+        reject(new Error(`the Hub did not answer within ${REQUEST_TIMEOUT_MS / 1000}s`));
+      }, REQUEST_TIMEOUT_MS);
     });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) {
-      if (res.status === 404 && /^\/services\/federations(\?|$)/.test(path)) throw new Error('this Hub does not carry federations');
-      throw new Error(data && data.message ? String(data.message) : `Hub answered HTTP ${res.status}`);
+    try {
+      const res = await Promise.race([this.fetchImpl(`${this.hubBase}${path}`, {
+        method,
+        headers: Object.assign(body ? { Accept: 'application/json', 'Content-Type': 'application/json' } : { Accept: 'application/json' }, extraHeaders),
+        body: body ? JSON.stringify(body) : undefined,
+        cache: 'no-store',
+        signal: controller ? controller.signal : undefined
+      }), timeout]);
+      const data = await Promise.race([res.json().catch(() => ({})), timeout]);
+      if (!res.ok) {
+        if (res.status === 404 && /^\/services\/federations(\?|$)/.test(path)) throw new Error('this Hub does not carry federations');
+        throw new Error(data && data.message ? String(data.message) : `Hub answered HTTP ${res.status}`);
+      }
+      return data;
+    } finally {
+      if (timer) clearTimeout(timer);
     }
-    return data;
+  }
+}
+
+const STORAGE_PREFIX = 'fabric_federations:';
+
+/** The member for this cosigner key on `hubBase`, with its saved state. */
+export async function loadFederationMember (hubBase: string, privateKeyHex: string): Promise<FederationMember> {
+  const probe = new FederationMember({ hubBase, privateKeyHex });
+  let state: FederationMemberState | null = null;
+  try {
+    const got = await chrome.storage.local.get(STORAGE_PREFIX + probe.pubkey);
+    state = ((got && got[STORAGE_PREFIX + probe.pubkey]) as FederationMemberState | undefined) || null;
+  } catch (err: unknown) {
+    swallowNonFatal('federations-load', err);
+  }
+  return state ? new FederationMember({ hubBase, privateKeyHex, state }) : probe;
+}
+
+export async function saveFederationMember (member: FederationMember): Promise<void> {
+  try {
+    await chrome.storage.local.set({ [STORAGE_PREFIX + member.pubkey]: member.export() });
+  } catch (err: unknown) {
+    swallowNonFatal('federations-save', err);
   }
 }

@@ -29,8 +29,19 @@ describe('Chrome Web Store listing pack', function () {
     permissions: string[];
     host_permissions: string[];
     content_scripts?: Array<{ matches?: string[] }>;
-    web_accessible_resources?: Array<{ matches?: string[] }>;
+    web_accessible_resources?: Array<{ matches?: string[], resources?: string[] }>;
+    content_security_policy?: { extension_pages?: string };
   };
+
+  it('no website can frame or load the approval pages', function () {
+    const exposed = ([] as string[]).concat(...(manifest.web_accessible_resources || []).map((r) => r.resources || []));
+    for (const page of ['popup.html', 'js/*', 'css/*']) assert.ok(!exposed.includes(page), `${page} is web-accessible`);
+    const csp = (manifest.content_security_policy && manifest.content_security_policy.extension_pages) || '';
+    assert.match(csp, /frame-ancestors 'none'/);
+    const built = JSON.parse(fs.readFileSync(path.join(ROOT, 'assets', 'manifest.json'), 'utf8'));
+    assert.deepStrictEqual(built.web_accessible_resources, manifest.web_accessible_resources);
+    assert.strictEqual(built.content_security_policy.extension_pages, csp);
+  });
 
   it('manifest uses a store-safe name, description, icons, and homepage', function () {
     assert.strictEqual(manifest.name, 'Fabric Passport');

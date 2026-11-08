@@ -61,9 +61,9 @@ The content script is matched on both **`http://localhost:*`** and **`http://127
 The default **`npm run test:ui`** includes a **skipped** placeholder for the remote suite when `FABRIC_HUB_BASE_URL` is not set, so you can see the opt-in in the report.
 
 ### Trusted Hub HTTP: `X-Fabric-Identity` + traffic metrics
-After **Connect & register** succeeds (same flow that calls `GetNetworkStatus` and `RegisterWebRTCPeer` with your public key), the extension records that node’s **origin** in `fabric_trusted_http_origins` and the service worker:
+After **Connect & register** succeeds (same flow that calls `GetNetworkStatus` and `RegisterWebRTCPeer` with your public key), the extension records that node’s **origin** in `fabric_trusted_http_origins` (a list sealed with an HMAC keyed from the unlocked master, like the Trusted hubs list; while Passport is locked, or if anything else wrote it, it counts as empty) and the service worker:
 
-- Injects **`X-Fabric-Identity`** on normal document/asset/XHR requests to those origins only (`declarativeNetRequest`, rule ids 100–199). Value is the same **`id1…` bech32m** string as the Passport UI (x-only witness + `id` HRP, see `src/utils/fabricIdentityBech32.ts`); stored `id` is reused when it already decodes as bech32m. **No xprv** — public material in line with `RegisterWebRTCPeer`.
+- Injects **`X-Fabric-Identity`** on normal document/asset/XHR requests to those origins only, and only when pages on that origin's host make them (`declarativeNetRequest` `initiatorDomains`, rule ids 100–199), so a site on another domain loading it learns nothing. Chrome matches `initiatorDomains` by host, so a page on a subdomain of that host (or on the same host at another scheme or port) also causes the header to be sent; trust only origins whose subdomains you trust too. Value is the same **`id1…` bech32m** string as the Passport UI (x-only witness + `id` HRP, see `src/utils/fabricIdentityBech32.ts`); stored `id` is reused when it already decodes as bech32m. **No xprv** — public material in line with `RegisterWebRTCPeer`.
 - Observes **`webRequest`** for **rough** stats (request count + `Content-Length` sums) on the same origins; in-memory until the service worker restarts. **`chrome.runtime.sendMessage({ type: 'GET_FABRIC_TRAFFIC_METRICS' })`** returns `{ origins, byOrigin }` for a future settings UI.
 
 This is **off** for every other site. `@fabric/http` with `cors: true` allows the header in CORS preflight (`x-fabric-identity`).
@@ -86,34 +86,36 @@ See `node_modules/@fabric/http/docs/RELEASE_GATE.md` when `@fabric/http` is link
 5. When the wallet has been imported or created, you can toggle and view addresses for the chains you enabled.
 6. On Fabric sites, use the app’s own Fabric login / identity flow (and the extension’s **Connect & register** where offered); the Passport popup and content scripts follow the Fabric message and storage contracts used across FabricLabs repos.
 
-### Client-signed site login (Passport ↔ GoonCitizen ↔ Android)
-Sites that use Hub `POST /sessions` can offer **Sign in with Passport** alongside `fabric://login` (GoonCitizen desktop or Android). Interchangeable D-011 signers: Passport | GoonCitizen desktop | GoonCitizen Android. The page `postMessage`s:
+### Passport v2 sign-in
+A site's server issues a `PASSPORT_CHALLENGE` (`@fabric/http` `passportRelyingParty`, or `POST /sessions/challenges` on a Hub). The page hands it to Passport with a `MessagePort` and reads the answer on that port only:
 
 ```js
-window.postMessage({
-  source: 'fabric-site',
-  type: 'FABRIC_SITE_LOGIN_REQUEST',
-  sessionId, hub: location.origin, origin: location.origin, message
-}, location.origin);
+const channel = new MessageChannel();
+channel.port1.onmessage = ({ data }) => { /* { type: 'PASSPORT_ASSERTION', ok, assertion | error } */ };
+window.postMessage({ source: 'fabric-site', type: 'PASSPORT_CHALLENGE', challenge }, location.origin, [channel.port2]);
 ```
 
-Passport queues the challenge, the popup approves, and POSTs a signed `SiteLoginResponse` as `{ fabric: "fabric:…" }` to `/sessions/:id/signatures` (same body as GoonCitizen), bound to the origin and nonce in the server's challenge. Poll `GET /sessions/:id` until `status: 'signed'`.
+Passport binds the challenge to the origin the browser reports for that frame (never a field the page wrote), keeps one pending challenge per origin (a newer one from the same origin replaces the older, which the page receives as `replaced`), and refuses a nonce it has already seen. In the popup the user picks the identity to show: by default a new site sees its own pairwise key (`m/7777'/F'/n'/0/<index from the origin>`), so two sites can't match you up; the main identity, or a linked signer that answers for you, are a choice away. The user ticks what to share when the site asked (`wallet` xpubs, `cosigner` key), and approves. The site's server checks the `PASSPORT_ASSERTION` against the challenge it issued and posts it back (`POST /sessions/:id/assertions` on a Hub).
 
-### Mutual device-link (separate seeds)
-Hub Identity → **Create link offer** → `fabric://link?…`, or on the Hub page **Approve with Passport**:
+### Accounts
+One seed per Passport. At import the seed phrase and optional BIP39 passphrase become the master xprv; only that xprv is kept, sealed under a separate lock password. Each account index `n` on each network derives:
 
-```js
-window.postMessage({
-  source: 'fabric-site',
-  type: 'FABRIC_DEVICE_LINK_REQUEST',
-  sessionId, hub: location.origin, origin: location.origin
-}, location.origin);
-```
+- identity `m/7777'/F'/n'/0/0` (F = 7777 on mainnet, 7778 elsewhere): signs sign-ins and delegation frames;
+- wallet `m/84'/B'/n'` (SegWit, new addresses) and `m/44'/B'/n'` (watched);
+- cosigner `m/87'/B'/n'/0/0`: federation and escrow signing.
 
-Passport signs as **responder**; the initiator countersigns. Seeds stay per-app. After `status: linked`, Passport publishes `IdentityCrossSign` (mutual BIP340) so the mesh can treat the two pubkeys as one identity cluster. `postMessage` names stay `FABRIC_SITE_LOGIN_*` / `FABRIC_DEVICE_LINK_*`.
+Switching network keeps the account index and changes the path. Backups hold the sealed vault only, never the seed phrase. The lock password is at least 12 characters; new seals use Argon2id when the linked core reports `ARGON2_MASTER`, else PBKDF2 with 600,000 iterations. A vault sealed with an older KDF is re-sealed with the active one the next time it is unlocked, and the cached public keys are checked against the master on unlock.
+
+### Linked signers (delegation)
+Settings → **Linked signers** links Passport with other key holders: Fabric Hub, GoonCitizen, or another Passport. Each keeps its own key and its own message store; linking never copies a key. The protocol is Fabric messages only (`@fabric/core` `types/delegation.js`, `docs/DELEGATION.md`): a `DELEGATION_LINK_OFFER` / `ANSWER` / `REVEAL` exchange commits both sides before either learns the six-digit code, and nothing is granted until the user confirms the codes match. A `DELEGATION_GRANT` then says what the other side may ask for (prove this identity, sign in to sites, co-sign shared wallets, sign other messages) and carries the cosigner key when shared wallets are granted; `DELEGATION_REVOKE` withdraws it.
+
+A linked signer asks with a `DELEGATION_REQUEST` that wraps the exact frame to sign. Passport shows it as a notification (and on the badge); the user opens it, sees the site or shared wallet it is for, and signs or declines. The answer is a `DELEGATION_RESULT`. Apps on this computer are reached on loopback (`/services/delegation/*`); others through a trusted Hub's rendezvous (`/delegations`) and mailbox (`/services/delegation/mailbox`). Records of linked signers and what they may ask carry an HMAC keyed from the unlocked master. Code: `src/background/delegation.ts`, `src/UIElements/LinkedSignersPanel.tsx`, `src/UIElements/PairingPrompt.tsx`, `src/UIElements/DelegationRequestPrompt.tsx`.
+
+### HTTP 402 payments
+When a page's `fetch` gets HTTP 402 with a Lightning invoice (`X-Fabric-Payment-Request` or an L402 challenge), the content script only reports it. Passport queues one request per site, shows a notification and the badge, and the popup shows the site, amount, and invoice with Copy, Open in Lightning wallet, and Pay from Fabric node. A page can't draw Passport's payment UI or ask it to pay.
 
 ### Federations (multisig)
-Wallet → **Federations** makes Passport a member of named federations, the same k-of-n Taproot vaults Hubs run (`@fabric/core` `types/federation`): create one with other Passports and/or the active Hub, join invitations, request a payment, and sign others' requests with this identity's key. Every withdrawal PSBT is rebuilt from the vault and checked against its request id before signing. Passport has no Fabric peer, so the active Hub carries its signed `CONTRACT_MESSAGE` frames (`/services/federations/messages`, relayed to the mesh) and reads the vault (`/services/federations/:id/vault`); the Hub is trusted for delivery only. In a federation without that Hub, the member whose signature completes the threshold finalizes and posts the transaction (`/services/federations/:id/transactions`). Code: `src/services/federations.ts`, `src/UIElements/FederationsPanel.tsx`. GoonCitizen's `FederationContractInvite` is a group invitation, joined in GoonCitizen.
+Wallet → **Federations** makes Passport a member of named federations; **Shared wallet with linked signers** makes a majority-threshold one from the cosigner keys your linked signers granted and sends each its invitation as a delegation request. These are the same k-of-n Taproot vaults Hubs run (`@fabric/core` `types/federation`): create one with other Passports and/or the active Hub, join invitations, request a payment, and sign others' requests with the account's cosigner key (`m/87'/B'/n'/0/0`). Every withdrawal PSBT is rebuilt from the vault and checked against its request id before signing. Passport has no Fabric peer, so the active Hub carries its signed `CONTRACT_MESSAGE` frames (`/services/federations/messages`, relayed to the mesh) and reads the vault (`/services/federations/:id/vault`); the Hub is trusted for delivery only. In a federation without that Hub, the member whose signature completes the threshold finalizes and posts the transaction (`/services/federations/:id/transactions`). Code: `src/services/federations.ts`, `src/UIElements/FederationsPanel.tsx`. GoonCitizen's `FederationContractInvite` is a group invitation, joined in GoonCitizen.
 
 ## Encryption
 Data stored in leveldb is encrypted with the subtleCrypto AES-GCM algorithm. Encryption methods are found in fabric/core/types/subtleCrypto

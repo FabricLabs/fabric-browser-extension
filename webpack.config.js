@@ -25,34 +25,46 @@ const FABRIC_HTTP_ASSETS_ALIASES = Array.from(new Set([
   path.resolve(__dirname, '../fabric-http/assets')
 ].filter((p) => fs.existsSync(p))));
 
-function fabricCoreRoots (release) {
+/** FABRIC_CORE when set (a local checkout), else the pinned `node_modules/@fabric/core`. */
+function fabricCoreRoots () {
   const roots = [];
   if (process.env.FABRIC_CORE) roots.push(path.resolve(process.env.FABRIC_CORE));
-  // Release builds stay reproducible: no sibling checkout unless FABRIC_CORE asks for one.
-  if (process.env.FABRIC_CORE || !release) roots.push(path.resolve(__dirname, '../fabric-clean'));
   roots.push(path.resolve(__dirname, 'node_modules/@fabric/core'));
   return roots;
 }
-/** Core tree for `fabric:` site login (same order as `src/utils/loadFabricSiteLogin.js`). */
-function resolveFabricSiteLoginCoreRoot (release) {
-  for (const root of fabricCoreRoots(release)) {
-    if (fs.existsSync(path.join(root, 'functions', 'fabricSiteLogin.js'))) {
-      console.log(`[webpack] fabric: site login core: ${root}`);
+/** Core tree for Passport sign-in and accounts (same order as `src/utils/loadFabricPassport.js`). */
+function resolveFabricPassportCoreRoot () {
+  for (const root of fabricCoreRoots()) {
+    const file = path.join(root, 'functions', 'passport.js');
+    if (fs.existsSync(file) && fs.existsSync(path.join(root, 'functions', 'accountKeys.js')) &&
+        fs.readFileSync(file, 'utf8').includes('createPeerChallenge')) {
+      console.log(`[webpack] Passport core: ${root}`);
       return root;
     }
   }
-  throw new Error('fabric: site login needs @fabric/core with functions/fabricSiteLogin.js (set FABRIC_CORE or clone ../fabric-clean)');
+  throw new Error('Passport needs @fabric/core with functions/passport.js (peer sessions) and functions/accountKeys.js (set FABRIC_CORE to a core checkout)');
 }
 /** Core tree for named federations (same order as `src/utils/loadFabricFederation.js`). */
-function resolveFabricFederationCoreRoot (release) {
-  for (const root of fabricCoreRoots(release)) {
+function resolveFabricFederationCoreRoot () {
+  for (const root of fabricCoreRoots()) {
     const file = path.join(root, 'types', 'federation.js');
     if (fs.existsSync(file) && fs.readFileSync(file, 'utf8').includes('MESSAGE_TYPES')) {
       console.log(`[webpack] federations core: ${root}`);
       return root;
     }
   }
-  throw new Error('Federations need @fabric/core whose types/federation has the member messages (set FABRIC_CORE or clone ../fabric-clean)');
+  throw new Error('Federations need @fabric/core whose types/federation has the member messages (set FABRIC_CORE to a core checkout)');
+}
+/** Core tree for delegation (same order and check as `src/utils/loadFabricDelegation.js`). */
+function resolveFabricDelegationCoreRoot () {
+  for (const root of fabricCoreRoots()) {
+    const fn = path.join(root, 'types', 'delegation.js');
+    if (fs.existsSync(fn) && fs.readFileSync(fn, 'utf8').includes('pubkeys: { initiator')) {
+      console.log(`[webpack] delegation core: ${root}`);
+      return root;
+    }
+  }
+  throw new Error('Linked signers need @fabric/core with types/delegation.js frame statics (set FABRIC_CORE to a core checkout)');
 }
 const MiniCssExtractPlugin = require('mini-css-extract-plugin');
 const HtmlWebpackPlugin = require('html-webpack-plugin');
@@ -61,14 +73,11 @@ const ProgressBar = require('progress-bar-webpack-plugin');
 const TerserPlugin = require('terser-webpack-plugin');
 
 module.exports = (env, argv) => {
-  const isProduction = (env && env.NODE_ENV === 'production') || process.env.NODE_ENV === 'production';
-  const release = isProduction || !!(argv && argv.mode === 'production');
-
+  const isProduction = (env && env.NODE_ENV === 'production') || process.env.NODE_ENV === 'production' || (argv && argv.mode === 'production');
   return {
     mode: isProduction ? 'production' : 'development',
     entry: {
       popup: './src/UIElements/popup/index.tsx',
-      contentMarker: './src/contentMarker.ts',
       content: './src/content.ts',
       background: './src/background/serviceWorkerMain.ts',
       offscreen: './src/background/offscreenMain.ts'
@@ -77,7 +86,7 @@ module.exports = (env, argv) => {
       path: path.resolve(__dirname, 'assets'),
       filename: (pathData) => {
         const n = pathData.chunk.name;
-        if (n === 'content' || n === 'contentMarker') return 'js/[name].js';
+        if (n === 'content') return 'js/[name].js';
         if (n === 'background') return 'background/serviceWorker.js';
         if (n === 'offscreen') return 'background/offscreen.js';
         return 'js/[name].[contenthash].js';
@@ -147,10 +156,12 @@ module.exports = (env, argv) => {
         '@fabric/core/constants': path.resolve(__dirname, 'node_modules/@fabric/core/constants.js'),
         '@fabric/core/types/message': path.resolve(__dirname, 'node_modules/@fabric/core/types/message.js'),
         '@fabric/http/assets': path.resolve(__dirname, 'node_modules/@fabric/http/assets'),
-        'fabric-site-login-core': resolveFabricSiteLoginCoreRoot(release),
-        [path.resolve(__dirname, 'src/utils/loadFabricSiteLogin.js')]: path.resolve(__dirname, 'src/utils/fabricSiteLoginCore.browser.js'),
-        'fabric-federation-core': resolveFabricFederationCoreRoot(release),
-        [path.resolve(__dirname, 'src/utils/loadFabricFederation.js')]: path.resolve(__dirname, 'src/utils/fabricFederationCore.browser.js')
+        'fabric-passport-core': resolveFabricPassportCoreRoot(),
+        [path.resolve(__dirname, 'src/utils/loadFabricPassport.js')]: path.resolve(__dirname, 'src/utils/fabricPassportCore.browser.js'),
+        'fabric-federation-core': resolveFabricFederationCoreRoot(),
+        [path.resolve(__dirname, 'src/utils/loadFabricFederation.js')]: path.resolve(__dirname, 'src/utils/fabricFederationCore.browser.js'),
+        'fabric-delegation-core': resolveFabricDelegationCoreRoot(),
+        [path.resolve(__dirname, 'src/utils/loadFabricDelegation.js')]: path.resolve(__dirname, 'src/utils/fabricDelegationCore.browser.js')
       }
     },
     module: {
@@ -180,8 +191,8 @@ module.exports = (env, argv) => {
           test: /\.css$/,
           oneOf: [
             {
-              // Keep @fabric/http semantic bundle untouched; it embeds data: font URLs.
-              // Include realpath (npm link) as well as the node_modules path.
+              // Leave the @fabric/http bundle's url()s alone: they point at themes/fabric/,
+              // copied to css/themes below. Include realpath (npm link) as well as the node_modules path.
               include: FABRIC_HTTP_ASSETS_ALIASES,
               use: [
                 MiniCssExtractPlugin.loader,
@@ -199,7 +210,6 @@ module.exports = (env, argv) => {
                 'css-loader'
               ],
               include: [
-                path.join(__dirname, 'node_modules/semantic-ui-css'),
                 path.join(__dirname, 'assets')
               ]
             }
@@ -214,9 +224,6 @@ module.exports = (env, argv) => {
           ],
           include: [
             path.join(__dirname, 'src')
-          ],
-          exclude: [
-            path.join(__dirname, 'node_modules/semantic-ui-css')
           ]
         },
         {
@@ -285,7 +292,8 @@ module.exports = (env, argv) => {
           },
           {
             from: path.join(FABRIC_HTTP_ASSETS, 'themes'),
-            to: 'css/themes'
+            to: 'css/themes',
+            noErrorOnMissing: true
           }
         ],
       }),

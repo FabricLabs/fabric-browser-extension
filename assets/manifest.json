@@ -1,7 +1,7 @@
 {
   "name": "Fabric Passport",
   "short_name": "Passport",
-  "description": "Sign in to Fabric websites with your own cryptographic identity. Create, restore, and link devices — keys stay on this computer.",
+  "description": "Sign in to Fabric websites with your own cryptographic identity. Create, restore, and link signers — each key stays where it is.",
   "version": "0.1.0",
   "manifest_version": 3,
   "minimum_chrome_version": "109",
@@ -20,6 +20,8 @@
     "offscreen",
     "alarms",
     "webRequest",
+    "webNavigation",
+    "idle",
     "declarativeNetRequest"
   ],
   "host_permissions": [
@@ -40,24 +42,10 @@
         "https://*/*"
       ],
       "js": [
-        "js/contentMarker.js",
         "js/content.js"
       ],
       "run_at": "document_start",
       "all_frames": true
-    }
-  ],
-  "web_accessible_resources": [
-    {
-      "resources": [
-        "js/*",
-        "css/*",
-        "icons/*",
-        "popup.html"
-      ],
-      "matches": [
-        "<all_urls>"
-      ]
     }
   ],
   "action": {
@@ -73,6 +61,6 @@
     "service_worker": "background/serviceWorker.js"
   },
   "content_security_policy": {
-    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self' data:"
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; frame-ancestors 'none'"
   }
 }

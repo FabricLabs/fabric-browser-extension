@@ -4,8 +4,9 @@
  * Bitcoin wallet service for Fabric Passport.
  *
  * Uses a Fabric node's `/services/bitcoin` HTTP API as a block-explorer and wallet backend.
- * Keys never leave the extension; only xpub-derived watch addresses are sent for balance lookups
- * (`GET …/services/bitcoin/xpub?xpub=…&addresses=…`).
+ * Private keys never leave the extension. Balance lookups send the account xpub and its first
+ * watch addresses to the node in a POST body (`POST …/services/bitcoin/xpub`), never in the URL;
+ * the node can link every address of that account.
  *
  * Compatible with any Fabric node that exposes the standard Bitcoin service surface
  * (hub.fabric.pub, local `node scripts/hub.js`, or any `@fabric/http` instance with Bitcoin enabled).
@@ -38,6 +39,16 @@ export interface FabricBitcoinNodeConfig {
 /** Optional auth for Hub watch-only xpub routes when `FABRIC_BITCOIN_XPUB_QUERY_TOKEN` is set. */
 export interface FabricBitcoinHttpOpts {
   xpubQueryToken?: string | null;
+  /** Standard (`m/44'`) account xpub watched beside the SegWit (`m/84'`) one. */
+  standardXpub?: string | null;
+}
+
+/** Watch addresses of an account wallet: SegWit receive, plus standard receive when given. */
+function watchAddresses (xpub: string, networkName: string, count: number, standardXpub?: string | null): string[] {
+  const out = deriveReceiveAddresses(xpub, networkName, count);
+  const standard = String(standardXpub ?? '').trim();
+  if (standard) out.push(...deriveReceiveAddresses(standard, networkName, count, 'pkh'));
+  return out;
 }
 
 function trimXpubQueryToken (t?: string | null): string | undefined {
@@ -82,7 +93,7 @@ export interface BitcoinStatus {
 function networkFromName (name: string): bitcoin.networks.Network {
   const n = String(name || 'regtest').toLowerCase();
   if (n === 'mainnet' || n === 'main') return bitcoin.networks.bitcoin;
-  if (n === 'testnet' || n === 'signet' || n === 'test') return bitcoin.networks.testnet;
+  if (n.startsWith('testnet') || n === 'signet' || n === 'test') return bitcoin.networks.testnet;
   return bitcoin.networks.regtest;
 }
 
@@ -105,18 +116,19 @@ function decodeBip32Root (xpub: string): BIP32Interface | null {
 }
 
 /**
- * Derive BIP84 (native SegWit) receive addresses from an xpub for watch-only balance.
- * Path: m/84'/0'/0'/0/i (external chain)
+ * Derive receive addresses (external chain `…/0/i`) from an account xpub for
+ * watch-only balance: native SegWit for `m/84'`, legacy (`pkh`) for `m/44'`.
  */
-export function deriveReceiveAddresses (xpub: string, networkName: string, count = 20): string[] {
+export function deriveReceiveAddresses (xpub: string, networkName: string, count = 20, script: 'wpkh' | 'pkh' = 'wpkh'): string[] {
   const addressNetwork = networkFromName(networkName);
   const root = decodeBip32Root(xpub);
   if (!root) return [];
+  const pay = script === 'pkh' ? bitcoin.payments.p2pkh : bitcoin.payments.p2wpkh;
   try {
     const addrs: string[] = [];
     for (let i = 0; i < count; i++) {
       const child = root.derive(0).derive(i);
-      const { address } = bitcoin.payments.p2wpkh({ pubkey: Buffer.from(child.publicKey), network: addressNetwork });
+      const { address } = pay({ pubkey: Buffer.from(child.publicKey), network: addressNetwork });
       if (address) addrs.push(address);
     }
     return addrs;
@@ -193,13 +205,21 @@ export async function fetchBitcoinStatus (baseUrl: string): Promise<BitcoinStatu
   }
 }
 
+/** The wallet goes in a POST body, never the URL, so it stays out of proxy and server logs. */
+function xpubQueryBody (xpub: string, addresses: string[], standardXpub?: string | null): Record<string, unknown> {
+  const body: Record<string, unknown> = { xpub };
+  if (standardXpub) body.standardXpub = String(standardXpub).trim();
+  if (addresses.length > 0) body.addresses = addresses;
+  return body;
+}
+
 export async function fetchWalletBalance (
   baseUrl: string,
   xpub: string,
   networkName: string,
   opts?: FabricBitcoinHttpOpts
 ): Promise<WalletBalance> {
-  const addresses = deriveReceiveAddresses(xpub, networkName, 20);
+  const addresses = watchAddresses(xpub, networkName, 20, opts?.standardXpub);
 
   try {
     const status = await fetchBitcoinStatus(baseUrl);
@@ -208,13 +228,10 @@ export async function fetchWalletBalance (
     }
 
     const root = baseUrl.replace(/\/+$/, '');
-    const params = new URLSearchParams();
-    params.set('xpub', xpub);
-    if (addresses.length > 0) params.set('addresses', addresses.join(','));
-    const path = `/services/bitcoin/xpub?${params.toString()}`;
-
-    const res = await fetchWithTimeout(`${root}${path}`, {
-      headers: { Accept: 'application/json', ...xpubQueryAuthHeaders(opts?.xpubQueryToken) }
+    const res = await fetchWithTimeout(`${root}/services/bitcoin/xpub`, {
+      method: 'POST',
+      headers: { Accept: 'application/json', 'Content-Type': 'application/json', ...xpubQueryAuthHeaders(opts?.xpubQueryToken) },
+      body: JSON.stringify(xpubQueryBody(xpub, addresses, opts?.standardXpub))
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
@@ -253,19 +270,13 @@ export async function fetchTransactionHistory (
 
   const root = baseUrl.replace(/\/+$/, '');
   const limit = Math.max(1, Math.min(100, count));
-  const watchAddrs = deriveReceiveAddresses(trimmedXpub, networkName, 50);
-  const params = new URLSearchParams();
-  params.set('xpub', trimmedXpub);
-  params.set('limit', String(limit));
-  if (watchAddrs.length > 0) {
-    params.set('addresses', watchAddrs.join(','));
-  }
-
-  const path = `/services/bitcoin/xpub/transactions?${params.toString()}`;
+  const watchAddrs = watchAddresses(trimmedXpub, networkName, 50, opts?.standardXpub);
 
   try {
-    const res = await fetchWithTimeout(`${root}${path}`, {
-      headers: { Accept: 'application/json', ...xpubQueryAuthHeaders(opts?.xpubQueryToken) }
+    const res = await fetchWithTimeout(`${root}/services/bitcoin/xpub/transactions`, {
+      method: 'POST',
+      headers: { Accept: 'application/json', 'Content-Type': 'application/json', ...xpubQueryAuthHeaders(opts?.xpubQueryToken) },
+      body: JSON.stringify({ ...xpubQueryBody(trimmedXpub, watchAddrs, opts?.standardXpub), limit })
     });
     if (!res.ok) {
       throw new Error(`HTTP ${res.status}`);

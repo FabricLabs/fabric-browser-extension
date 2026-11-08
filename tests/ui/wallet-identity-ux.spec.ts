@@ -10,11 +10,12 @@ test.describe('@fabric/passport wallet & identity detail', () => {
     const page = await context.newPage();
     try {
       await loginWithTestMnemonic(page, extensionId);
+      await page.getByRole('button', { name: /^Wallet/ }).click();
       await expect(page.getByRole('heading', { name: /^Wallet$/i })).toBeVisible();
 
       await page.getByRole('button', { name: /Receive/i }).click();
       await expect(
-        page.getByText(/Receive address \(BIP84|Could not derive an address/i)
+        page.getByText(/Receive address \(SegWit, BIP84|Could not derive an address/i)
       ).toBeVisible({ timeout: 15000 });
 
       await page.getByRole('button', { name: /History/i }).click();
@@ -32,27 +33,29 @@ test.describe('@fabric/passport wallet & identity detail', () => {
     const page = await context.newPage();
     try {
       await loginWithTestMnemonic(page, extensionId);
-      await page.locator('.message').filter({ hasText: 'Loaded Identities' }).locator('.content .item').first().click();
+      await page.locator('.message').filter({ has: page.locator('.header', { hasText: /^Accounts$/ }) }).locator('.content .item').first().click();
       await expect(page.getByRole('heading', { name: /Balance/i })).toBeVisible();
       await expect(page.getByRole('heading', { name: /^Identity$/i })).toBeVisible();
-      await expect(page.getByRole('heading', { name: /^Public Key$/i })).toBeVisible();
-      await expect(page.getByRole('heading', { name: /^xpub$/i })).toBeVisible();
+      await expect(page.getByRole('heading', { name: /^Public key$/i })).toBeVisible();
+      await expect(page.getByRole('heading', { name: /^Escrow key \(cosigner\)$/i })).toBeVisible();
+      await expect(page.getByRole('heading', { name: /^Wallet xpub \(SegWit/i })).toBeVisible();
       await page.getByRole('button', { name: /^Back$/ }).click();
-      await expect(page.getByText('Loaded Identities')).toBeVisible();
+      await expect(page.getByText('Accounts', { exact: true })).toBeVisible();
     } finally {
       await page.close();
     }
   });
 
-  test('Add New Identity → Create New → security copy → Go Back returns to dashboard', async ({ context, extensionId }) => {
+  test('Add Account opens another account from the same seed', async ({ context, extensionId }) => {
     const page = await context.newPage();
     try {
       await loginWithTestMnemonic(page, extensionId);
-      await page.getByRole('button', { name: /Add New Identity/i }).click();
-      await page.getByRole('button', { name: /^Create New$/ }).click();
-      await expect(page.getByText('Important Security Information')).toBeVisible();
-      await page.getByRole('button', { name: /Go Back/i }).click();
-      await expect(page.getByText('Loaded Identities')).toBeVisible();
+      await page.getByRole('button', { name: /^Add Account$/ }).click();
+      await page.locator('.field').filter({ hasText: 'Account number' }).locator('input').fill('1');
+      await page.getByRole('button', { name: /^Open Account$/ }).click();
+      await expect(page.getByText('Accounts', { exact: true })).toBeVisible();
+      await expect(page.getByText(/#1 · mainnet/).first()).toBeVisible();
+      await expect(page.getByText(/#0 · mainnet/).first()).toBeVisible();
     } finally {
       await page.close();
     }

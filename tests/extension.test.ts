@@ -185,27 +185,28 @@ describe('Browser extension (Playwright + Mocha)', function () {
   });
 
   /** Run before opening `chrome-extension://` pages so MV3 startup order does not flake content-script injection. */
-  it('injects the content script (shared DOM marker; isolated from page JS)', async function () {
+  it('injects the content script (answers PASSPORT_HELLO on a transferred port; no DOM marker)', async function () {
     const page = await context.newPage();
     try {
       await page.goto(`${server.baseUrl}/test.html`, { waitUntil: 'load', timeout: 30000 });
-      let lastErr: Error | null = null;
+      let answer: unknown = null;
       for (let attempt = 0; attempt < 3; attempt++) {
-        try {
-          await page.waitForFunction(
-            () => document.documentElement?.getAttribute('data-fabric-passport') != null,
-            { timeout: 20000 }
-          );
-          lastErr = null;
-          break;
-        } catch (e) {
-          lastErr = e instanceof Error ? e : new Error(String(e));
-          await page.reload({ waitUntil: 'load', timeout: 30000 });
-        }
+        answer = await page.evaluate(() => new Promise((resolve) => {
+          const channel = new MessageChannel();
+          const timer = setTimeout(() => { channel.port1.close(); resolve(null); }, 20000);
+          channel.port1.onmessage = (event) => {
+            clearTimeout(timer);
+            channel.port1.close();
+            resolve(event.data);
+          };
+          window.postMessage({ source: 'fabric-site', type: 'PASSPORT_HELLO', v: 2 }, window.location.origin, [channel.port2]);
+        }));
+        if (answer) break;
+        await page.reload({ waitUntil: 'load', timeout: 30000 });
       }
-      if (lastErr) throw lastErr;
+      assert.deepStrictEqual(answer, { type: 'PASSPORT_HELLO', v: 2, peer: 3 });
       const attr = await page.evaluate(() => document.documentElement?.getAttribute('data-fabric-passport'));
-      assert.strictEqual(attr, extensionId);
+      assert.strictEqual(attr, null, 'Passport v2 writes nothing to the DOM');
     } finally {
       await page.close();
     }
@@ -222,6 +223,29 @@ describe('Browser extension (Playwright + Mocha)', function () {
       assert.ok(/fabric|passport/i.test(title), `unexpected popup title: ${title}`);
     } finally {
       await popupPage.close();
+    }
+  });
+
+  it('never renders the popup inside a website frame', async function () {
+    const page = await context.newPage();
+    try {
+      await page.goto(`${server.baseUrl}/test.html`, { waitUntil: 'load', timeout: 30000 });
+      await page.evaluate((src) => new Promise<void>((resolve) => {
+        const frame = document.createElement('iframe');
+        frame.src = src;
+        frame.onload = () => resolve();
+        document.body.appendChild(frame);
+        setTimeout(resolve, 3000);
+      }), `chrome-extension://${extensionId}/popup.html`);
+      for (const frame of page.frames().filter((f) => f !== page.mainFrame())) {
+        const rendered = await frame.evaluate(() => {
+          const root = document.getElementById('fabric-root');
+          return !!(root && root.children.length);
+        }).catch(() => false);
+        assert.strictEqual(rendered, false, `popup rendered in a frame at ${frame.url()}`);
+      }
+    } finally {
+      await page.close();
     }
   });
 
