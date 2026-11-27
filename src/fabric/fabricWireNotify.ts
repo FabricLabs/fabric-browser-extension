@@ -158,7 +158,7 @@ export function tryParseNotifiableWireMessage (
     if (originalType === 'fabric-message' && typeof original === 'string') {
       try {
         const innerBuf = Buffer.from(original, 'base64');
-        return tryParseNotifiableFabricFrame(innerBuf);
+        return parseFabricFrame(innerBuf, depth + 1);
       } catch (err: unknown) {
         swallowNonFatal('fabric-wire-notify-relay-b64', err);
         return null;
@@ -240,6 +240,11 @@ export function tryParseNotifiableWireMessage (
  * Parse a WebSocket `message` event payload: binary Fabric Message or legacy JSON string.
  */
 export function tryParseNotifiableFabricFrame (data: unknown): NotifiableFabricResult | null {
+  return parseFabricFrame(data, 0);
+}
+
+function parseFabricFrame (data: unknown, depth: number): NotifiableFabricResult | null {
+  if (depth > MAX_RELAY_DEPTH) return null;
   if (typeof data === 'string') {
     const trimmed = data.trim();
     if (!trimmed) return null;
@@ -252,7 +257,7 @@ export function tryParseNotifiableFabricFrame (data: unknown): NotifiableFabricR
 
   try {
     const message = Message.fromBuffer(buf);
-    return tryParseNotifiableWireMessage(message, 0);
+    return tryParseNotifiableWireMessage(message, depth);
   } catch (err: unknown) {
     swallowNonFatal('fabric-wire-notify-fromBuffer', err);
     return null;

@@ -36,3 +36,9 @@ assets.zip
 assets.crx
 assets.pem
 zip/*.zip
+
+# webpack output (`npm run build` regenerates; CI builds before tests, `package` uses dist/)
+assets/css/themes/fabric/
+assets/assets/
+assets/background/
+assets/*.module.wasm

@@ -20,6 +20,8 @@ export async function ensureHarnessFabricNodeActive (page: Page, baseURL?: strin
   const rowMatch = fabricNodeListRowRe(url);
   await page.getByRole('button', { name: /^Settings$/ }).click();
   await expect(page.locator('.message .header').filter({ hasText: /^Settings$/ })).toBeVisible();
+  await page.getByRole('button', { name: 'Fabric', exact: true }).click();
+  await expect(page.getByRole('heading', { name: /^Fabric Nodes$/i })).toBeVisible();
   const rows = page.getByRole('listitem').filter({ hasText: rowMatch });
   if ((await rows.count()) === 0) {
     await page.getByPlaceholder('https://hub.fabric.pub or http://127.0.0.1:3003').fill(url);
@@ -32,5 +34,6 @@ export async function ensureHarnessFabricNodeActive (page: Page, baseURL?: strin
     await setMeshActive.click();
     await expect(setMeshActive).toHaveCount(0);
   }
+  await page.getByRole('button', { name: /^All settings$/ }).click();
   await page.getByRole('button', { name: /^Back$/ }).click();
 }

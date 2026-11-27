@@ -6,7 +6,7 @@ import { Provider } from 'react-redux';
 import { store } from './store';
 import FabricApplication from './layouts/FabricInterface';
 
-import 'semantic-ui-css/semantic.min.css';
+import '@fabric/http/assets/semantic.min.css';
 import './styles/global.scss';
 import './styles/main.scss';
 

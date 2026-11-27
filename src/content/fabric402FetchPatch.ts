@@ -5,8 +5,7 @@ import {
   parseL402WWWAuthenticate,
   resolveBolt11From402
 } from '../utils/fabricHttp402';
-import { FABRIC_PAYMENT_REQUEST_HEADER } from '../constants/fabric402';
-import { showFabric402Overlay } from './fabric402OverlayDom';
+import { FABRIC_PAYMENT_REQUEST_HEADER, FABRIC_RUNTIME_PAYMENT_REQUIRED } from '../constants/fabric402';
 import { swallowNonFatal } from '../utils/nonFatal';
 
 declare global {
@@ -16,10 +15,11 @@ declare global {
 }
 
 /**
- * Wrap `fetch` so 402 responses with Fabric payment headers prompt the Passport UI.
+ * Wrap `fetch` so 402 responses with a Lightning invoice queue a payment request
+ * in Passport (notification + badge; the popup shows and pays it).
  *
  * Runs in the **isolated** content-script world today (needed for chrome.runtime
- * messaging used by login / device-link). Page-world `window.fetch` is not patched
+ * messaging used by sign-in). Page-world `window.fetch` is not patched
  * until a MAIN-world injector (or dual content_scripts entry) lands — see SECURITY.md.
  */
 export function installFabric402FetchInterceptor (): void {
@@ -60,14 +60,19 @@ export function installFabric402FetchInterceptor (): void {
           urlStr = '';
         }
 
-        queueMicrotask(() => {
-          showFabric402Overlay({
-            requestUrl: urlStr || window.location.href,
-            fabric: fabricDecoded,
-            bolt11: bolt11Trimmed || undefined,
-            wwwAuthenticate: wwwRaw
-          });
-        });
+        const invoice = bolt11Trimmed || (hasL402Invoice ? String(l402.invoice).trim() : '');
+        if (!invoice.startsWith('ln') || !chrome.runtime?.sendMessage) return res;
+        if (!(navigator.userActivation && navigator.userActivation.isActive)) return res;
+        // Only the invoice and its labels leave the page; Passport shows them in its own popup.
+        void chrome.runtime.sendMessage({
+          type: FABRIC_RUNTIME_PAYMENT_REQUIRED,
+          requestUrl: urlStr || window.location.href,
+          bolt11: invoice,
+          l402: hasL402Invoice,
+          fabric: fabricDecoded
+            ? { detail: fabricDecoded.detail, invoice: fabricDecoded.invoice, documentOffer: fabricDecoded.documentOffer }
+            : null
+        }).catch((err: unknown) => swallowNonFatal('fabric402-report', err));
       } catch (err: unknown) {
         swallowNonFatal('fabric402-fetch-interceptor', err);
       }

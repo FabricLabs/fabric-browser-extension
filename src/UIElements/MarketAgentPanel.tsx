@@ -56,27 +56,27 @@ export function MarketAgentPanel (props: { wantRoot?: string | null } = {}): Rea
   return (
     <div className="fabric-market-agent">
       {error && <Message negative size="mini">{error}</Message>}
-      <Form size="mini" inverted onSubmit={save}>
+      <Form size="mini" onSubmit={save}>
         <Form.Group widths="equal">
           <Form.Input label="Budget (sats)" value={budget} onChange={(_, d) => setBudget(d.value)} type="number" min="0" />
           <Form.Input label="Per-plan cap" value={cap} onChange={(_, d) => setCap(d.value)} type="number" min="0" />
           <Form.Input label="Proximity 0–1" value={proximity} onChange={(_, d) => setProximity(d.value)} type="number" min="0" max="1" step="0.1" />
         </Form.Group>
-        <Button size="mini" basic inverted type="submit">Save</Button>
-        <Button size="mini" basic inverted type="button" onClick={tick}>Plan now</Button>
+        <Button size="mini" basic type="submit">Save</Button>
+        <Button size="mini" basic type="button" onClick={tick}>Plan now</Button>
         {props.wantRoot && (
-          <Button size="mini" basic inverted type="button" onClick={() => want(props.wantRoot as string)}>
+          <Button size="mini" basic type="button" onClick={() => want(props.wantRoot as string)}>
             Want {shortHex(props.wantRoot)}
           </Button>
         )}
       </Form>
       {status && (
-        <p style={{ marginTop: '0.5em', fontSize: '0.85em', color: 'rgba(255,255,255,0.65)' }}>
+        <p style={{ marginTop: '0.5em', fontSize: '0.85em', color: 'rgba(0, 0, 0, 0.62)' }}>
           spent {status.spentSats} · reserved {status.reservedSats} · remaining {status.remainingSats} sats
         </p>
       )}
       {status && status.wants.length > 0 && (
-        <List divided relaxed inverted>
+        <List divided relaxed>
           {status.wants.map((w) => {
             const sessions = status.sessions.filter((s) => s.merkleRootHex === w.merkleRootHex);
             const done = sessions.filter((s) => s.status === 'complete').length;
@@ -90,7 +90,7 @@ export function MarketAgentPanel (props: { wantRoot?: string | null } = {}): Rea
                     <Label size="mini" color={w.status === 'complete' ? 'green' : w.status === 'buying' ? 'blue' : undefined}>{w.status}</Label>
                     {w.blobTotal != null && <Label size="mini">{done}/{w.blobTotal} blobs</Label>}
                     {funding > 0 && <Label size="mini" color="orange">{funding} awaiting funding</Label>}
-                    <Button size="mini" basic inverted floated="right" onClick={() => forget(w.merkleRootHex)}>Forget</Button>
+                    <Button size="mini" basic floated="right" onClick={() => forget(w.merkleRootHex)}>Forget</Button>
                   </List.Header>
                   {w.lastError && <List.Description style={{ fontSize: '0.8em' }}>{w.lastError}</List.Description>}
                 </List.Content>

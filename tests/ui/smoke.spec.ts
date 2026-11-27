@@ -33,7 +33,7 @@ test.describe('@fabric/passport UI smoke', () => {
         { timeout: 20000 }
       );
       const v = await page.evaluate(() => document.documentElement?.getAttribute('data-fabric-passport'));
-      expect(v).toBe(extensionId);
+      expect(v).toBe('2');
     } finally {
       await page.close();
     }

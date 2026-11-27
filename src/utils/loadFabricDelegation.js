@@ -1,0 +1,46 @@
+'use strict';
+
+/**
+ * Load `@fabric/core` delegation (`types/delegation`: the `Delegation` class,
+ * whose statics build and read the frames) with the `types/key` and
+ * `Message` `fabric:` helpers of the same tree:
+ * FABRIC_CORE when set, else this package's `node_modules`.
+ *
+ * Only a core whose pairing frames carry the author's `pubkey` qualifies.
+ * Webpack aliases this file to `fabricDelegationCore.browser.js` for the bundle.
+ */
+
+const fs = require('fs');
+const path = require('path');
+const messageFabricUri = require('./messageFabricUri');
+
+function coreRoots () {
+  const roots = [];
+  const env = (typeof process !== 'undefined' && process.env) || {};
+  if (env.FABRIC_CORE) roots.push(path.resolve(env.FABRIC_CORE));
+  roots.push(path.resolve(__dirname, '../../node_modules/@fabric/core'));
+  return roots;
+}
+
+function qualifies (root) {
+  const fn = path.join(root, 'types', 'delegation.js');
+  if (!fs.existsSync(fn)) return false;
+  return fs.readFileSync(fn, 'utf8').includes('pubkeys: { initiator');
+}
+
+function loadFabricDelegation () {
+  for (const root of coreRoots()) {
+    if (!qualifies(root)) continue;
+    const Delegation = require(path.join(root, 'types', 'delegation.js'));
+    const Message = require(path.join(root, 'types', 'message.js'));
+    return {
+      delegation: Delegation,
+      Delegation,
+      Key: require(path.join(root, 'types', 'key.js')),
+      fabricUri: messageFabricUri(Message)
+    };
+  }
+  return { delegation: null, Delegation: null, Key: null, fabricUri: null };
+}
+
+module.exports = loadFabricDelegation();

@@ -84,6 +84,20 @@ describe('fabricWireNotify', function () {
     assert.strictEqual(parsed!.payload.actor, undefined);
   });
 
+  it('stops unwrapping base64 relay envelopes past the relay depth limit', function () {
+    function wrap (inner: Buffer, times: number): Buffer {
+      let wire = inner;
+      for (let i = 0; i < times; i++) {
+        const envelope = { original: wire.toString('base64'), originalType: 'fabric-message', hops: [] };
+        wire = sign('P2P_RELAY', JSON.stringify(envelope)).toBuffer();
+      }
+      return wire;
+    }
+    const inner = sign('P2P_CHAT_MESSAGE', 'deep').toBuffer();
+    assert.strictEqual(tryParseNotifiableFabricFrame(wrap(inner, 3))!.payload.content, 'deep');
+    assert.strictEqual(tryParseNotifiableFabricFrame(wrap(inner, 6)), null);
+  });
+
   it('still accepts legacy plain JSON string frames', function () {
     const raw = JSON.stringify({
       type: 'FederationContractInvite',

@@ -8,6 +8,8 @@
 
 import { test, expect } from './extension.fixtures';
 import { clearMeshHubRegistration, readMeshHubRegistration } from './helpers/extensionStorage';
+import { ensureHarnessFabricNodeActive } from './helpers/fabricNodeSettings';
+import { loginWithTestMnemonic } from './helpers/popupAuth';
 
 test.describe('@fabric/passport hub-mesh-bridge page', () => {
   test('harness serves bridge HTML with register controls', async ({ context, baseURL }) => {
@@ -26,7 +28,17 @@ test.describe('@fabric/passport hub-mesh-bridge page', () => {
 });
 
 test.describe('Extension ↔ Hub mesh registration (harness origin)', () => {
-  test.beforeEach(async ({ context, extensionId }) => {
+  test.describe.configure({ timeout: 120000 });
+
+  // A loopback Hub may register only while it is the active Fabric node.
+  test.beforeEach(async ({ context, extensionId, baseURL }) => {
+    const popup = await context.newPage();
+    try {
+      await loginWithTestMnemonic(popup, extensionId);
+      await ensureHarnessFabricNodeActive(popup, baseURL);
+    } finally {
+      await popup.close();
+    }
     await clearMeshHubRegistration(context, extensionId);
   });
 

@@ -3,9 +3,12 @@
 /**
  * For origins the user trusted via **Connect & register** (see IdentityManager + RegisterWebRTCPeer),
  * the service worker:
- * 1) adds `X-Fabric-Identity` to outgoing subresource and navigation requests (declarativeNetRequest),
+ * 1) adds `X-Fabric-Identity` to requests that origin's own pages make to it (declarativeNetRequest,
+ *    limited by `initiatorDomains`),
  * 2) aggregates rough request + Content-Length–based byte counts (webRequest observation only).
- * No xprv; value mirrors public material already sent in RPC metadata.
+ * No xprv; value mirrors public material already sent in RPC metadata. The trusted
+ * origins are a list sealed with the unlocked master (`trustedLists`), so the
+ * rules come down when Passport locks and go back up on unlock.
  */
 
 import { FABRIC_STATE_STORAGE_KEY } from '../constants/fabricExtension';
@@ -17,6 +20,9 @@ import {
 } from '../constants/identityOutband';
 import { formatXFabricIdentityValue } from './identityOutbandValue';
 import { swallowNonFatal } from '../utils/nonFatal';
+import { privateGet } from '../utils/privateStore';
+import { readTrustedList, writeTrustedList } from '../utils/trustedLists';
+import { PASSPORT_MASTER_SESSION_KEY } from '../utils/passportVault';
 
 const ALL_URLS = '<all_urls>';
 
@@ -50,9 +56,9 @@ export async function reapplyIdentityOutbandRules (): Promise<void> {
     return;
   }
 
-  const got = await chrome.storage.local.get([FABRIC_STATE_STORAGE_KEY, FABRIC_TRUSTED_HTTP_ORIGINS_KEY]);
-  const trustList = (got[FABRIC_TRUSTED_HTTP_ORIGINS_KEY] as string[] | undefined)?.filter(Boolean) ?? [];
-  const rawState = got[FABRIC_STATE_STORAGE_KEY];
+  const rawState = await privateGet(FABRIC_STATE_STORAGE_KEY);
+  // Sealed with the master: locked, or written by anything else, means no header anywhere.
+  const trustList = await readTrustedList(FABRIC_TRUSTED_HTTP_ORIGINS_KEY);
   const identities: SimpleIdentity[] =
     rawState && typeof rawState === 'object' && Array.isArray((rawState as { identities?: unknown }).identities)
       ? (rawState as { identities: SimpleIdentity[] }).identities
@@ -81,11 +87,13 @@ export async function reapplyIdentityOutbandRules (): Promise<void> {
     for (let i = 0; i < max; i++) {
       const origin = trustList[i];
       let urlFilter: string;
+      let host: string;
       try {
         const u = new URL(origin);
-        const h = u.hostname;
-        const p = u.port || (u.protocol === 'https:' ? '443' : '80');
-        urlFilter = `*://${h}:${p}/*`;
+        if (u.protocol !== 'http:' && u.protocol !== 'https:') continue;
+        // `URL#origin` drops a default port, as the URLs DNR matches do.
+        urlFilter = `|${u.origin}/`;
+        host = u.hostname;
       } catch (err: unknown) {
         swallowNonFatal('identity-outband-rule-url', err);
         continue;
@@ -101,8 +109,10 @@ export async function reapplyIdentityOutbandRules (): Promise<void> {
             { header: X_FABRIC_IDENTITY, operation: chrome.declarativeNetRequest.HeaderOperation.SET, value }
           ]
         },
-        /* Omit websocket/upgrade paths — header injection targets normal document + asset requests. */
-        condition: { urlFilter, resourceTypes: [R.MAIN_FRAME, R.SUB_FRAME, R.XMLHTTPREQUEST, R.OTHER, R.IMAGE, R.SCRIPT, R.STYLESHEET, R.MEDIA, R.FONT, R.PING, R.OBJECT] }
+        /* Only requests the trusted site makes itself: another site loading it
+         * (or linking to it) must not learn who the user is. Omit websocket/upgrade
+         * paths — header injection targets normal document + asset requests. */
+        condition: { urlFilter, initiatorDomains: [host], resourceTypes: [R.MAIN_FRAME, R.SUB_FRAME, R.XMLHTTPREQUEST, R.OTHER, R.IMAGE, R.SCRIPT, R.STYLESHEET, R.MEDIA, R.FONT, R.PING, R.OBJECT] }
       });
     }
   }
@@ -163,13 +173,12 @@ async function mergeTrustedNodeOriginImpl (origin: string): Promise<void> {
   }
   if (u.protocol !== 'http:' && u.protocol !== 'https:') return;
   const o = u.origin;
-  const got = await chrome.storage.local.get(FABRIC_TRUSTED_HTTP_ORIGINS_KEY);
-  const cur = (got[FABRIC_TRUSTED_HTTP_ORIGINS_KEY] as string[] | undefined) ?? [];
+  const cur = await readTrustedList(FABRIC_TRUSTED_HTTP_ORIGINS_KEY);
   if (cur.includes(o)) {
     return;
   }
   const next = [...cur, o].slice(-32);
-  await chrome.storage.local.set({ [FABRIC_TRUSTED_HTTP_ORIGINS_KEY]: next });
+  await writeTrustedList(FABRIC_TRUSTED_HTTP_ORIGINS_KEY, next);
 }
 
 export function initIdentityOutband (): void {
@@ -181,6 +190,12 @@ export function initIdentityOutband (): void {
       void reapplyIdentityOutbandRules();
     }
   });
+  if (chrome.storage.session && chrome.storage.session.onChanged) {
+    // Unlocking or locking opens or closes the sealed list.
+    chrome.storage.session.onChanged.addListener((changes) => {
+      if (changes[PASSPORT_MASTER_SESSION_KEY] || changes['fabric.private.changed']) void reapplyIdentityOutbandRules();
+    });
+  }
 
   if (typeof chrome === 'undefined' || !chrome.webRequest?.onBeforeRequest) {
     return;

@@ -31,7 +31,7 @@ test.describe('Shared identity across two site origins (same seed)', () => {
       await openFirstIdentityInList(popup);
       const xpubBefore = await readDisplayedXpubLine(popup);
       await popup.getByRole('button', { name: /^Back$/ }).click();
-      await expect(popup.getByText('Loaded Identities')).toBeVisible({ timeout: 15000 });
+      await expect(popup.getByText('Accounts', { exact: true })).toBeVisible({ timeout: 15000 });
 
       const pLocal = await context.newPage();
       const pLo = await context.newPage();
@@ -56,7 +56,7 @@ test.describe('Shared identity across two site origins (same seed)', () => {
       }
 
       await openExtensionPopup(popup, extensionId);
-      await expect(popup.getByText('Loaded Identities').first()).toBeVisible({ timeout: 20000 });
+      await expect(popup.getByText('Accounts', { exact: true }).first()).toBeVisible({ timeout: 20000 });
       await openFirstIdentityInList(popup);
       const xpubAfter = await readDisplayedXpubLine(popup);
 

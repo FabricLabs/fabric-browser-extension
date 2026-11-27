@@ -79,7 +79,14 @@ export async function requestHubRegtestFaucet (
   amountSats = Math.min(amountSats, FAUCET_MAX_SATS);
 
   const url = `${base}/services/bitcoin/faucet`;
-  const { ok, status, data } = await fetchJsonPost(url, { address, amountSats });
+  let response: { ok: boolean; status: number; data: unknown };
+  try {
+    response = await fetchJsonPost(url, { address, amountSats });
+  } catch (e: unknown) {
+    const aborted = e instanceof Error && e.name === 'AbortError';
+    return { ok: false, error: aborted ? 'Faucet request timed out.' : 'Could not reach the Fabric hub faucet.' };
+  }
+  const { ok, status, data } = response;
 
   const d = data && typeof data === 'object' ? (data as Record<string, unknown>) : {};
   if (!ok) {
