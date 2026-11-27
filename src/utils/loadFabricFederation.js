@@ -3,7 +3,7 @@
 /**
  * Load `@fabric/core` `types/federation` (named federations: descriptors,
  * withdrawals, member messages) with the `types/message`, `types/key`, and
- * `functions/fabricUri` of the same tree: FABRIC_CORE when set, else this
+ * `Message` `fabric:` helpers of the same tree: FABRIC_CORE when set, else this
  * package's `node_modules`.
  *
  * Only a core whose `Federation` carries the member messages qualifies.
@@ -12,6 +12,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const messageFabricUri = require('./messageFabricUri');
 
 function coreRoots () {
   const roots = [];
@@ -25,11 +26,12 @@ function loadFabricFederation () {
   for (const root of coreRoots()) {
     const file = path.join(root, 'types', 'federation.js');
     if (!fs.existsSync(file) || !fs.readFileSync(file, 'utf8').includes('MESSAGE_TYPES')) continue;
+    const Message = require(path.join(root, 'types', 'message.js'));
     return {
       Federation: require(file),
-      Message: require(path.join(root, 'types', 'message.js')),
+      Message,
       Key: require(path.join(root, 'types', 'key.js')),
-      fabricUri: require(path.join(root, 'functions', 'fabricUri.js'))
+      fabricUri: messageFabricUri(Message)
     };
   }
   return { Federation: null, Message: null, Key: null, fabricUri: null };

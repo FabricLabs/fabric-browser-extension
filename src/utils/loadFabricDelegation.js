@@ -3,7 +3,7 @@
 /**
  * Load `@fabric/core` delegation (`types/delegation`: the `Delegation` class,
  * whose statics build and read the frames) with the `types/key` and
- * `functions/fabricUri` of the same tree:
+ * `Message` `fabric:` helpers of the same tree:
  * FABRIC_CORE when set, else this package's `node_modules`.
  *
  * Only a core whose pairing frames carry the author's `pubkey` qualifies.
@@ -12,6 +12,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const messageFabricUri = require('./messageFabricUri');
 
 function coreRoots () {
   const roots = [];
@@ -31,11 +32,12 @@ function loadFabricDelegation () {
   for (const root of coreRoots()) {
     if (!qualifies(root)) continue;
     const Delegation = require(path.join(root, 'types', 'delegation.js'));
+    const Message = require(path.join(root, 'types', 'message.js'));
     return {
       delegation: Delegation,
       Delegation,
       Key: require(path.join(root, 'types', 'key.js')),
-      fabricUri: require(path.join(root, 'functions', 'fabricUri.js'))
+      fabricUri: messageFabricUri(Message)
     };
   }
   return { delegation: null, Delegation: null, Key: null, fabricUri: null };

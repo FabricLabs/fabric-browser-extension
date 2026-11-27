@@ -36,13 +36,15 @@ function fabricCoreRoots () {
 function resolveFabricPassportCoreRoot () {
   for (const root of fabricCoreRoots()) {
     const file = path.join(root, 'functions', 'passport.js');
-    if (fs.existsSync(file) && fs.existsSync(path.join(root, 'functions', 'accountKeys.js')) &&
-        fs.readFileSync(file, 'utf8').includes('createPeerChallenge')) {
+    const keyFile = path.join(root, 'types', 'key.js');
+    if (fs.existsSync(file) && fs.existsSync(keyFile) &&
+        fs.readFileSync(file, 'utf8').includes('createPeerChallenge') &&
+        fs.readFileSync(keyFile, 'utf8').includes('Key.Accounts')) {
       console.log(`[webpack] Passport core: ${root}`);
       return root;
     }
   }
-  throw new Error('Passport needs @fabric/core with functions/passport.js (peer sessions) and functions/accountKeys.js (set FABRIC_CORE to a core checkout)');
+  throw new Error('Passport needs @fabric/core with functions/passport.js (peer sessions) and Key.Accounts (set FABRIC_CORE to a core checkout)');
 }
 /** Core tree for named federations (same order as `src/utils/loadFabricFederation.js`). */
 function resolveFabricFederationCoreRoot () {
@@ -140,6 +142,13 @@ module.exports = (env, argv) => {
         fs: false,
         // Core `Service` lazy-requires `Peer` (TCP); never reached in the extension.
         net: false,
+        // Program isolation uses worker_threads only on Node. The extension loads
+        // Program through federation contracts; a page awaits a Worker, and this
+        // CSP does not allow a blob worker until a same-origin workerUrl is passed.
+        child_process: false,
+        worker_threads: false,
+        // `Key` reads `~/.fabric/wallet.json` through `os.homedir` on Node only.
+        os: require.resolve('os-browserify/browser'),
         path: require.resolve('path-browserify'),
         crypto: require.resolve('@fabric/http/functions/browserCrypto'),
         stream: require.resolve('stream-browserify'),

@@ -13,7 +13,8 @@
  *   **Fabric/Message** tagged hash (`signWithKey` / `verifyWithKey`). This is what peers and services exchange.
  * - **Bitcoin Signed Message** — ECDSA + Bitcoin Core’s message prefix; used here for **RPC** / wallet UX only.
  *
- * Passport’s saved Bitcoin node / hub rows use **`passportNodeListId`**: a short stable **UI storage key**,
+ * Passport’s saved Bitcoin node / hub rows use **`passportNodeListId`**
+ * (`settings/nodeListId.ts`): a short stable **UI storage key**,
  * not `Actor#id` and not a Fabric **`Message`**.
  *
  * @see https://github.com/FabricLabs/hub.fabric.pub — components/IdentityManager.js, functions/fabricBrowserIdentityDev.js
@@ -28,23 +29,20 @@ import * as ecc from 'tiny-secp256k1';
 import * as bitcoin from 'bitcoinjs-lib';
 import { FABRIC_STATE_STORAGE_KEY } from '../constants/fabricExtension';
 import { privateGet, privateRemove, privateSet } from '../utils/privateStore';
-import { PASSPORT_EXTENSION_VERSION } from '../constants/extensionVersion';
 import { swallowNonFatal } from '../utils/nonFatal';
 import SiteLoginPrompt from './SiteLoginPrompt';
 import DelegationRequestPrompt from './DelegationRequestPrompt';
 import PaymentRequestPrompt from './PaymentRequestPrompt';
-import LinkedSignersPanel from './LinkedSignersPanel';
-import HubAllowlistPanel from './HubAllowlistPanel';
 import FederationsPanel from './FederationsPanel';
+import SettingsView from './settings/SettingsView';
+import { DEFAULT_BITCOIN_NODES, DEFAULT_FABRIC_NODES, type BitcoinNode, type FabricNode } from './settings/nodeCatalog';
+import { clampAutoLockMinutes, DEFAULT_AUTO_LOCK_MINUTES } from './settings/lockTimer';
 import crypto from 'crypto';
 
 bitcoin.initEccLib(ecc);
 
 // Semantic UI
-import { Button, Message, Loader, Segment, Form, Input, TextArea, List, Icon, Modal, Popup, Table } from 'semantic-ui-react';
-import { FabricBackgroundMeshActions } from './FabricBackgroundMeshActions';
-import { PageIndexPanel } from './PageIndexPanel';
-import { MarketAgentPanel } from './MarketAgentPanel';
+import { Button, Message, Loader, Segment, Form, Input, TextArea, List, Icon, Modal, Popup } from 'semantic-ui-react';
 import { DEFAULT_FABRIC_HUB_ORIGINS } from '../utils/fabricHubAllowlist';
 import {
   ACCOUNT_NETWORKS,
@@ -79,7 +77,6 @@ import {
 } from '../utils/passportVault';
 
 // Services
-import { testFabricSignalingReachable, type FabricSignalingTestOk } from '../fabric/fabricWebRTCPeering';
 import { touchFabricActivity, readFabricActivityMs } from '../utils/fabricActivityStorage';
 import {
   fetchWalletBalance,
@@ -245,85 +242,8 @@ type PasswordState = 'input' | 'verifying' | 'error';
 /** One account + network of the Passport vault (keys only on the current one, while unlocked). */
 type Identity = VaultIdentity;
 
-interface BitcoinNode {
-  id: string;
-  connectionString: string;
-  isActive: boolean;
-}
-
-/** Hub base URL for WebSocket signaling (WebRTC); same shape as Bridge `hubAddress`. */
-interface FabricNode {
-  id: string;
-  hubAddress: string;
-  isActive: boolean;
-}
-
-interface BitcoinNodeTestResult {
-  chain: string;
-  blocks: number;
-  headers: number;
-  bestblockhash: string;
-  difficulty: number;
-  chainwork: string;
-  mediantime: number;
-}
-
-/** Public Hub JSON-RPC passthrough (`verifymessage`, etc.); no wallet RPC without bitcoind behind the Hub. */
-const HUB_FABRIC_BITCOIN_RPC = 'https://hub.fabric.pub/services/bitcoin';
-
-/** Default Fabric playnet-style bitcoind RPC (regtest); only the host changes for LAN presets. */
-function playnetBitcoindUrl (host: string): string {
-  return `http://ahp7iuGhae8mooBahFaYieyaixei6too:naiRe9wo5vieFayohje5aegheenoh4ee@${host}:20444`;
-}
-
-const DEFAULT_BITCOIN_NODES: BitcoinNode[] = [
-  { id: 'hub-fabric-pub', connectionString: HUB_FABRIC_BITCOIN_RPC, isActive: true },
-  { id: 'playnet-regtest', connectionString: playnetBitcoindUrl('127.0.0.1'), isActive: false },
-  { id: 'lan-192-168-50-5', connectionString: playnetBitcoindUrl('192.168.50.5'), isActive: false },
-  { id: 'lan-192-168-50-2', connectionString: playnetBitcoindUrl('192.168.50.2'), isActive: false }
-];
-
-/** Quick-fill for the "Add node" field (same URLs as defaults). */
-const BITCOIN_HOST_PRESETS: ReadonlyArray<{ id: string; label: string; connectionString: string }> = [
-  { id: 'hub', label: 'hub.fabric.pub', connectionString: HUB_FABRIC_BITCOIN_RPC },
-  { id: 'playnet', label: '127.0.0.1 (playnet)', connectionString: playnetBitcoindUrl('127.0.0.1') },
-  { id: 'lan50-5', label: '192.168.50.5', connectionString: playnetBitcoindUrl('192.168.50.5') },
-  { id: 'lan50-2', label: '192.168.50.2', connectionString: playnetBitcoindUrl('192.168.50.2') }
-];
-
-const HUB_FABRIC_HUB_BASE = 'https://hub.fabric.pub';
-const RELAY_GOON_HUB_BASE = 'https://relay.goon.vc';
-
-function fabricHubAt (host: string, port: number): string {
-  const p = host.includes(':') ? `[${host}]` : host;
-  return `http://${p}:${port}`;
-}
-
-const DEFAULT_FABRIC_NODES: FabricNode[] = [
-  { id: 'hub-fabric-pub', hubAddress: HUB_FABRIC_HUB_BASE, isActive: true },
-  { id: 'relay-goon-vc', hubAddress: RELAY_GOON_HUB_BASE, isActive: false },
-  /** Local `@fabric/hub`: `node scripts/hub.js` (HTTP API + SPA). */
-  { id: 'local-hub-http', hubAddress: fabricHubAt('127.0.0.1', 8080), isActive: false },
-  /** Local Hub webpack dev server (proxies `/services`, `/settings` → :8080). */
-  { id: 'local-hub-webpack', hubAddress: fabricHubAt('127.0.0.1', 3000), isActive: false },
-  { id: 'local-passport-serve', hubAddress: fabricHubAt('127.0.0.1', 3003), isActive: false },
-  { id: 'lan-192-168-50-5', hubAddress: fabricHubAt('192.168.50.5', 3003), isActive: false },
-  { id: 'lan-192-168-50-2', hubAddress: fabricHubAt('192.168.50.2', 3003), isActive: false }
-];
-
-const FABRIC_HUB_PRESETS: ReadonlyArray<{ id: string; label: string; hubAddress: string }> = [
-  { id: 'hub', label: 'hub.fabric.pub', hubAddress: HUB_FABRIC_HUB_BASE },
-  { id: 'relay', label: 'relay.goon.vc', hubAddress: RELAY_GOON_HUB_BASE },
-  { id: 'local-8080', label: '127.0.0.1:8080 (local Hub)', hubAddress: fabricHubAt('127.0.0.1', 8080) },
-  { id: 'local-3000', label: '127.0.0.1:3000 (webpack dev)', hubAddress: fabricHubAt('127.0.0.1', 3000) },
-  { id: 'local', label: '127.0.0.1:3003', hubAddress: fabricHubAt('127.0.0.1', 3003) },
-  { id: 'lan50-5', label: '192.168.50.5:3003', hubAddress: fabricHubAt('192.168.50.5', 3003) },
-  { id: 'lan50-2', label: '192.168.50.2:3003', hubAddress: fabricHubAt('192.168.50.2', 3003) }
-];
-
-// Move DEFAULT_SETTINGS before state declarations
 const DEFAULT_SETTINGS = {
-  autoLockTimer: 15,
+  autoLockTimer: DEFAULT_AUTO_LOCK_MINUTES,
   bitcoinNodes: DEFAULT_BITCOIN_NODES,
   fabricNodes: DEFAULT_FABRIC_NODES,
   /** Optional; must match Hub `FABRIC_BITCOIN_XPUB_QUERY_TOKEN` when the hub gates xpub scans. */
@@ -339,10 +259,9 @@ interface Settings {
 
 function normalizeSettings (raw: Partial<Settings> | undefined): Settings {
   const rawTimer = raw?.autoLockTimer;
-  const autoLockTimer =
-    typeof rawTimer === 'number' && Number.isFinite(rawTimer)
-      ? Math.max(0, Math.min(720, Math.trunc(rawTimer)))
-      : DEFAULT_SETTINGS.autoLockTimer;
+  const autoLockTimer = typeof rawTimer === 'number'
+    ? clampAutoLockMinutes(rawTimer)
+    : DEFAULT_AUTO_LOCK_MINUTES;
   return {
     autoLockTimer,
     bitcoinNodes: Array.isArray(raw?.bitcoinNodes) ? raw.bitcoinNodes : DEFAULT_SETTINGS.bitcoinNodes,
@@ -393,16 +312,6 @@ const timeAgo = (date: string) => {
   interval = seconds / 60;
   if (interval > 1) return Math.floor(interval) + ' minutes ago';
   return Math.floor(seconds) + ' seconds ago';
-};
-
-/**
- * Deterministic id for Passport’s saved connection list (extension storage).
- * **Not** `@fabric/core` `Actor#id` (Hash256 chain over `toGenericMessage`) and **not** a `Message` address.
- */
-const passportNodeListId = (content: string): string => {
-  const hash = crypto.createHash('sha256');
-  hash.update(content);
-  return `node${hash.digest('hex').slice(0, 16)}`;
 };
 
 /** POST target: bitcoind root, or Hub `.../services/bitcoin` JSON-RPC. */
@@ -564,20 +473,9 @@ const IdentityManager = () => {
   const [signature, setSignature] = useState<string | null>(null);
   const [showSignature, setShowSignature] = useState<boolean>(false);
   const [verificationResult, setVerificationResult] = useState<string | null>(null);
-  const [newNodeConnection, setNewNodeConnection] = useState<string>('');
   const [messageToVerify, setMessageToVerify] = useState<string>('');
   const [signatureToVerify, setSignatureToVerify] = useState<string>('');
   const [pubkeyToVerify, setPubkeyToVerify] = useState<string>('');
-  const [testingNode, setTestingNode] = useState<BitcoinNode | null>(null);
-  const [testResult, setTestResult] = useState<BitcoinNodeTestResult | null>(null);
-  const [testError, setTestError] = useState<string | null>(null);
-  const [isTestModalOpen, setIsTestModalOpen] = useState<boolean>(false);
-
-  const [newFabricHubAddress, setNewFabricHubAddress] = useState<string>('');
-  const [testingFabricNode, setTestingFabricNode] = useState<FabricNode | null>(null);
-  const [fabricTestError, setFabricTestError] = useState<string | null>(null);
-  const [fabricTestOk, setFabricTestOk] = useState<FabricSignalingTestOk | null>(null);
-  const [isFabricTestModalOpen, setIsFabricTestModalOpen] = useState<boolean>(false);
   const [signUnlockPassword, setSignUnlockPassword] = useState('');
   const [signUnlockError, setSignUnlockError] = useState<string | null>(null);
   const [isUnlocking, setIsUnlocking] = useState(false);
@@ -3226,461 +3124,28 @@ const IdentityManager = () => {
     </Message>
   );
 
-  const renderNodeList = () => (
-    <List divided relaxed>
-      {settings.bitcoinNodes.map(node => (
-        <List.Item key={node.id}>
-          <List.Content>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '1em' }}>
-              <div style={{ minWidth: 0, flex: 1 }}>
-                <List.Header style={{ fontFamily: 'monospace', fontSize: '0.8em' }}>
-                  {node.id}
-                </List.Header>
-                <List.Description style={{
-                  fontFamily: 'monospace',
-                  fontSize: '0.8em'
-                }}>
-                  <Popup
-                    content={node.connectionString}
-                    trigger={<span style={{ cursor: 'pointer' }}>{truncateMiddle(node.connectionString, 20, 10)}</span>}
-                    position='top left'
-                    style={{ maxWidth: '500px', wordBreak: 'break-all' }}
-                  />
-                </List.Description>
-              </div>
-              <div style={{ flexShrink: 0 }}>
-                <Button.Group size='mini'>
-                  <Button
-                    icon='plug'
-                    color='blue'
-                    onClick={() => handleTestNode(node)}
-                    title='Test connection'
-                  />
-                  <Button
-                    icon={node.isActive ? 'pause' : 'play'}
-                    color={node.isActive ? 'orange' : 'green'}
-                    onClick={() => handleToggleNode(node.id)}
-                    title={node.isActive ? 'Deactivate (RPC signing uses the active node)' : 'Set active for RPC'}
-                  />
-                  <Button
-                    icon='trash'
-                    color='red'
-                    onClick={() => handleRemoveNode(node.id)}
-                    title='Remove node'
-                  />
-                </Button.Group>
-              </div>
-            </div>
-          </List.Content>
-        </List.Item>
-      ))}
-      <List.Item>
-        <List.Content>
-          <Form>
-            <Form.Field>
-              <label>Bitcoin Host</label>
-              <Input
-                placeholder="https://hub.fabric.pub/services/bitcoin or http://user:pass@host:port"
-                value={newNodeConnection}
-                onChange={(e) => setNewNodeConnection(e.target.value)}
-              />
-              <Button.Group size='mini' style={{ marginTop: '0.5em', flexWrap: 'wrap' }}>
-                {BITCOIN_HOST_PRESETS.map(p => (
-                  <Button
-                    key={p.id}
-                    type='button'
-                    content={p.label}
-                    onClick={() => setNewNodeConnection(p.connectionString)}
-                  />
-                ))}
-              </Button.Group>
-            </Form.Field>
-            <Button
-              primary
-              content='Add Node'
-              onClick={handleAddNode}
-              disabled={!newNodeConnection.trim()}
-            />
-          </Form>
-        </List.Content>
-      </List.Item>
-    </List>
-  );
-
-  const renderFabricNodeList = () => (
-    <List divided relaxed>
-      {settings.fabricNodes.map(node => (
-        <List.Item key={node.id}>
-          <List.Content>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '1em' }}>
-              <div style={{ minWidth: 0, flex: 1 }}>
-                <List.Header style={{ fontFamily: 'monospace', fontSize: '0.8em' }}>
-                  {node.id}
-                </List.Header>
-                <List.Description style={{
-                  fontFamily: 'monospace',
-                  fontSize: '0.8em'
-                }}>
-                  <Popup
-                    content={node.hubAddress}
-                    trigger={<span style={{ cursor: 'pointer' }}>{truncateMiddle(node.hubAddress, 22, 10)}</span>}
-                    position='top left'
-                    style={{ maxWidth: '500px', wordBreak: 'break-all' }}
-                  />
-                </List.Description>
-              </div>
-              <div style={{ flexShrink: 0 }}>
-                <Button.Group size='mini'>
-                  <Button
-                    icon='plug'
-                    color='blue'
-                    onClick={() => handleTestFabricNode(node)}
-                    title='Test WebSocket signaling'
-                  />
-                  <Button
-                    icon={node.isActive ? 'pause' : 'play'}
-                    color={node.isActive ? 'orange' : 'green'}
-                    onClick={() => handleToggleFabricNode(node.id)}
-                    title={node.isActive ? 'Deactivate (background mesh uses the active hub)' : 'Set active for mesh'}
-                  />
-                  <Button
-                    icon='trash'
-                    color='red'
-                    onClick={() => handleRemoveFabricNode(node.id)}
-                    title='Remove Fabric node'
-                  />
-                </Button.Group>
-              </div>
-            </div>
-          </List.Content>
-        </List.Item>
-      ))}
-      <List.Item>
-        <List.Content>
-          <Form>
-            <Form.Field>
-              <label>Fabric Hub (signaling)</label>
-              <Input
-                placeholder="https://hub.fabric.pub or http://127.0.0.1:3003"
-                value={newFabricHubAddress}
-                onChange={(e) => setNewFabricHubAddress(e.target.value)}
-              />
-              <Button.Group size='mini' style={{ marginTop: '0.5em', flexWrap: 'wrap' }}>
-                {FABRIC_HUB_PRESETS.map(p => (
-                  <Button
-                    key={p.id}
-                    type='button'
-                    content={p.label}
-                    onClick={() => setNewFabricHubAddress(p.hubAddress)}
-                  />
-                ))}
-              </Button.Group>
-            </Form.Field>
-            <Button
-              primary
-              content='Add Fabric Node'
-              onClick={handleAddFabricNode}
-              disabled={!newFabricHubAddress.trim()}
-            />
-          </Form>
-        </List.Content>
-      </List.Item>
-    </List>
-  );
-
-  const renderFabricTestModal = () => (
-    <Modal
-      open={isFabricTestModalOpen}
-      onClose={() => setIsFabricTestModalOpen(false)}
-      size='small'
-    >
-      <Modal.Header>
-        Test Fabric signaling (WebSocket)
-        {testingFabricNode && (
-          <div style={{ fontSize: '0.8em', marginTop: '0.5em', fontFamily: 'monospace' }}>
-            {testingFabricNode.id}
-          </div>
-        )}
-      </Modal.Header>
-      <Modal.Content>
-        {testingFabricNode && (
-          <div>
-            {fabricTestError ? (
-              <Message negative>
-                <Message.Header>Connection Failed</Message.Header>
-                <p>{fabricTestError}</p>
-              </Message>
-            ) : !fabricTestOk ? (
-              <div style={{ textAlign: 'center', padding: '2em' }}>
-                <Loader active inline='centered' />
-                <p style={{ marginTop: '1em' }}>Opening WebSocket…</p>
-              </div>
-            ) : (
-              <Message positive>
-                <Message.Header>Signaling endpoint reachable</Message.Header>
-                <p style={{ wordBreak: 'break-all', fontFamily: 'monospace', fontSize: '0.85em' }}>
-                  {fabricTestOk.url}
-                </p>
-                <p style={{ marginTop: '0.5em' }}>
-                  Subprotocol: <code>{fabricTestOk.subprotocol}</code>
-                </p>
-              </Message>
-            )}
-          </div>
-        )}
-      </Modal.Content>
-      <Modal.Actions>
-        <Button onClick={() => setIsFabricTestModalOpen(false)}>
-          Close
-        </Button>
-      </Modal.Actions>
-    </Modal>
-  );
-
-  const renderTestNodeModal = () => (
-    <Modal
-      open={isTestModalOpen}
-      onClose={() => setIsTestModalOpen(false)}
-      size='small'
-    >
-      <Modal.Header>
-        Test Node Connection
-        {testingNode && (
-          <div style={{ fontSize: '0.8em', marginTop: '0.5em', fontFamily: 'monospace' }}>
-            {testingNode.id}
-          </div>
-        )}
-      </Modal.Header>
-      <Modal.Content>
-        {testingNode && (
-          <div>
-            {testError ? (
-              <Message negative>
-                <Message.Header>Connection Failed</Message.Header>
-                <p>{testError}</p>
-              </Message>
-            ) : !testResult ? (
-              <div style={{ textAlign: 'center', padding: '2em' }}>
-                <Loader active inline='centered' />
-                <p style={{ marginTop: '1em' }}>Testing connection...</p>
-              </div>
-            ) : (
-              <div>
-                <Message positive>
-                  <Message.Header>Connection Successful</Message.Header>
-                  <p>Node is online and responding</p>
-                </Message>
-                <Table definition>
-                  <Table.Body>
-                    <Table.Row>
-                      <Table.Cell>Chain</Table.Cell>
-                      <Table.Cell>{testResult.chain}</Table.Cell>
-                    </Table.Row>
-                    <Table.Row>
-                      <Table.Cell>Blocks</Table.Cell>
-                      <Table.Cell>{testResult.blocks}</Table.Cell>
-                    </Table.Row>
-                    <Table.Row>
-                      <Table.Cell>Headers</Table.Cell>
-                      <Table.Cell>{testResult.headers}</Table.Cell>
-                    </Table.Row>
-                    <Table.Row>
-                      <Table.Cell>Best Block</Table.Cell>
-                      <Table.Cell style={{
-                        fontFamily: 'monospace',
-                        fontSize: '0.8em',
-                        wordBreak: 'break-all'
-                      }}>
-                        {testResult.bestblockhash}
-                      </Table.Cell>
-                    </Table.Row>
-                    <Table.Row>
-                      <Table.Cell>Difficulty</Table.Cell>
-                      <Table.Cell>{testResult.difficulty}</Table.Cell>
-                    </Table.Row>
-                    <Table.Row>
-                      <Table.Cell>Chain Work</Table.Cell>
-                      <Table.Cell style={{ fontFamily: 'monospace' }}>{testResult.chainwork}</Table.Cell>
-                    </Table.Row>
-                    <Table.Row>
-                      <Table.Cell>Median Time</Table.Cell>
-                      <Table.Cell>{new Date(testResult.mediantime * 1000).toLocaleString()}</Table.Cell>
-                    </Table.Row>
-                  </Table.Body>
-                </Table>
-              </div>
-            )}
-          </div>
-        )}
-      </Modal.Content>
-      <Modal.Actions>
-        <Button onClick={() => setIsTestModalOpen(false)}>
-          Close
-        </Button>
-      </Modal.Actions>
-    </Modal>
-  );
-
   const renderSettings = () => (
-    <Message className="fade-in">
-      <Message.Header>Settings</Message.Header>
-      <Message.Content>
-        <Segment basic>
-          <h4>Identity Management</h4>
-          <List divided relaxed>
-            <List.Item>
-              <List.Content>
-                <List.Header>Auto-Lock Timer</List.Header>
-                <List.Description>
-                  <Form.Field>
-                    <label>Lock wallet after inactivity (minutes, 0 = off):</label>
-                    <Input
-                      type="number"
-                      min={0}
-                      max={720}
-                      value={settings.autoLockTimer}
-                      onChange={(e) => {
-                        const v = parseInt(e.target.value, 10);
-                        const n = Number.isNaN(v) ? DEFAULT_SETTINGS.autoLockTimer : Math.max(0, Math.min(720, v));
-                        handleSettingsChange('autoLockTimer', n);
-                      }}
-                      fluid
-                    />
-                    <p style={{ marginTop: '0.5em', fontSize: '0.85em', color: 'rgba(255,255,255,0.65)' }}>
-                      After this many minutes without keyboard or pointer activity in the popup, Passport locks: the open master key and any seed phrase in memory are cleared. The timer uses the same clock when you close and reopen the popup.
-                    </p>
-                  </Form.Field>
-                </List.Description>
-              </List.Content>
-            </List.Item>
-            <List.Item>
-              <List.Content>
-                <List.Header>Lock now</List.Header>
-                <List.Description>
-                  <Button
-                    size="small"
-                    disabled={!masterXprv}
-                    onClick={() => {
-                      performAutoLock();
-                      setShowAutoLockBanner(false);
-                    }}
-                    content={masterXprv ? 'Lock Passport' : 'Locked'}
-                  />
-                </List.Description>
-              </List.Content>
-            </List.Item>
-          </List>
-
-          <h4 style={{ marginTop: '2em' }}>Bitcoin Nodes</h4>
-          {renderNodeList()}
-          {renderTestNodeModal()}
-          <Form.Field style={{ marginTop: '1em', maxWidth: '32rem' }}>
-            <label style={{ color: 'rgba(255,255,255,0.9)' }}>Hub xpub query token (optional)</label>
-            <Input
-              type="password"
-              autoComplete="off"
-              placeholder="Matches FABRIC_BITCOIN_XPUB_QUERY_TOKEN when the hub requires it"
-              value={settings.xpubQueryToken}
-              onChange={(e) => handleSettingsChange('xpubQueryToken', e.target.value)}
-              fluid
-            />
-            <p style={{ marginTop: '0.5em', fontSize: '0.85em', color: 'rgba(255,255,255,0.65)' }}>
-              When the Hub gates watch-only <code style={{ fontSize: '0.85em' }}>GET /services/bitcoin/xpub</code> (balance and transaction scans), paste the same shared secret here. Leave empty for hubs that allow anonymous xpub queries.
-            </p>
-          </Form.Field>
-
-          <h4 style={{ marginTop: '2em' }}>Fabric Nodes</h4>
-          <p style={{ marginBottom: '0.75em', color: 'rgba(255,255,255,0.85)' }}>
-            WebRTC data channels use the Hub WebSocket for signaling (same as hub.fabric.pub Bridge). Test opens <code style={{ fontSize: '0.85em' }}>wss://…/</code> then closes. Offscreen mesh registers via <code>RegisterWebRTCPeer</code>, discovers peers, completes offer/answer, and relays binary AMP (<code>CONTRACT_MESSAGE</code> / fabric-message) through <code>RelayFromWebRTC</code> — no HTTP for mesh traffic.
-          </p>
-          <FabricBackgroundMeshActions fabricNodes={settings.fabricNodes} />
-          {renderFabricNodeList()}
-          {renderFabricTestModal()}
-
-          <h4 style={{ marginTop: '2em' }}>Page index</h4>
-          <p style={{ marginBottom: '0.75em', color: 'rgba(255,255,255,0.85)' }}>
-            Pages this Passport has captured as Fabric blob trees. Peers locate chunks by Tree root and blob hash only; titles and URLs never leave this device.
-          </p>
-          <PageIndexPanel />
-
-          <h4 style={{ marginTop: '2em' }}>Budget agent</h4>
-          <p style={{ marginBottom: '0.75em', color: 'rgba(255,255,255,0.85)' }}>
-            Set a sats budget and let Passport plan the cheapest / nearest / most reliable provider per blob. Paid blobs wait for a funder; free blobs are requested at once.
-          </p>
-          <MarketAgentPanel />
-
-          <h4 style={{ marginTop: '2em' }}>Security &amp; privacy</h4>
-          <List divided relaxed>
-            <List.Item>
-              <List.Content>
-                <List.Header>Linked signers</List.Header>
-                <List.Description>
-                  <LinkedSignersPanel hubs={pairingHubs} disabled={!signingIdentity?.privateKeyHex} />
-                </List.Description>
-              </List.Content>
-            </List.Item>
-            <List.Item>
-              <List.Content>
-                <List.Header>Trusted hubs</List.Header>
-                <List.Description>
-                  <HubAllowlistPanel />
-                </List.Description>
-              </List.Content>
-            </List.Item>
-            <List.Item>
-              <List.Content>
-                <List.Header>Backup & Restore</List.Header>
-                <List.Description>
-                  <p>
-                    The backup file holds your sealed master key (still locked with your lock password) and
-                    the accounts you have opened. It has no seed phrase; keep that written down separately.
-                  </p>
-                  <Button.Group>
-                    <Button
-                      primary
-                      content='Export Backup'
-                      disabled={!vault}
-                      onClick={handleExportWallet}
-                    />
-                  </Button.Group>
-                </List.Description>
-              </List.Content>
-            </List.Item>
-            <List.Item>
-              <List.Content>
-                <List.Header>Clear All Data</List.Header>
-                <List.Description>
-                  <p>Remove your Passport, its accounts, and settings from this device.</p>
-                  <Button
-                    negative
-                    content='Clear Data'
-                    onClick={() => openEraseConfirm('erase_all')}
-                  />
-                </List.Description>
-              </List.Content>
-            </List.Item>
-          </List>
-
-          <h4 style={{ marginTop: '2em' }}>About</h4>
-          <List divided relaxed>
-            <List.Item>
-              <List.Content>
-                <List.Header>Version</List.Header>
-                <List.Description>{PASSPORT_EXTENSION_VERSION}</List.Description>
-              </List.Content>
-            </List.Item>
-          </List>
-        </Segment>
-
-        <Button.Group vertical fluid style={{ marginTop: '2em' }}>
-          <Button
-            color='black'
-            content='Back'
-            onClick={() => setState('logged_in')}
-          />
-        </Button.Group>
-      </Message.Content>
-    </Message>
+    <SettingsView
+      autoLockTimer={settings.autoLockTimer}
+      onAutoLockTimer={(minutes) => handleSettingsChange('autoLockTimer', minutes)}
+      unlocked={!!masterXprv}
+      onLock={() => {
+        performAutoLock();
+        setShowAutoLockBanner(false);
+      }}
+      bitcoinNodes={settings.bitcoinNodes}
+      onBitcoinNodes={(bitcoinNodes) => handleSettingsChange('bitcoinNodes', bitcoinNodes)}
+      xpubQueryToken={settings.xpubQueryToken}
+      onXpubQueryToken={(token) => handleSettingsChange('xpubQueryToken', token)}
+      fabricNodes={settings.fabricNodes}
+      onFabricNodes={(fabricNodes) => handleSettingsChange('fabricNodes', fabricNodes)}
+      pairingHubs={pairingHubs}
+      signersDisabled={!signingIdentity?.privateKeyHex}
+      canExport={!!vault}
+      onExport={() => { void handleExportWallet(); }}
+      onClearData={() => openEraseConfirm('erase_all')}
+      onBack={() => setState('logged_in')}
+    />
   );
 
   const renderView = () => {
@@ -3949,124 +3414,6 @@ const IdentityManager = () => {
       setNodeSigninResult({ ok: false, error: e instanceof Error ? e.message : String(e) });
     } finally {
       setNodeSigninBusy(false);
-    }
-  };
-
-  const handleAddNode = () => {
-    if (!newNodeConnection.trim()) return;
-
-    const newNode: BitcoinNode = {
-      id: passportNodeListId(newNodeConnection.trim()),
-      connectionString: newNodeConnection.trim(),
-      isActive: false
-    };
-
-    setSettings(prev => ({
-      ...prev,
-      bitcoinNodes: [...prev.bitcoinNodes, newNode]
-    }));
-
-    setNewNodeConnection('');
-  };
-
-  const handleRemoveNode = (id: string) => {
-    setSettings(prev => ({
-      ...prev,
-      bitcoinNodes: prev.bitcoinNodes.filter(node => node.id !== id)
-    }));
-  };
-
-  const handleToggleNode = (id: string) => {
-    setSettings(prev => ({
-      ...prev,
-      bitcoinNodes: prev.bitcoinNodes.map(node => ({
-        ...node,
-        isActive: node.id === id ? !node.isActive : node.isActive
-      }))
-    }));
-  };
-
-  const handleTestNode = async (node: BitcoinNode) => {
-    setTestingNode(node);
-    setTestResult(null);
-    setTestError(null);
-    setIsTestModalOpen(true);
-
-    try {
-      const headers = buildBitcoinRpcHeaders(node.connectionString);
-      const postUrl = getBitcoinRpcPostUrl(node.connectionString);
-
-      const response = await fetch(postUrl, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({
-          jsonrpc: '2.0',
-          id: 'test',
-          method: 'getblockchaininfo',
-          params: []
-        })
-      });
-
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
-      }
-
-      const data = await response.json();
-      if (data.error) {
-        throw new Error(data.error.message || 'RPC Error');
-      }
-
-      setTestResult(data.result);
-    } catch (error) {
-      setTestError(error instanceof Error ? error.message : 'Unknown error occurred');
-    }
-  };
-
-  const handleAddFabricNode = () => {
-    if (!newFabricHubAddress.trim()) return;
-    const hubAddress = newFabricHubAddress.trim();
-    const newNode: FabricNode = {
-      id: passportNodeListId(`fabric:${hubAddress}`),
-      hubAddress,
-      isActive: false
-    };
-    setSettings(prev => ({
-      ...prev,
-      fabricNodes: [...prev.fabricNodes, newNode]
-    }));
-    setNewFabricHubAddress('');
-  };
-
-  const handleRemoveFabricNode = (id: string) => {
-    setSettings(prev => ({
-      ...prev,
-      fabricNodes: prev.fabricNodes.filter(node => node.id !== id)
-    }));
-  };
-
-  const handleToggleFabricNode = (id: string) => {
-    setSettings(prev => {
-      const activating = !prev.fabricNodes.find(node => node.id === id)?.isActive;
-      return {
-        ...prev,
-        fabricNodes: prev.fabricNodes.map(node => ({
-          ...node,
-          isActive: node.id === id ? activating : node.isActive && !activating
-        }))
-      };
-    });
-  };
-
-  const handleTestFabricNode = async (node: FabricNode) => {
-    setTestingFabricNode(node);
-    setFabricTestOk(null);
-    setFabricTestError(null);
-    setIsFabricTestModalOpen(true);
-    try {
-      const ok = await testFabricSignalingReachable(node.hubAddress, '/');
-      setFabricTestOk(ok);
-    } catch (error) {
-      setFabricTestError(error instanceof Error ? error.message : 'Unknown error occurred');
     }
   };
 

@@ -52,15 +52,15 @@ export function PageIndexPanel (): React.ReactElement {
 
   return (
     <div className="fabric-page-index">
-      <Button size="mini" basic inverted onClick={refresh} loading={loading}>Refresh</Button>
+      <Button size="mini" basic onClick={refresh} loading={loading}>Refresh</Button>
       {error && <Message negative size="mini">{error}</Message>}
       {!error && rows.length === 0 && (
-        <p style={{ marginTop: '0.5em', fontSize: '0.85em', color: 'rgba(255,255,255,0.65)' }}>
+        <p style={{ marginTop: '0.5em', fontSize: '0.85em', color: 'rgba(0, 0, 0, 0.62)' }}>
           No pages indexed yet. Captured pages are split into 24 KiB blobs; peers locate them by Tree root.
         </p>
       )}
       {rows.length > 0 && (
-        <List divided relaxed inverted>
+        <List divided relaxed>
           {rows.map((row) => (
             <List.Item key={row.merkleRootHex + row.url}>
               <List.Content>
@@ -76,7 +76,6 @@ export function PageIndexPanel (): React.ReactElement {
                   <Button
                     size="mini"
                     basic
-                    inverted
                     compact
                     title="Ask the budget agent to acquire this blob tree"
                     onClick={() => chrome.runtime.sendMessage({ type: 'FABRIC_MARKET_WANT', merkleRootHex: row.merkleRootHex, blobTotal: row.blobTotal }, () => { void chrome.runtime.lastError; })}

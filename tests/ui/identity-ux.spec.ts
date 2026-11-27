@@ -58,6 +58,7 @@ test.describe('@fabric/passport logged-in UX', () => {
       await loginWithTestMnemonic(page, extensionId);
       await page.getByRole('button', { name: /^Settings$/ }).click();
       await expect(page.locator('.message .header').filter({ hasText: /^Settings$/ })).toBeVisible();
+      await page.getByRole('button', { name: 'Fabric', exact: true }).click();
       await expect(page.getByRole('heading', { name: /Fabric Nodes/i })).toBeVisible();
       await expect(page.getByRole('button', { name: /Register background mesh/i })).toBeVisible();
       const harness = baseURL ?? 'http://localhost:3044';
@@ -69,6 +70,7 @@ test.describe('@fabric/passport logged-in UX', () => {
       await fabricRow.locator('button[title="Set active for mesh"]').click();
       await page.getByRole('button', { name: /Register background mesh/i }).click();
       await expect(page.getByText(/Background mesh registered/i)).toBeVisible({ timeout: 20000 });
+      await page.getByRole('button', { name: /^All settings$/ }).click();
       await page.getByRole('button', { name: /^Back$/ }).click();
       await expect(page.getByText('Accounts', { exact: true })).toBeVisible();
     } finally {
@@ -126,6 +128,7 @@ test.describe('@fabric/passport logged-in UX', () => {
     try {
       await loginWithTestMnemonic(page, extensionId);
       await page.getByRole('button', { name: /^Settings$/ }).click();
+      await page.getByRole('button', { name: 'Lock', exact: true }).click();
       await page.getByRole('button', { name: /^Lock Passport$/ }).click();
 
       const dialog = page.locator('#passport-unlock-screen');

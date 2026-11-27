@@ -88,11 +88,11 @@ export default function LinkedSignersPanel (props: Props): React.ReactElement {
         ask you to sign (you get a notification), and you can ask them. Both sides show a code;
         nothing is shared until you confirm the codes match.
       </p>
-      {locked ? <p style={{ color: 'rgba(255,200,120,0.95)' }}>Unlock Passport to link, change, or unlink a signer.</p> : null}
+      {locked ? <p>Unlock Passport to link, change, or unlink a signer.</p> : null}
       {error ? <Message negative size="small" onDismiss={() => setError(null)}>{error}</Message> : null}
 
       {signers.length === 0 ? (
-        <p style={{ color: 'rgba(255,255,255,0.65)' }}>No linked signers yet.</p>
+        <p>No linked signers yet.</p>
       ) : (
         <List divided>
           {signers.map((s) => {
@@ -134,7 +134,7 @@ export default function LinkedSignersPanel (props: Props): React.ReactElement {
 
       <h5 style={{ marginTop: '0.75em' }}>On this computer</h5>
       {delegates.length === 0 ? (
-        <p style={{ color: 'rgba(255,255,255,0.65)' }}>
+        <p>
           {looked ? 'No signer answered at these addresses.' : 'Look for Fabric Hub or GoonCitizen running on this computer.'}
         </p>
       ) : (
@@ -179,7 +179,7 @@ export default function LinkedSignersPanel (props: Props): React.ReactElement {
             onClick={() => void run(DELEGATION_PAIR_HUB, { hub })} content="Show an invitation" />
         </div>
       ) : (
-        <p style={{ color: 'rgba(255,255,255,0.65)' }}>Add a trusted Hub to link signers on other computers.</p>
+        <p>Add a trusted Hub to link signers on other computers.</p>
       )}
       <Input
         size="small"

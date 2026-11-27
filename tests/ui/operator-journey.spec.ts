@@ -40,7 +40,9 @@ test.describe('@fabric/passport operator journey (chained)', () => {
       await expect(page.getByText('Accounts', { exact: true })).toBeVisible();
 
       await page.getByRole('button', { name: /^Settings$/ }).click();
+      await page.getByRole('button', { name: 'Fabric', exact: true }).click();
       await expect(page.getByRole('heading', { name: /Fabric Nodes/i })).toBeVisible();
+      await page.getByRole('button', { name: /^All settings$/ }).click();
       await page.getByRole('button', { name: /^Back$/ }).click();
       await expect(page.getByText('Accounts', { exact: true })).toBeVisible();
 

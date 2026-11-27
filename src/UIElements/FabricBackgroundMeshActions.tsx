@@ -57,14 +57,14 @@ export function FabricBackgroundMeshActions (props: { fabricNodes: FabricNodeRow
           content='Register background mesh'
           onClick={register}
         />
-        <Button type='button' basic inverted content='Clear registration' onClick={unregister} />
+        <Button type='button' basic content='Clear registration' onClick={unregister} />
       </Button.Group>
       {msg != null && msg !== '' && (
         <Message info size='small' style={{ marginTop: '0.75em' }}>
           {msg}
         </Message>
       )}
-      <p style={{ marginTop: '0.5em', fontSize: '0.82em', color: 'rgba(255,255,255,0.65)' }}>
+      <p style={{ marginTop: '0.5em', fontSize: '0.82em', color: 'rgba(0, 0, 0, 0.62)' }}>
         Any Fabric application can also call <code style={{ fontSize: '0.9em' }}>postMessage</code> to register its node for background mesh.
       </p>
     </div>

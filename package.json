@@ -40,7 +40,7 @@
   },
   "dependencies": {
     "@bitcoinerlab/secp256k1": "=1.2.0",
-    "@fabric/core": "FabricLabs/fabric#feature/testnet5",
+    "@fabric/core": "FabricLabs/fabric#feature/types",
     "@fabric/http": "FabricLabs/fabric-http#feature/passport",
     "bip32": "=5.0.1",
     "bip39": "=3.1.2",
